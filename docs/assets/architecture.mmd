@@ -1,0 +1,14 @@
+graph LR
+    Browser["🌐 Browser SPA\nindex.html"] --> API["⚙️ ASP.NET Core\nMinimal API"]
+    API -->|"/api/login"| Session["会话/用户管理"]
+    API -->|"/api/chat"| Agent["聊天处理\n(LLM 占位)"]
+    API -->|"/api/recommendations"| Recs["🎯 KeyMatch\n关键词推荐"]
+    API -->|"/api/products"| Products["📦 商品目录"]
+
+    Agent <--> HP["💾 SQLite\n(ChatHistory 表)"]
+    Recs --> HP
+    Session <--> HP
+
+    style Browser fill:#e8d5f5
+    style API fill:#d5e8f5
+    style HP fill:#f5e8d5
