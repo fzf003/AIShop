@@ -1710,11 +1710,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Infrastructure\\AIShop.Infrastructure.csproj",
+      "projectUniqueName": "d:\\Hermes\\Projects\\AIShop\\src\\AIShop.Infrastructure\\AIShop.Infrastructure.csproj",
       "projectName": "AIShop.Infrastructure",
-      "projectPath": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Infrastructure\\AIShop.Infrastructure.csproj",
+      "projectPath": "d:\\Hermes\\Projects\\AIShop\\src\\AIShop.Infrastructure\\AIShop.Infrastructure.csproj",
       "packagesPath": "D:\\NuGetPackages",
-      "outputPath": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Infrastructure\\obj\\",
+      "outputPath": "d:\\Hermes\\Projects\\AIShop\\src\\AIShop.Infrastructure\\obj\\",
       "projectStyle": "PackageReference",
       "fallbackFolders": [
         "D:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
@@ -1735,8 +1735,8 @@
         "net10.0": {
           "targetAlias": "net10.0",
           "projectReferences": {
-            "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\AIShop.Core.csproj": {
-              "projectPath": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\AIShop.Core.csproj"
+            "d:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\AIShop.Core.csproj": {
+              "projectPath": "d:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\AIShop.Core.csproj"
             }
           }
         }

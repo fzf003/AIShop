@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "oe7IHFzuz48=",
+  "dgSpecHash": "weTBoQ96N8E=",
   "success": true,
-  "projectFilePath": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\AIShop.Core.csproj",
+  "projectFilePath": "d:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\AIShop.Core.csproj",
   "expectedPackageFiles": [
     "D:\\NuGetPackages\\sonaranalyzer.csharp\\10.27.0.140913\\sonaranalyzer.csharp.10.27.0.140913.nupkg.sha512"
   ],
