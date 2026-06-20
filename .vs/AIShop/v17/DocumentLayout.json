@@ -1,0 +1,117 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "D:\\Hermes\\Projects\\AIShop\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{15B41629-A4B2-468A-878E-F8C5D14728D9}|src\\AIShop.Api\\AIShop.Api.csproj|d:\\hermes\\projects\\aishop\\src\\aishop.api\\agents\\shoppingassistantagent.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{15B41629-A4B2-468A-878E-F8C5D14728D9}|src\\AIShop.Api\\AIShop.Api.csproj|solutionrelative:src\\aishop.api\\agents\\shoppingassistantagent.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{15B41629-A4B2-468A-878E-F8C5D14728D9}|src\\AIShop.Api\\AIShop.Api.csproj|d:\\hermes\\projects\\aishop\\src\\aishop.api\\features\\chat\\chatendpoints.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{15B41629-A4B2-468A-878E-F8C5D14728D9}|src\\AIShop.Api\\AIShop.Api.csproj|solutionrelative:src\\aishop.api\\features\\chat\\chatendpoints.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{7A02029A-F69A-4F72-AE7F-81590C41D297}|src\\AIShop.Infrastructure\\AIShop.Infrastructure.csproj|d:\\hermes\\projects\\aishop\\src\\aishop.infrastructure\\repositories\\repositories.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{7A02029A-F69A-4F72-AE7F-81590C41D297}|src\\AIShop.Infrastructure\\AIShop.Infrastructure.csproj|solutionrelative:src\\aishop.infrastructure\\repositories\\repositories.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{127EDA2D-621E-43D4-A07D-E8B3C4A7CDF0}|src\\AIShop.Core\\AIShop.Core.csproj|d:\\hermes\\projects\\aishop\\src\\aishop.core\\interfaces\\irepositories.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{127EDA2D-621E-43D4-A07D-E8B3C4A7CDF0}|src\\AIShop.Core\\AIShop.Core.csproj|solutionrelative:src\\aishop.core\\interfaces\\irepositories.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{15B41629-A4B2-468A-878E-F8C5D14728D9}|src\\AIShop.Api\\AIShop.Api.csproj|d:\\hermes\\projects\\aishop\\src\\aishop.api\\program.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{15B41629-A4B2-468A-878E-F8C5D14728D9}|src\\AIShop.Api\\AIShop.Api.csproj|solutionrelative:src\\aishop.api\\program.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 7,
+          "Children": [
+            {
+              "$type": "Bookmark",
+              "Name": "ST:131:0:{116d2292-e37d-41cd-a077-ebacac4c8cc4}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:129:0:{1fc202d4-d401-403c-9834-5b218574bb67}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:128:0:{1fc202d4-d401-403c-9834-5b218574bb67}"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "Repositories.cs",
+              "DocumentMoniker": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Infrastructure\\Repositories\\Repositories.cs",
+              "RelativeDocumentMoniker": "src\\AIShop.Infrastructure\\Repositories\\Repositories.cs",
+              "ToolTip": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Infrastructure\\Repositories\\Repositories.cs",
+              "RelativeToolTip": "src\\AIShop.Infrastructure\\Repositories\\Repositories.cs",
+              "ViewState": "AgIAAB8AAAAAAAAAAAAYwCwAAAAZAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-06-17T15:51:22.53Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 3,
+              "Title": "IRepositories.cs",
+              "DocumentMoniker": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\Interfaces\\IRepositories.cs",
+              "RelativeDocumentMoniker": "src\\AIShop.Core\\Interfaces\\IRepositories.cs",
+              "ToolTip": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\Interfaces\\IRepositories.cs",
+              "RelativeToolTip": "src\\AIShop.Core\\Interfaces\\IRepositories.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAADwvwAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-06-17T15:51:19.971Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 4,
+              "Title": "Program.cs",
+              "DocumentMoniker": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Api\\Program.cs",
+              "RelativeDocumentMoniker": "src\\AIShop.Api\\Program.cs",
+              "ToolTip": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Api\\Program.cs",
+              "RelativeToolTip": "src\\AIShop.Api\\Program.cs",
+              "ViewState": "AgIAAC0AAAAAAAAAAADwv0IAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-06-17T15:36:20.71Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "ChatEndpoints.cs",
+              "DocumentMoniker": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Api\\Features\\Chat\\ChatEndpoints.cs",
+              "RelativeDocumentMoniker": "src\\AIShop.Api\\Features\\Chat\\ChatEndpoints.cs",
+              "ToolTip": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Api\\Features\\Chat\\ChatEndpoints.cs",
+              "RelativeToolTip": "src\\AIShop.Api\\Features\\Chat\\ChatEndpoints.cs",
+              "ViewState": "AgIAAJEAAAAAAAAAAAAAAKMAAAA2AAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-06-17T14:38:36.03Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "ShoppingAssistantAgent.cs",
+              "DocumentMoniker": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Api\\Agents\\ShoppingAssistantAgent.cs",
+              "RelativeDocumentMoniker": "src\\AIShop.Api\\Agents\\ShoppingAssistantAgent.cs",
+              "ToolTip": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Api\\Agents\\ShoppingAssistantAgent.cs",
+              "RelativeToolTip": "src\\AIShop.Api\\Agents\\ShoppingAssistantAgent.cs",
+              "ViewState": "AgIAACwAAAAAAAAAAAAEwDQAAAA7AAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-06-17T14:18:11.672Z",
+              "EditorCaption": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

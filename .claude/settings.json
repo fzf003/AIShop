@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//d/HerMes/Projects/AIShop/claude/.claude/commands/opsx/**)"
+    ]
+  }
+}
