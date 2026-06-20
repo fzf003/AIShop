@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "lfbNynFIiZw=",
+  "dgSpecHash": "tWy7wm12fkQ=",
   "success": true,
-  "projectFilePath": "D:\\Hermes\\Projects\\AIShop\\tests\\AIShop.Api.Tests\\AIShop.Api.Tests.csproj",
+  "projectFilePath": "d:\\Hermes\\Projects\\AIShop\\tests\\AIShop.Api.Tests\\AIShop.Api.Tests.csproj",
   "expectedPackageFiles": [
     "D:\\NuGetPackages\\castle.core\\5.1.1\\castle.core.5.1.1.nupkg.sha512",
     "D:\\NuGetPackages\\coverlet.collector\\6.0.4\\coverlet.collector.6.0.4.nupkg.sha512",

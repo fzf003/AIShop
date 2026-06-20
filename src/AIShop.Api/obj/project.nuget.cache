@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "sv5k45bKyI0=",
+  "dgSpecHash": "0gFmh/Nvyqw=",
   "success": true,
-  "projectFilePath": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Api\\AIShop.Api.csproj",
+  "projectFilePath": "d:\\Hermes\\Projects\\AIShop\\src\\AIShop.Api\\AIShop.Api.csproj",
   "expectedPackageFiles": [
     "D:\\NuGetPackages\\dotnetenv\\3.2.0\\dotnetenv.3.2.0.nupkg.sha512",
     "D:\\NuGetPackages\\google.protobuf\\3.30.2\\google.protobuf.3.30.2.nupkg.sha512",
