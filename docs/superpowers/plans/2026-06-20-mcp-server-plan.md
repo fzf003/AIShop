@@ -355,7 +355,7 @@ git commit -m "test: add ProductTools unit tests for match_products"
 - Consumes: `Program` (AIShop.McpServer — 作为 WebApplicationFactory 入口)
 - Consumes: MCP 协议 `/mcp` 端点：`tools/list`, `tools/call`
 
-- [ ] **Step 1: 将 InternalsVisibleTo 添加到 McpServer csproj**
+- [x] **Step 1: 将 InternalsVisibleTo 添加到 McpServer csproj**
 
 在 `src/AIShop.McpServer/AIShop.McpServer.csproj` 的 `<PropertyGroup>` 中追加：
 
@@ -368,7 +368,7 @@ git commit -m "test: add ProductTools unit tests for match_products"
   </PropertyGroup>
 ```
 
-- [ ] **Step 2: 在测试项目中添加 WebApplicationFactory 包引用**
+- [x] **Step 2: 在测试项目中添加 WebApplicationFactory 包引用**
 
 更新 `tests/AIShop.McpServer.Tests/AIShop.McpServer.Tests.csproj`，在 `<ItemGroup>` 中添加：
 
@@ -376,7 +376,7 @@ git commit -m "test: add ProductTools unit tests for match_products"
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.9" />
 ```
 
-- [ ] **Step 3: 创建 McpServerIntegrationTests.cs**
+- [x] **Step 3: 创建 McpServerIntegrationTests.cs**
 
 ```csharp
 using System.Net.Http.Json;
@@ -511,7 +511,7 @@ public sealed class McpServerIntegrationTests : IClassFixture<WebApplicationFact
 }
 ```
 
-- [ ] **Step 4: 运行集成测试验证通过**
+- [x] **Step 4: 运行集成测试验证通过**
 
 ```bash
 dotnet test tests/AIShop.McpServer.Tests/AIShop.McpServer.Tests.csproj
@@ -519,7 +519,7 @@ dotnet test tests/AIShop.McpServer.Tests/AIShop.McpServer.Tests.csproj
 
 Expected: All 11 tests pass (6 unit + 5 integration).
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add tests/AIShop.McpServer.Tests/ src/AIShop.McpServer/
@@ -663,7 +663,7 @@ git commit -m "feat: add Aspire AppHost orchestrating Api + McpServer"
 **Files:**
 - 无新建文件
 
-- [ ] **Step 1: 完整解决方案构建**
+- [x] **Step 1: 完整解决方案构建**
 
 ```bash
 dotnet build
@@ -671,7 +671,7 @@ dotnet build
 
 Expected: 全部 5 个项目构建通过（Core, Infrastructure, Api, McpServer, AppHost）。
 
-- [ ] **Step 2: 运行全部测试**
+- [x] **Step 2: 运行全部测试**
 
 ```bash
 dotnet test
@@ -679,7 +679,7 @@ dotnet test
 
 Expected: 所有现有测试 + 新增 MCP Server 测试全部通过。
 
-- [ ] **Step 3: 验证 MCP Server 独立启动可访问**
+- [x] **Step 3: 验证 MCP Server 独立启动可访问**
 
 ```bash
 # 后台启动 McpServer
@@ -697,7 +697,7 @@ Expected 输出:
 - `/health` 返回 `{"status":"healthy"}`
 - `tools/list` 返回包含 `match_products` 的工具列表
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add .
