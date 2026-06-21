@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "d:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\AIShop.Core.csproj": {}
+    "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\AIShop.Core.csproj": {}
   },
   "projects": {
-    "d:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\AIShop.Core.csproj": {
+    "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\AIShop.Core.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "d:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\AIShop.Core.csproj",
+        "projectUniqueName": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\AIShop.Core.csproj",
         "projectName": "AIShop.Core",
-        "projectPath": "d:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\AIShop.Core.csproj",
+        "projectPath": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\AIShop.Core.csproj",
         "packagesPath": "D:\\NuGetPackages",
-        "outputPath": "d:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\obj\\",
+        "outputPath": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Core\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "D:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"

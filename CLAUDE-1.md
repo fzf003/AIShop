@@ -206,5 +206,3 @@ curl -X POST http://localhost:5206/api/chat \
   -H "Content-Type: application/json" \
   -d '{"username":"marla","message":"你好"}'
 ```
-
-
