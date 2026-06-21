@@ -346,7 +346,7 @@ git commit -m "test: add ProductTools unit tests for match_products"
 
 ---
 
-### Task 4: McpServer HTTP 集成测试
+### Task 4: ✅ McpServer HTTP 集成测试
 
 **Files:**
 - Create: `tests/AIShop.McpServer.Tests/McpServerIntegrationTests.cs`
@@ -528,7 +528,7 @@ git commit -m "test: add McpServer HTTP integration tests with WebApplicationFac
 
 ---
 
-### Task 5: 搭建 Aspire AppHost 编排项目
+### Task 5: ✅ 搭建 Aspire AppHost 编排项目
 
 **Files:**
 - Create: `src/AIShop.AppHost/AIShop.AppHost.csproj`
@@ -541,7 +541,7 @@ git commit -m "test: add McpServer HTTP integration tests with WebApplicationFac
 - Consumes: `AIShop.Api` 项目引用
 - Produces: `AIShop.AppHost` — Aspire 编排，一键启动 Api + McpServer
 
-- [ ] **Step 1: 安装 Aspire 工作负载**
+- [x] **Step 1: 安装 Aspire 工作负载**
 
 ```bash
 dotnet workload install aspire
@@ -549,7 +549,7 @@ dotnet workload install aspire
 
 等待安装完成。如果已安装则跳过。
 
-- [ ] **Step 2: 从 Api 项目中获取 Aspire 包版本参考**
+- [x] **Step 2: 从 Api 项目中获取 Aspire 包版本参考**
 
 ```bash
 dotnet new aspire-apphost --dry-run 2>&1 || echo "checking template"
@@ -557,7 +557,7 @@ dotnet new aspire-apphost --dry-run 2>&1 || echo "checking template"
 
 用模板干跑确认版本信息。
 
-- [ ] **Step 3: 创建 AppHost.csproj**
+- [x] **Step 3: 创建 AppHost.csproj**
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
@@ -582,7 +582,7 @@ dotnet new aspire-apphost --dry-run 2>&1 || echo "checking template"
 </Project>
 ```
 
-- [ ] **Step 4: 创建 AppHost/Program.cs**
+- [x] **Step 4: 创建 AppHost/Program.cs**
 
 ```csharp
 var builder = DistributedApplication.CreateBuilder(args);
@@ -593,7 +593,7 @@ var mcp = builder.AddProject<Projects.AIShop_McpServer>("mcp");
 builder.Build().Run();
 ```
 
-- [ ] **Step 5: 创建 AppHost/appsettings.json**
+- [x] **Step 5: 创建 AppHost/appsettings.json**
 
 ```json
 {
@@ -607,7 +607,7 @@ builder.Build().Run();
 }
 ```
 
-- [ ] **Step 6: 创建 launchSettings.json**
+- [x] **Step 6: 创建 launchSettings.json**
 
 ```json
 {
@@ -629,13 +629,13 @@ builder.Build().Run();
 }
 ```
 
-- [ ] **Step 7: 将 AppHost 加入解决方案**
+- [x] **Step 7: 将 AppHost 加入解决方案**
 
 ```bash
 dotnet sln AIShop.sln add src/AIShop.AppHost/AIShop.AppHost.csproj --solution-folder src
 ```
 
-- [ ] **Step 8: 验证 Aspire 启动**
+- [x] **Step 8: 验证 Aspire 启动**
 
 ```bash
 dotnet build src/AIShop.AppHost/AIShop.AppHost.csproj
@@ -649,7 +649,7 @@ dotnet run --project src/AIShop.AppHost/AIShop.AppHost.csproj
 
 验证 Dashboard 能打开，Api 和 McpServer 资源显示为 Running。
 
-- [ ] **Step 9: 提交**
+- [x] **Step 9: 提交**
 
 ```bash
 git add src/AIShop.AppHost/ AIShop.sln
@@ -658,7 +658,7 @@ git commit -m "feat: add Aspire AppHost orchestrating Api + McpServer"
 
 ---
 
-### Task 6: 全局验证 + 文档
+### Task 6: ✅ 全局验证
 
 **Files:**
 - 无新建文件
