@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("AIShop.Core")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+78a814bec393dd99240b533fb90491fd0b605fa5")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c31873e9a7eae205b53af130d319f0de47a534b1")]
 [assembly: System.Reflection.AssemblyProductAttribute("AIShop.Core")]
 [assembly: System.Reflection.AssemblyTitleAttribute("AIShop.Core")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

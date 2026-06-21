@@ -19,7 +19,7 @@ try
 
     var app = builder.Build();
 
-    app.MapMcp();
+    app.MapMcp("/mcp");
     app.MapGet("/health", () => Results.Ok(new { Status = "healthy" }));
 
     await app.RunAsync();

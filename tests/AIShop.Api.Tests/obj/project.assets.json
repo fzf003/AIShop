@@ -4909,11 +4909,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "d:\\Hermes\\Projects\\AIShop\\tests\\AIShop.Api.Tests\\AIShop.Api.Tests.csproj",
+      "projectUniqueName": "D:\\Hermes\\Projects\\AIShop\\tests\\AIShop.Api.Tests\\AIShop.Api.Tests.csproj",
       "projectName": "AIShop.Api.Tests",
-      "projectPath": "d:\\Hermes\\Projects\\AIShop\\tests\\AIShop.Api.Tests\\AIShop.Api.Tests.csproj",
+      "projectPath": "D:\\Hermes\\Projects\\AIShop\\tests\\AIShop.Api.Tests\\AIShop.Api.Tests.csproj",
       "packagesPath": "D:\\NuGetPackages",
-      "outputPath": "d:\\Hermes\\Projects\\AIShop\\tests\\AIShop.Api.Tests\\obj\\",
+      "outputPath": "D:\\Hermes\\Projects\\AIShop\\tests\\AIShop.Api.Tests\\obj\\",
       "projectStyle": "PackageReference",
       "fallbackFolders": [
         "D:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
@@ -4934,8 +4934,8 @@
         "net10.0": {
           "targetAlias": "net10.0",
           "projectReferences": {
-            "d:\\Hermes\\Projects\\AIShop\\src\\AIShop.Api\\AIShop.Api.csproj": {
-              "projectPath": "d:\\Hermes\\Projects\\AIShop\\src\\AIShop.Api\\AIShop.Api.csproj"
+            "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Api\\AIShop.Api.csproj": {
+              "projectPath": "D:\\Hermes\\Projects\\AIShop\\src\\AIShop.Api\\AIShop.Api.csproj"
             }
           }
         }

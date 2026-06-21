@@ -20,7 +20,7 @@
 
 ---
 
-### Task 1: 搭建 MCP Server 项目骨架
+### Task 1: ✅ 搭建 MCP Server 项目骨架
 
 **Files:**
 - Create: `src/AIShop.McpServer/AIShop.McpServer.csproj`
@@ -31,7 +31,7 @@
 **Interfaces:**
 - Produces: `AIShop.McpServer` 项目 — 编译通过并能启动空 MCP HTTP Server
 
-- [ ] **Step 1: 创建 csproj 文件**
+- [x] **Step 1: 创建 csproj 文件**
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk.Web">
@@ -54,7 +54,7 @@
 </Project>
 ```
 
-- [ ] **Step 2: 创建 appsettings.json**
+- [x] **Step 2: 创建 appsettings.json**
 
 ```json
 {
@@ -68,7 +68,7 @@
 }
 ```
 
-- [ ] **Step 3: 创建 appsettings.Development.json**
+- [x] **Step 3: 创建 appsettings.Development.json**
 
 ```json
 {
@@ -80,7 +80,7 @@
 }
 ```
 
-- [ ] **Step 4: 创建 Program.cs（最小可运行）**
+- [x] **Step 4: 创建 Program.cs（最小可运行）**
 
 ```csharp
 using Serilog;
@@ -119,7 +119,7 @@ finally
 }
 ```
 
-- [ ] **Step 5: 验证构建**
+- [x] **Step 5: 验证构建**
 
 ```bash
 dotnet build src/AIShop.McpServer/AIShop.McpServer.csproj
@@ -127,13 +127,13 @@ dotnet build src/AIShop.McpServer/AIShop.McpServer.csproj
 
 Expected: Build succeeded with no errors.
 
-- [ ] **Step 6: 将 McpServer 加入解决方案**
+- [x] **Step 6: 将 McpServer 加入解决方案**
 
 ```bash
 dotnet sln AIShop.sln add src/AIShop.McpServer/AIShop.McpServer.csproj --solution-folder src
 ```
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add src/AIShop.McpServer/ AIShop.sln
@@ -142,7 +142,7 @@ git commit -m "feat: scaffold MCP Server project with Program.cs and appsettings
 
 ---
 
-### Task 2: 实现 ProductTools 工具类 + ProductDto
+### Task 2: ✅ 实现 ProductTools 工具类 + ProductDto
 
 **Files:**
 - Create: `src/AIShop.McpServer/Tools/ProductTools.cs`
@@ -152,7 +152,7 @@ git commit -m "feat: scaffold MCP Server project with Program.cs and appsettings
 - Consumes: `Product` 实体: `Id: int, Name: string, Category: string, Tags: string[], Price: decimal, Emoji: string` (AIShop.Core)
 - Produces: `ProductTools` — `[McpServerToolType]` static class，工具 `match_products(string[] keywords)` 返回匹配商品
 
-- [ ] **Step 1: 创建 ProductTools.cs**
+- [x] **Step 1: 创建 ProductTools.cs**
 
 ```csharp
 using System.ComponentModel;
@@ -194,13 +194,13 @@ public sealed record MatchProductDto(
 }
 ```
 
-- [ ] **Step 2: 验证构建**
+- [x] **Step 2: 验证构建**
 
 ```bash
 dotnet build src/AIShop.McpServer/AIShop.McpServer.csproj
 ```
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add src/AIShop.McpServer/Tools/
@@ -209,7 +209,7 @@ git commit -m "feat: add match_products MCP tool wrapping ProductCatalog.MatchPr
 
 ---
 
-### Task 3: 创建测试项目 + ProductTools 单元测试
+### Task 3: ✅ 创建测试项目 + ProductTools 单元测试
 
 **Files:**
 - Create: `tests/AIShop.McpServer.Tests/AIShop.McpServer.Tests.csproj`
@@ -219,7 +219,7 @@ git commit -m "feat: add match_products MCP tool wrapping ProductCatalog.MatchPr
 - Consumes: `ProductTools.MatchProducts(string[]): MatchProductDto[]` (Task 2)
 - Consumes: `ProductCatalog.MatchProducts(string[]): Product[]` (via ProductTools)
 
-- [ ] **Step 1: 创建测试项目 csproj**
+- [x] **Step 1: 创建测试项目 csproj**
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
@@ -249,13 +249,13 @@ git commit -m "feat: add match_products MCP tool wrapping ProductCatalog.MatchPr
 </Project>
 ```
 
-- [ ] **Step 2: 将测试项目加入解决方案**
+- [x] **Step 2: 将测试项目加入解决方案**
 
 ```bash
 dotnet sln AIShop.sln add tests/AIShop.McpServer.Tests/AIShop.McpServer.Tests.csproj --solution-folder tests
 ```
 
-- [ ] **Step 3: 创建 ProductToolsTests.cs**
+- [x] **Step 3: 创建 ProductToolsTests.cs**
 
 ```csharp
 using AIShop.McpServer.Tools;
@@ -329,7 +329,7 @@ public sealed class ProductToolsTests
 }
 ```
 
-- [ ] **Step 4: 运行测试验证通过**
+- [x] **Step 4: 运行测试验证通过**
 
 ```bash
 dotnet test tests/AIShop.McpServer.Tests/AIShop.McpServer.Tests.csproj
@@ -337,7 +337,7 @@ dotnet test tests/AIShop.McpServer.Tests/AIShop.McpServer.Tests.csproj
 
 Expected: All 6 tests pass.
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add tests/AIShop.McpServer.Tests/ AIShop.sln
