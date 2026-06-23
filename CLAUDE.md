@@ -207,4 +207,23 @@ curl -X POST http://localhost:5206/api/chat \
   -d '{"username":"marla","message":"你好"}'
 ```
 
+## Skill 路由规则
+
+当用户的请求匹配到可用技能时，通过 Skill 工具调用它。不确定时也优先调用技能。
+
+关键路由规则：
+- 产品创意/头脑风暴 → 调用 /office-hours
+- 战略/范围界定 → 调用 /plan-ceo-review
+- 架构设计 → 调用 /plan-eng-review
+- 设计系统/方案评审 → 调用 /design-consultation 或 /plan-design-review
+- 全流程评审 → 调用 /autoplan
+- Bug/错误排查 → 调用 /investigate
+- QA/网站测试 → 调用 /qa 或 /qa-only
+- 代码审查/diff 检查 → 调用 /review
+- 视觉评审 → 调用 /design-review
+- 发布/部署/提 PR → 调用 /ship 或 /land-and-deploy
+- 保存进度 → 调用 /context-save
+- 恢复上下文 → 调用 /context-restore
+- 编写 backlog-ready 的 issue/spec → 调用 /spec
+
 
