@@ -23,4 +23,8 @@ docs/adr
 docs/assets
 docs/design
 docs/superpowers
+*.db
+.agents/
+.claude/
+.codex/
 
