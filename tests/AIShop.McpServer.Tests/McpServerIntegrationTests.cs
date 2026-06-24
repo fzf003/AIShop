@@ -94,7 +94,7 @@ public sealed class McpServerIntegrationTests : IClassFixture<WebApplicationFact
 
         response.EnsureSuccessStatusCode();
         var body = await response.Content.ReadAsStringAsync();
-        Assert.Contains("healthy", body);
+        Assert.Contains("Healthy", body);
     }
 
     [Fact]

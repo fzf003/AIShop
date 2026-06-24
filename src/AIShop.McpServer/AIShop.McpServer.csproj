@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\AIShop.Infrastructure\AIShop.Infrastructure.csproj" />
+    <ProjectReference Include="..\AIShop.ServiceDefaults\AIShop.ServiceDefaults.csproj" />
   </ItemGroup>
 
   <ItemGroup>

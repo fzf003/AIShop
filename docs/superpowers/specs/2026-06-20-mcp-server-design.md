@@ -1,6 +1,6 @@
 # AIShop MCP Server — 设计文档
 
-> 状态：已确认 | 日期：2026-06-20 | 作者：架构师 Agent
+> 状态：已确认 | 日期：2026-06-20 | 最后更新：2026-06-23（与代码同步）
 
 ## 1. 背景与目标
 
@@ -10,14 +10,14 @@
 
 ```
 src/
-  AIShop.AppHost/               ← 新增：Aspire 编排项目
-  AIShop.McpServer/             ← 新增：MCP Server 项目
-  AIShop.Api/                   ← 现有：Minimal API
-  AIShop.Core/                  ← 现有：领域实体
-  AIShop.Infrastructure/        ← 现有：ProductCatalog
+  AIShop.AppHost/               ← Aspire 编排项目
+  AIShop.McpServer/             ← MCP Server 项目
+  AIShop.Api/                   ← Minimal API
+  AIShop.Core/                  ← 领域实体
+  AIShop.Infrastructure/        ← ProductCatalog
 tests/
-  AIShop.McpServer.Tests/       ← 新增：MCP Server 测试
-  AIShop.Api.Tests/             ← 现有：Api 测试
+  AIShop.McpServer.Tests/       ← MCP Server 测试
+  AIShop.Api.Tests/             ← Api 测试
 ```
 
 ## 3. 技术栈
@@ -25,9 +25,10 @@ tests/
 | 类别 | 选型 | 说明 |
 |------|------|------|
 | .NET | 10.0 / C# 14 | 对齐现有项目 |
-| MCP SDK | `ModelContextProtocol.AspNetCore` | HTTP 传输 |
-| 日志 | Serilog.AspNetCore | 对齐 Api 项目 |
+| MCP SDK | `ModelContextProtocol.AspNetCore` 1.0.0 | HTTP 传输 |
+| 日志 | Serilog.AspNetCore 10.0.0 | 对齐 Api 项目 |
 | 代码质量 | SonarAnalyzer 10.* | 全局 `Directory.Build.props` |
+| Aspire | ServiceDefaults 项目引用 | OTLP 导出 + 健康检查 |
 
 ## 4. 架构
 
@@ -98,10 +99,11 @@ match_products(["运动", "户外", "咖啡"])
 
 | 包 | 用途 |
 |----|------|
-| `ModelContextProtocol.AspNetCore` | MCP HTTP Server |
-| `Serilog.AspNetCore` | 结构化日志 |
+| `ModelContextProtocol.AspNetCore` 1.0.0 | MCP HTTP Server |
+| `Serilog.AspNetCore` 10.0.0 | 结构化日志 |
 | `AIShop.Core` (传递) | Domain entities |
 | `AIShop.Infrastructure` (直接) | `ProductCatalog` |
+| `AIShop.ServiceDefaults` | Aspire OTLP 导出 + 健康检查 |
 
 **不引入：**
 - `Microsoft.Agents.AI` — MCP Server 不需要 MAF
@@ -146,21 +148,41 @@ src/AIShop.McpServer/
 ```csharp
 using Serilog;
 using ModelContextProtocol.Server;
+using AIShop.ServiceDefaults;
 
 Log.Logger = new LoggerConfiguration()
-    .ReadFrom.Configuration(builder.Configuration)
-    .CreateLogger();
+    .WriteTo.Console()
+    .CreateBootstrapLogger();
 
-var builder = WebApplication.CreateBuilder(args);
-builder.Host.UseSerilog();
-builder.Services.AddMcpServer()
-    .WithHttpTransport()
-    .WithToolsFromAssembly();
+try
+{
+    var builder = WebApplication.CreateBuilder(args);
 
-var app = builder.Build();
-app.MapMcp();
-app.MapGet("/health", () => Results.Ok(new { Status = "healthy" }));
-app.Run();
+    builder.Host.UseSerilog((ctx, lc) => lc
+        .ReadFrom.Configuration(ctx.Configuration)
+        .WriteTo.Console());
+
+    builder.AddServiceDefaults();
+
+    builder.Services.AddMcpServer()
+        .WithHttpTransport()
+        .WithToolsFromAssembly();
+
+    var app = builder.Build();
+
+    app.MapDefaultEndpoints();
+    app.MapMcp("/mcp");
+
+    await app.RunAsync();
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "MCP Server terminated unexpectedly");
+}
+finally
+{
+    await Log.CloseAndFlushAsync();
+}
 ```
 
 ### 8.2 ProductTools.cs
@@ -192,11 +214,11 @@ public static class ProductTools
 ```
 ┌──────────────────────────────────────────────┐
 │  AIShop.AppHost                              │
-│  ├── Api (ProjectResource)                   │
-│  │   └── http://localhost:5206               │
-│  ├── McpServer (ProjectResource)             │
+│  ├── mcp (McpServer)                         │
 │  │   ├── POST /mcp ← MCP 端点               │
-│  │   └── GET /health                         │
+│  │   └── 端口: 6500                          │
+│  ├── api (AIShop.Api)                        │
+│  │   └── WithReference(mcp)                  │
 │  └── Dashboard                               │
 │      ├── 结构化日志 (Serilog → OTLP)          │
 │      ├── HTTP 请求追踪                        │
@@ -208,37 +230,32 @@ public static class ProductTools
 
 ```csharp
 // src/AIShop.AppHost/Program.cs
+using Projects;
+
 var builder = DistributedApplication.CreateBuilder(args);
 
-var api = builder.AddProject<Projects.AIShop_Api>("api");
-var mcpServer = builder.AddProject<Projects.AIShop_McpServer>("mcp");
+var mcp = builder.AddProject<AIShop_McpServer>("mcp")
+    .WithHttpEndpoint(port: 6500).ExcludeFromMcp();
 
-builder.Build().Run();
+builder.AddProject<AIShop_Api>("api")
+    .WithReference(mcp);
+
+await builder.Build().RunAsync();
 ```
+
+**关键细节：**
+- McpServer 固定端口 6500，`.ExcludeFromMcp()` 防止 Aspire Dashboard 将其作为 MCP 资源发现
+- Api 通过 `WithReference(mcp)` 获得环境变量 `services__mcp__http__0`，用于服务发现
+- Api 中 `McpProductClient` 的 `BaseAddress = new Uri("http://mcp")` 通过 Aspire 服务发现解析
 
 ### 9.4 McpServer 接入 Aspire
 
-`AIShop.McpServer` 项目添加 Aspire 的 ServiceDefaults：
+`AIShop.McpServer` 通过引用 `AIShop.ServiceDefaults` 获得 Aspire 集成：
 
 ```csharp
-// Program.cs — 增加 Aspire 集成
-var builder = WebApplication.CreateBuilder(args);
-builder.AddServiceDefaults();              // ← Aspire: 自动 OTLP 导出 + 健康检查
-builder.Host.UseSerilog();
-builder.Services.AddMcpServer()
-    .WithHttpTransport()
-    .WithToolsFromAssembly();
-
-var app = builder.Build();
-app.MapMcp();
-app.MapDefaultEndpoints();                 // ← Aspire: /health → /alive, /health
-app.Run();
-```
-
-```xml
-<!-- AIShop.McpServer.csproj 增加 -->
-<PackageReference Include="Aspire.StackExchange.Redis" Version="10.0.0" />
-<!-- ServiceDefaults 引用: Aspire 自动添加 OpenTelemetry, 健康检查, 弹性等 -->
+// Program.cs
+builder.AddServiceDefaults();    // ← 自动 OTLP 导出 + 健康检查
+app.MapDefaultEndpoints();       // ← /health → /alive, /health
 ```
 
 ### 9.5 开发工作流
@@ -248,7 +265,7 @@ app.Run();
 dotnet run --project src/AIShop.AppHost
 # Aspire Dashboard 自动打开 → 查看日志/追踪
 # Api: http://localhost:5206
-# McpServer: 通过 Aspire 分配的端口
+# McpServer: http://localhost:6500
 
 # 调试 MCP 工具 — 配合 MCP Inspector
 npx @modelcontextprotocol/inspector
@@ -258,7 +275,6 @@ npx @modelcontextprotocol/inspector
 ### 9.6 不纳入 Aspire 的内容
 
 - 生产部署仍走独立进程（`dotnet run` / `dotnet publish`）
-- 不引入 Redis/消息队列等额外基础设施
 - Serilog 写 Console，不强制走 OTLP
 
 ## 10. 部署
@@ -283,7 +299,7 @@ set ASPNETCORE_URLS=http://+:8080
 export ASPNETCORE_URLS=http://+:8080
 ```
 
-默认监听 `http://localhost:5000`。
+默认监听端口由 `launchSettings.json` 配置。
 
 ## 11. 测试策略
 
@@ -314,6 +330,7 @@ AIShop.McpServer ──→ AIShop.Infrastructure ←── AIShop.Api
 - 两个入口共享同一套 `ProductCatalog`，各自独立部署
 - Api 路径：对话式购物助手（有状态，Session + LLM）
 - McpServer 路径：纯工具调用（无状态，HTTP MCP）
+- Api 通过 `McpProductClient` 调用 McpServer 的 `match_products`，通过 Aspire 服务发现解析地址
 
 ## 13. 接入文档
 

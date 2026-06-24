@@ -1,5 +1,7 @@
 # 推荐产品 Agent 设计文档（终稿）
 
+> 最后更新：2026-06-23 | 状态：与代码同步
+
 ## 概述
 
 让 LLM 根据聊天上下文从 KeywordMap 中选择推荐关键词，后端用 `MatchProducts()` 做确定性产品匹配。**LLM 负责语义理解**（"运动鞋" → "跑步"），**KeywordMap 负责产品匹配**（"跑步" → 跑鞋/瑜伽垫/...）。
@@ -36,13 +38,16 @@ if (matched.Length == 0) matched = ProductCatalog.All.Take(6).ToArray();
 ## 数据流
 
 ```
-用户消息 → 存 DB → 加载完整历史 → 拼接上下文（含 KeywordMap 指令）
-
-一次 RunAsync<AgentChatResult>(context) → { Reply, Keywords }
-
-→ 白名单过滤 keywords → MatchProducts()
-  → 有推荐: 推荐排前 + 其他排后
-  → 无推荐: 默认列表 + 标记"暂无推荐"
+用户消息
+  → 存 DB（user 消息）
+  → ShoppingAssistantAgent.RunChatAsync(sessionId, userMessage)
+      → _agent 已预配置 Instructions（含 KeywordMap）
+      → SqliteChatHistoryProvider 自动从 DB 加载最近 20 条历史
+      → RunAsync<AgentChatResult>(userMessage, session) → { Reply, Keywords }
+  → 存 DB（assistant 消息）
+  → 白名单过滤 keywords → SplitProducts() / MatchProducts()
+    → 有推荐: 推荐排前 + 其他排后
+    → 无推荐: 默认列表 + 标记"暂无推荐"
   → 前端双列表渲染
 ```
 
@@ -65,8 +70,11 @@ IRecommendationService — 无调用方
 
 ```
 ShoppingAssistantAgent.RunChatAsync()
-  → 单次 RunAsync<AgentChatResult>() → { Reply, Keywords }
-  → 后端白名单过滤 → MatchProducts() → 推荐/其他分层
+  → _agent（构造函数创建，实例级复用）
+  → Instructions 从 ProductCatalog.KeywordMap 动态构建
+  → SqliteChatHistoryProvider 自动管理历史（最近 20 条）
+  → RunAsync<AgentChatResult>() → { Reply, Keywords }
+  → 后端白名单过滤 → SplitProducts() → 推荐/其他分层
   → 前端双列表
 
 PreferenceAnalyzerAgent → 删除
@@ -81,81 +89,107 @@ IRecommendationService → 删除
 
 ```csharp
 // Features/Chat/ChatEndpoints.cs 中定义
-public sealed record AgentChatResult(
-    string Reply,
-    string[] Keywords
-);
+public sealed record AgentChatResult(string Reply, string[] Keywords);
 ```
 
-### 2. ShoppingAssistantAgent 改造
+### 2. ShoppingAssistantAgent 实现
 
-代码风格与现有代码一致：原地构造，不抽静态字段，单次调用。
+**关键设计决策：**
+- `_agent` 在构造函数中通过 `AsAIAgent()` 创建一次，所有请求复用（非每请求新建）
+- `_instructions` 从 `ProductCatalog.KeywordMap` 动态生成，KeywordMap 更新时自动同步
+- Instructions 通过 `ChatOptions.Instructions` 作为 System Message 注入
+- `SqliteChatHistoryProvider` 接管历史加载，ChatEndpoints 不再手动拼接历史
 
 ```csharp
 #pragma warning disable MAAI001
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
+using Microsoft.EntityFrameworkCore;
+using AIShop.Api.Features.Chat;
+using AIShop.Infrastructure.Data;
+using AIShop.Infrastructure.Services;
 
 namespace AIShop.Api.Agents;
 
-public sealed class ShoppingAssistantAgent(IChatClient chatClient)
+public sealed class ShoppingAssistantAgent
 {
-    public async Task<AgentChatResult> RunChatAsync(string context, CancellationToken ct = default)
-    {
-        var agent = new ChatClientAgent(
-            chatClient,
-            new ChatClientAgentOptions
-            {
-                Name = "ShoppingAssistant",
-                Description = "智能购物助手",
-                ChatHistoryProvider = new InMemoryChatHistoryProvider(
-                    new InMemoryChatHistoryProviderOptions())
-            },
-            loggerFactory: null,
-            services: null);
+    private readonly AIAgent _agent;
 
-        var session = await agent.CreateSessionAsync(cancellationToken: ct);
-        var response = await agent.RunAsync<AgentChatResult>(
-            context, session, options: null, cancellationToken: ct);
+    private static readonly string _instructions = BuildInstructions();
+
+    private static string BuildInstructions()
+    {
+        var lines = new List<string>
+        {
+            "你是智能购物助手。用中文回复，简洁友好，帮助用户找到心仪的商品。",
+            "",
+            "【商品关键词参考】",
+            "当用户表达购物需求时，从下表选择 0-5 个最匹配的关键词：",
+            "",
+            "关键词 | 覆盖的商品标签"
+        };
+
+        foreach (var (key, tags) in ProductCatalog.KeywordMap)
+        {
+            lines.Add($"{key} | {string.Join("、", tags)}");
+        }
+
+        lines.Add("");
+        lines.Add("规则：");
+        lines.Add("- 只能从\"关键词\"列选择");
+        lines.Add("- 根据用户对话语义做判断（例如\"运动鞋\"→跑步、运动、鞋子）");
+        lines.Add("- 无匹配返回空数组");
+
+        return string.Join("\n", lines);
+    }
+
+    public ShoppingAssistantAgent(IChatClient chatClient, IDbContextFactory<AppDbContext> dbFactory)
+    {
+        _agent = chatClient.AsAIAgent(new ChatClientAgentOptions
+        {
+            Name = "ShoppingAssistant",
+            Description = "智能购物助手",
+            ChatOptions = new ChatOptions
+            {
+                Instructions = _instructions
+            },
+            ChatHistoryProvider = new SqliteChatHistoryProvider(dbFactory),
+            ThrowOnChatHistoryProviderConflict = false
+        });
+    }
+
+    public async Task<AgentChatResult> RunChatAsync(
+        Guid sessionId, string userMessage, CancellationToken ct = default)
+    {
+        var session = await _agent.CreateSessionAsync(ct);
+        session.StateBag.SetValue("SessionId", sessionId.ToString());
+
+        var response = await _agent.RunAsync<AgentChatResult>(
+            userMessage, session,
+            options: new AgentRunOptions
+            {
+                ResponseFormat = ChatResponseFormatJson.ForJsonSchema<AgentChatResult>()
+            },
+            cancellationToken: ct);
         return response.Result;
     }
 }
 ```
 
-**关键变化**：
-- 返回类型从 `Task<string>` 改为 `Task<AgentChatResult>`
-- 单个 `RunAsync<T>()` 调用，非两阶段
-- `context` 中已包含完整历史 + instructions + KeywordMap 指令
+**关键点：**
+- `_agent` = 实例字段，构造一次，所有请求复用
+- `_instructions` = static readonly，KeywordMap 只在构造函数中读取一次（当前 ProductCatalog 也是 static readonly，运行时不变）
+- `RunChatAsync` 只需 `sessionId` + `userMessage`，不传历史（Provider 自动加载）
+- `ChatResponseFormatJson.ForJsonSchema<AgentChatResult>()` 确保 LLM 输出合法 JSON
 
 **错误处理**：调用方 `ChatEndpoints` 负责 try/catch，失败时回退到空 `AgentChatResult`。
 
-### 3. 上下文拼接
+### 3. SqliteChatHistoryProvider
 
-```csharp
-// ChatEndpoints — 构建上下文时嵌入 KeywordMap 指令
-var contextParts = new List<string>();
-foreach (var m in history)
-    contextParts.Add($"({m.Role}) {m.Content}");
-contextParts.Add("""
-    你是智能购物助手。用中文回复，简洁友好，帮助用户找到心仪的商品。
-
-    【商品关键词参考】
-    当用户表达购物需求时，从下表选择 0-5 个最匹配的关键词：
-
-    关键词 | 覆盖的商品标签
-    夹克 | 皮衣、外套、夹克、服装
-    鞋子 | 鞋子、跑鞋、靴子、鞋类
-    跑步 | 跑步、运动、健身、体育、跑鞋
-    ...
-    数码 | 数码、科技、电子、无线、充电、穿戴
-
-    规则：
-    - 只能从"关键词"列选择
-    - 语义理解（"运动鞋"→跑步、运动、鞋子）
-    - 无匹配返回空数组
-    """);
-var context = string.Join("\n", contextParts);
-```
+详情见 `sqlite-chat-history-provider-design.md`。核心行为：
+- `ProvideChatHistoryAsync`：从 DB 加载最近 20 条消息，不压缩
+- `StoreChatHistoryAsync`：空操作（消息已在 ChatEndpoints 中持久化）
+- 通过 `session.StateBag["SessionId"]` 获取会话标识
 
 ### 4. ChatEndpoint 变更
 
@@ -171,89 +205,68 @@ api.MapPost("/chat", async (
     CancellationToken ct) =>
 {
     var user = await users.GetByUsernameAsync(req.Username, ct);
-    if (user is null) return Results.Unauthorized();
+    if (user is null)
+        return Results.Unauthorized();
 
     var sessionId = await sessions.GetOrCreateSessionIdAsync(user.Id, ct);
     var sid = Guid.Parse(sessionId);
 
-    // 1. 保存用户消息
-    db.ChatMessages.Add(new ChatMessage
-    {
-        SessionId = sid, Role = "user", Content = req.Message
-    });
-    await db.SaveChangesAsync(ct);
-
-    // 2. 加载完整历史
-    var history = await db.ChatMessages
-        .Where(m => m.SessionId == sid)
-        .OrderBy(m => m.Timestamp)
-        .ToListAsync(ct);
-
-    // 3. 构建上下文（含 KeywordMap 指令）
-    var contextParts = new List<string>();
-    foreach (var m in history)
-        contextParts.Add($"({m.Role}) {m.Content}");
-    contextParts.Add("""...KeywordMap 指令...""");
-    var context = string.Join("\n", contextParts);
-
-    // 4. 单次结构化调用
+    // 1. 获取 Agent 结构化响应（历史由 SqliteChatHistoryProvider 自动加载）
     AgentChatResult result;
     try
     {
-        result = await shoppingAgent.RunChatAsync(context, ct);
+        result = await shoppingAgent.RunChatAsync(sid, req.Message, ct);
     }
     catch
     {
         result = new AgentChatResult("抱歉，暂时无法处理您的请求，请重试。", []);
     }
 
-    // 5. 白名单过滤 keywords
+    // 2. 保存用户消息 + 助手回复到 SQLite
+    db.ChatMessages.Add(new ChatMessage { SessionId = sid, Role = "user", Content = req.Message });
+    db.ChatMessages.Add(new ChatMessage { SessionId = sid, Role = "assistant", Content = result.Reply });
+    await db.SaveChangesAsync(ct);
+
+    // 3. 白名单过滤 keywords
     var validKeywords = (result.Keywords ?? [])
         .Where(k => ProductCatalog.KeywordMap.ContainsKey(k))
         .Distinct()
         .Take(5)
         .ToArray();
 
-    // 6. 构建推荐响应
-    var allProducts = ProductCatalog.All;
+    // 4. 构建推荐响应（使用 SplitProducts 实现推荐/其他分层）
     ChatReply chatReply;
 
     if (validKeywords.Length > 0)
     {
-        var matched = ProductCatalog.MatchProducts(validKeywords);
-        var matchedIds = new HashSet<int>(matched.Select(p => p.Id));
-
-        var recDtos = matched.Select(ToDto).ToList();
-        var otherDtos = allProducts
-            .Where(p => !matchedIds.Contains(p.Id))
-            .Select(ToDto)
-            .ToList();
+        var (recommended, others) = ProductCatalog.SplitProducts(validKeywords);
+        var recDtos = recommended.Select(ToDto).ToList();
+        var otherDtos = recommended.Length == 0
+            ? ProductCatalog.All.Take(6).Select(ToDto).ToList()
+            : others.Take(12).Select(ToDto).ToList();
 
         chatReply = new ChatReply(result.Reply, recDtos, otherDtos,
-            "根据您的兴趣，为您推荐：", HasRecommendation: true);
+            "根据您的兴趣，为您推荐：", HasRecommendation: true,
+            recDtos.Select(p => p.Category).Distinct().ToArray());
     }
     else
     {
-        var fallback = allProducts.Take(6).Select(ToDto).ToList();
+        var fallback = ProductCatalog.All.Take(6).Select(ToDto).ToList();
         chatReply = new ChatReply(result.Reply,
-            RecommendedProducts: null, OtherProducts: fallback,
-            "暂无特定推荐 — 浏览精选商品", HasRecommendation: false);
+            RecommendedProducts: null,
+            OtherProducts: fallback,
+            "暂无特定推荐 — 浏览精选商品",
+            HasRecommendation: false,
+            MatchedCategories: null);
     }
-
-    // 7. 保存助手回复
-    db.ChatMessages.Add(new ChatMessage
-    {
-        SessionId = sid, Role = "assistant", Content = result.Reply
-    });
-    await db.SaveChangesAsync(ct);
 
     return Results.Ok(chatReply);
 });
 ```
 
-#### POST /api/recommendations（改写）
+#### POST /api/recommendations
 
-原 `PreferenceAnalyzerAgent` 删除后，改为直接用 `ShoppingAssistantAgent` 做偏好分析：
+"给我推荐商品"按钮：读取最近用户消息 → 交给 Agent 提取关键词 → MatchProducts 匹配。
 
 ```csharp
 api.MapPost("/recommendations", async (
@@ -268,38 +281,30 @@ api.MapPost("/recommendations", async (
     if (user is null) return Results.Unauthorized();
 
     var sessionId = await sessions.GetOrCreateSessionIdAsync(user.Id, ct);
+    var sid = Guid.Parse(sessionId);
 
-    var history = await db.ChatMessages
-        .Where(m => m.SessionId == Guid.Parse(sessionId))
-        .OrderBy(m => m.Timestamp)
-        .ToListAsync(ct);
+    var lastUserMessage = await db.ChatMessages
+        .Where(m => m.SessionId == sid && m.Role == "user")
+        .OrderByDescending(m => m.Timestamp)
+        .Select(m => m.Content)
+        .FirstOrDefaultAsync(ct);
 
-    // 构建分析专用上下文
-    var contextParts = new List<string>();
-    foreach (var m in history)
-        contextParts.Add($"({m.Role}) {m.Content}");
-    contextParts.Add("""
-        分析上述对话中用户的购物偏好。
-        从关键词表中选择 2-6 个最匹配的关键词，只输出 JSON 数组。
+    if (lastUserMessage is null)
+        return Results.Ok(new RecommendationResponse(null, [], "暂无对话历史，请先聊天。", null));
 
-        关键词：夹克、鞋子、跑步、音乐、咖啡、健身、瑜伽、烹饪、科技
-                阅读、户外、时尚、环保、巧克力、家居、送礼、爱好
-                耳机、手表、运动、音频、数码
-        """);
-    var context = string.Join("\n", contextParts);
-
-    // 只用结构化输出取 keywords（reply 丢弃）
-    var result = await shoppingAgent.RunChatAsync(context, ct);
+    var result = await shoppingAgent.RunChatAsync(sid, lastUserMessage, ct);
     var preferences = result.Keywords ?? [];
 
-    // 与原有 match 逻辑保持一致
     var matched = ProductCatalog.MatchProducts(preferences);
     var dtos = matched.Select(ToDto).ToList();
+
+    var matchedCategories = dtos.Select(p => p.Category).Distinct().ToArray();
 
     return Results.Ok(new RecommendationResponse(
         dtos.FirstOrDefault(),
         dtos.Skip(1).ToList(),
-        $"根据您的偏好{string.Join("、", preferences)}，为您推荐："));
+        $"根据您的偏好{string.Join("、", preferences)}，为您推荐：",
+        matchedCategories));
 });
 ```
 
@@ -311,62 +316,30 @@ public sealed record ChatReply(
     List<ProductDto>? RecommendedProducts,
     List<ProductDto>? OtherProducts,
     string? RecMessage,
-    bool HasRecommendation
+    bool HasRecommendation,
+    string[]? MatchedCategories
 );
 
-// RecommendationResponse 保持不变
 public sealed record RecommendationResponse(
     ProductDto? BestMatch,
     List<ProductDto> Other,
-    string Message
+    string Message,
+    string[]? MatchedCategories
 );
 ```
 
-### 6. 前端变更
+### 6. Program.cs — DI 注册
 
-```javascript
-function renderRecommendationPanel(data) {
-    const msgEl = document.getElementById('recoMessage');
-    const container = document.getElementById('recoProducts');
-    container.innerHTML = '';
+```csharp
+// 注册 ShoppingAssistantAgent（Scoped，与请求生命周期一致）
+builder.Services.AddScoped<ShoppingAssistantAgent>();
 
-    if (data.hasRecommendation) {
-        msgEl.textContent = data.recMessage || '根据您的兴趣推荐：';
-        container.innerHTML += '<div class="section-label best">🎯 为您推荐</div>';
-        (data.recommendedProducts || []).forEach(p =>
-            container.innerHTML += productCard(p, true));
-
-        if (data.otherProducts?.length > 0) {
-            container.innerHTML += '<div class="section-label other">📋 其他商品</div>';
-            data.otherProducts.forEach(p =>
-                container.innerHTML += productCard(p, false));
-        }
-    } else {
-        msgEl.textContent = '😅 ' + (data.recMessage || '暂无特定推荐');
-        container.innerHTML += '<div class="section-label other" style="color:#999;">📋 全部商品</div>';
-        (data.otherProducts || []).forEach(p => {
-            container.innerHTML += `
-                <div class="product-card" style="opacity:0.7;">
-                    <div style="font-size:0.7rem;color:#999;margin-bottom:4px;">未推荐</div>
-                    <div class="product-icon">${p.emoji}</div>
-                    <div class="product-name">${p.name}</div>
-                    <div class="product-tags">${(p.tags || []).join(' · ')}</div>
-                    <div class="product-price">$${p.price.toFixed(2)}</div>
-                </div>
-            `;
-        });
-    }
-}
+// 注册 MCP Product Client（通过 Aspire 服务发现 http://mcp）
+builder.Services.AddHttpClient<McpProductClient>(client =>
+{
+    client.BaseAddress = new Uri("http://mcp");
+});
 ```
-
-在 `sendMessage()` 中：
-
-```javascript
-// 替换原有的 data.recommendations 处理
-renderRecommendationPanel(data);
-```
-
-原 `renderRecommendations()` 函数保留，用于 `getRecommendations()` 按钮的 `RecommendationResponse` 渲染。
 
 ---
 
@@ -395,13 +368,14 @@ renderRecommendationPanel(data);
 
 | 文件 | 变更 |
 |------|------|
-| `src/AIShop.Api/Agents/ShoppingAssistantAgent.cs` | `RunChatAsync` 返回 `AgentChatResult`，单次 `RunAsync<T>()` |
+| `src/AIShop.Api/Agents/ShoppingAssistantAgent.cs` | `RunChatAsync` 返回 `AgentChatResult`；`_agent` 实例复用；Instructions 动态构建 |
 | `src/AIShop.Api/Agents/PreferenceAnalyzerAgent.cs` | **删除** |
 | `src/AIShop.Api/Features/Chat/ChatEndpoints.cs` | `ChatReply` 双列表；`/api/chat` 推荐逻辑重写；`/api/recommendations` 改调用 ShoppingAssistantAgent；新增 `AgentChatResult` DTO |
 | `src/AIShop.Api/Program.cs` | 删除 `AddScoped<PreferenceAnalyzerAgent>()` |
 | `src/AIShop.Api/wwwroot/index.html` | 推荐面板双列表渲染；renderRecommendations 保留 |
 | `src/AIShop.Core/Interfaces/IRepositories.cs` | 删除 `IPreferenceAnalyzer`、`IRecommendationService` |
 | `src/AIShop.Infrastructure/Services/RecommendationService.cs` | **删除** |
+| `src/AIShop.Infrastructure/Services/SqliteChatHistoryProvider.cs` | **新增** — 从 DB 加载最近 20 条历史 |
 | `src/AIShop.Infrastructure/DependencyInjection.cs` | 删除 `IRecommendationService` 注册 |
 | `tests/AIShop.Api.Tests/` | 新增 Chat 端点集成测试 |
 
@@ -417,8 +391,9 @@ renderRecommendationPanel(data);
 | 所有关键词都被过滤 | `validKeywords` 为空 → 默认列表 + 标记 |
 | 同一关键词多次出现 | `Distinct()` 去重 |
 | LLM 选了超过 5 个关键词 | `Take(5)` 兜底 |
-| 全部产品都匹配 | 推荐取前 6，"其他"为空 |
+| 全部产品都匹配 | 推荐取全部，"其他"为空 |
 | LLM 回了一个不在 KeywordMap 里的词 | 白名单过滤掉 |
+| MCP 调用失败 | 静默降级，返回空数组，不影响主流程 |
 
 ---
 

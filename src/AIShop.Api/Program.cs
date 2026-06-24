@@ -10,6 +10,9 @@ using Serilog;
 using OpenAI;
 using Microsoft.Extensions.AI;
 using Scalar.AspNetCore;
+using AIShop.Api.Features.Mcp;
+using AIShop.Api.Features.McpIntegration;
+using AIShop.ServiceDefaults;
 
 Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()
@@ -27,6 +30,8 @@ try
     builder.Services.AddSerilog((sp, lc) => lc
         .ReadFrom.Configuration(builder.Configuration)
         .WriteTo.Console());
+
+    builder.AddServiceDefaults();
 
     builder.Services.AddOpenApi();
     builder.Services.AddSwaggerGen();
@@ -56,7 +61,17 @@ try
     // Register Agent definitions (Api/Agents/)
     builder.Services.AddScoped<ShoppingAssistantAgent>();
 
+    // Register MCP Product Client — uses Aspire service discovery (http://mcp resolved via WithReference)
+    builder.Services.AddHttpClient<McpProductClient>(client =>
+    {
+#pragma warning disable S1075 // Aspire service name, not a hardcoded URI
+        client.BaseAddress = new Uri("http://mcp");
+#pragma warning restore S1075
+    });
+
     var app = builder.Build();
+
+    app.MapDefaultEndpoints();
 
     // Auto-migrate SQLite on startup
     using (var scope = app.Services.CreateScope())
@@ -90,6 +105,7 @@ try
     app.UseStaticFiles();
 
     app.MapChatEndpoints();
+    app.MapMcpEndpoints();
 
     app.MapGet("/", () => Results.Ok(new { Status = "AIShop API is running" }));
 
@@ -112,8 +128,11 @@ try
                 });
             }
 #pragma warning disable S2486, S108 // Ignore if browser not available
-            catch { }
+            catch (Exception ex)
 #pragma warning restore S2486, S108
+            {
+                Log.Warning(ex, "Unable to auto-open browser");
+            }
         });
     }
 

@@ -1,5 +1,7 @@
 # SqliteChatHistoryProvider 设计文档
 
+> 最后更新：2026-06-23 | 状态：与代码同步
+
 ## 背景
 
 当前 Agent 使用 `InMemoryChatHistoryProvider`，每次调用都新建 `ChatClientAgent` 和 `AgentSession`，状态不跨请求持久化。同时 ChatEndpoints 手动从 DB 加载**全部历史**拼入上下文，导致：
@@ -9,11 +11,8 @@
 ## 目标
 
 用 `SqliteChatHistoryProvider` 代替 `InMemoryChatHistoryProvider`，**自动管理 Agent 上下文窗口**：
-- 每次只加载**最近 5 条消息**
-- 当会话超过 **10 条**时，自动压缩（摘要）旧消息
-- 由 Provider 接管历史管理，ChatEndpoints 不再手动加载
-
----
+- 每次自动从 DB 加载最近 20 条消息
+- 由 Provider 接管历史加载，ChatEndpoints 不再手动拼接历史
 
 ## 设计
 
@@ -21,131 +20,71 @@
 
 | 文件 | 操作 |
 |------|------|
-| `src/AIShop.Core/Entities/ChatEntities.cs` | `Session` 新增 `CompactedSummary` 字段 |
-| `src/AIShop.Infrastructure/Data/AppDbContext.cs` | `Session` 映射新增 `CompactedSummary` |
 | `src/AIShop.Infrastructure/Services/SqliteChatHistoryProvider.cs` | **新建** |
 | `src/AIShop.Api/Agents/ShoppingAssistantAgent.cs` | 改用 `SqliteChatHistoryProvider` |
-| `src/AIShop.Api/Features/Chat/ChatEndpoints.cs` | 不再手动加载历史；传 session Id 给 Agent |
 
----
-
-### 1. Session 实体 — 新增压缩摘要字段
-
-```csharp
-// ChatEntities.cs
-public sealed class Session
-{
-    public Guid Id { get; init; }
-    public Guid UserId { get; init; }
-    public DateTime CreatedAt { get; init; } = DateTime.UtcNow;
-    public DateTime? LastActivityAt { get; set; }
-    public string? CompactedSummary { get; set; }  // ← 新增
-}
-```
-
-### 2. SqliteChatHistoryProvider — 核心实现
+### 1. SqliteChatHistoryProvider — 核心实现
 
 ```csharp
 namespace AIShop.Infrastructure.Services;
 
-internal sealed class SqliteChatHistoryProvider(
-    IDbContextFactory<AppDbContext> dbFactory,
-    IChatClient chatClient,
-    Guid sessionId) : IChatHistoryProvider
+public class SqliteChatHistoryProvider(
+    IDbContextFactory<AppDbContext> dbFactory) : ChatHistoryProvider()
 {
-    private const int RecentCount = 5;
-    private const int CompactionThreshold = 10;
+    private const int MaxMessages = 20;
 
-    public async Task InvokingAsync(AIContext context, AgentSession session, CancellationToken ct)
+    protected override async ValueTask<IEnumerable<AgentChatMessage>> ProvideChatHistoryAsync(
+        ChatHistoryProvider.InvokingContext context, CancellationToken cancellationToken = default)
     {
-        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var sessionId = GetSessionId(context.Session!);
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
 
-        // 1. 加载摘要（如果有）
-        var sessionEntity = await db.Sessions.FindAsync([sessionId], ct);
-        var summary = sessionEntity?.CompactedSummary;
-
-        // 2. 加载最近 5 条消息
-        var recentMessages = await db.ChatMessages
+        var messages = await db.ChatMessages
             .Where(m => m.SessionId == sessionId)
             .OrderByDescending(m => m.Timestamp)
-            .Take(RecentCount)
+            .Take(MaxMessages)
             .OrderBy(m => m.Timestamp)
-            .ToListAsync(ct);
+            .ToListAsync(cancellationToken);
 
-        // 3. 组装历史消息
-        var history = new List<ChatMessage>();
-        if (!string.IsNullOrEmpty(summary))
-        {
-            history.Add(new ChatMessage(ChatRole.System,
-                $"[历史摘要] {summary}"));
-        }
-        foreach (var m in recentMessages)
-        {
-            history.Add(new ChatMessage(
-                m.Role == "user" ? ChatRole.User : ChatRole.Assistant,
-                m.Content));
-        }
-
-        context.Messages = history;
-    }
-
-    public async Task InvokedAsync(AIContext context, AgentSession session, CancellationToken ct)
-    {
-        await using var db = await dbFactory.CreateDbContextAsync(ct);
-
-        // 检查是否需要压缩
-        var totalCount = await db.ChatMessages
-            .CountAsync(m => m.SessionId == sessionId, ct);
-
-        if (totalCount <= CompactionThreshold)
-            return;
-
-        // 需要压缩：摘要旧消息，仅保留最近 5 条
-        var oldMessages = await db.ChatMessages
-            .Where(m => m.SessionId == sessionId)
-            .OrderBy(m => m.Timestamp)
-            .Take(totalCount - RecentCount)
-            .ToListAsync(ct);
-
-        var summaryText = await SummarizeAsync(oldMessages, ct);
-
-        // 更新 Session 的摘要字段
-        var sessionEntity = await db.Sessions.FindAsync([sessionId], ct);
-        if (sessionEntity is not null)
-        {
-            sessionEntity.CompactedSummary = summaryText;
-        }
-
-        // 删除旧消息
-        db.ChatMessages.RemoveRange(oldMessages);
-        await db.SaveChangesAsync(ct);
-    }
-
-    private async Task<string> SummarizeAsync(
-        List<Core.Entities.ChatMessage> messages, CancellationToken ct)
-    {
-        var chatMessages = messages.Select(m => new ChatMessage(
+        return messages.Select(m => new AgentChatMessage(
             m.Role == "user" ? ChatRole.User : ChatRole.Assistant,
-            m.Content)).ToList();
+            m.Content));
+    }
 
-        chatMessages.Add(new ChatMessage(ChatRole.User,
-            "请用中文简要总结以上对话的核心内容。"));
+    protected override ValueTask StoreChatHistoryAsync(
+        ChatHistoryProvider.InvokedContext context, CancellationToken cancellationToken = default)
+    {
+        // Messages are persisted in ChatEndpoints and kept in SQLite forever.
+        // ProvideChatHistoryAsync loads only the latest N for the LLM.
+        return default;
+    }
 
-        var response = await chatClient.GetResponseAsync(chatMessages, cancellationToken: ct);
-        return response.Text ?? "";
+    private static Guid GetSessionId(AgentSession session)
+    {
+        if (session.StateBag.TryGetValue<string>("SessionId", out var id, null) && id is not null)
+            return Guid.Parse(id);
+        throw new InvalidOperationException("SessionId not found in session StateBag.");
     }
 }
 ```
 
-### 3. ShoppingAssistantAgent 改造
+**关键设计决策：**
+- `MaxMessages = 20` — 每次只加载最近 20 条，避免上下文膨胀
+- **不做压缩** — 不实现摘要/压缩功能，保持简单
+- **不删除消息** — `StoreChatHistoryAsync` 为空操作，消息持久化由 `ChatEndpoints` 负责
+- 历史按时间降序取最新 N 条，再升序排列交给 LLM
 
-使用 `ChatOptions.Instructions` 设置 system prompt，其中 **KeywordMap 从 `ProductCatalog.KeywordMap` 动态生成**，不写死在代码里。
+### 2. ShoppingAssistantAgent 改造
+
+使用 `ChatOptions.Instructions` 设置 system prompt，其中 **KeywordMap 从 `ProductCatalog.KeywordMap` 动态生成**。
 
 ```csharp
-public sealed class ShoppingAssistantAgent(
-    IChatClient chatClient,
-    IDbContextFactory<AppDbContext> dbFactory)
+public sealed class ShoppingAssistantAgent
 {
+    private readonly AIAgent _agent;
+
+    private static readonly string _instructions = BuildInstructions();
+
     private static string BuildInstructions()
     {
         var lines = new List<string>
@@ -159,9 +98,7 @@ public sealed class ShoppingAssistantAgent(
         };
 
         foreach (var (key, tags) in ProductCatalog.KeywordMap)
-        {
             lines.Add($"{key} | {string.Join("、", tags)}");
-        }
 
         lines.Add("");
         lines.Add("规则：");
@@ -172,62 +109,54 @@ public sealed class ShoppingAssistantAgent(
         return string.Join("\n", lines);
     }
 
-    private static readonly string _instructions = BuildInstructions();
+    public ShoppingAssistantAgent(IChatClient chatClient, IDbContextFactory<AppDbContext> dbFactory)
+    {
+        _agent = chatClient.AsAIAgent(new ChatClientAgentOptions
+        {
+            Name = "ShoppingAssistant",
+            Description = "智能购物助手",
+            ChatOptions = new ChatOptions
+            {
+                Instructions = _instructions
+            },
+            ChatHistoryProvider = new SqliteChatHistoryProvider(dbFactory),
+            ThrowOnChatHistoryProviderConflict = false
+        });
+    }
 
     public async Task<AgentChatResult> RunChatAsync(
         Guid sessionId, string userMessage, CancellationToken ct = default)
     {
-        var agent = new ChatClientAgent(
-            chatClient,
-            new ChatClientAgentOptions
-            {
-                Name = "ShoppingAssistant",
-                Description = "智能购物助手",
-                ChatOptions = new ChatOptions
-                {
-                    Instructions = _instructions
-                },
-                ChatHistoryProvider = new SqliteChatHistoryProvider(
-                    dbFactory, chatClient, sessionId)
-            },
-            loggerFactory: null,
-            services: null);
+        var session = await _agent.CreateSessionAsync(ct);
+        session.StateBag.SetValue("SessionId", sessionId.ToString());
 
-        var session = await agent.CreateSessionAsync(cancellationToken: ct);
-        var response = await agent.RunAsync<AgentChatResult>(
-            userMessage, session, options: null, cancellationToken: ct);
+        var response = await _agent.RunAsync<AgentChatResult>(
+            userMessage, session,
+            options: new AgentRunOptions
+            {
+                ResponseFormat = ChatResponseFormatJson.ForJsonSchema<AgentChatResult>()
+            },
+            cancellationToken: ct);
         return response.Result;
     }
 }
 ```
 
-**关键变化**：
-- `_instructions` 从 `ProductCatalog.KeywordMap` 动态构建，KeywordMap 更新时 prompt 自动同步
-- 放入 `ChatOptions.Instructions` 作为 System Message，不在用户消息中混入
+**关键变化：**
+- `_agent` 在构造函数中通过 `AsAIAgent()` 创建，实例级复用
+- `_instructions` 从 `ProductCatalog.KeywordMap` 动态构建
+- Instructions 通过 `ChatOptions.Instructions` 作为 System Message 注入
+- `SqliteChatHistoryProvider` 在 Agent 构造时注入 `dbFactory`，自动加载历史
 - `RunChatAsync` 从传 `context` 改为传 `userMessage`（仅当前消息）
-- `_instructions` 是 `static readonly`，只构建一次，但 `ProductCatalog.KeywordMap` 当前也是 `static readonly`，运行时不变（若有后续改为动态加载，可改成非静态）
 
-### 4. ChatEndpoints 变更
+### 3. ChatEndpoints 变更
 
-ChatEndpoints **不再需要手动加载历史到 context 中**，也不再传 KeywordPrompt。Instructions 由 Agent 的 `ChatOptions.Instructions` 作为 System Message 注入。
+ChatEndpoints **不再需要手动加载历史到 context 中**。Instructions 由 Agent 的 `ChatOptions.Instructions` 作为 System Message 注入。
 
 ```csharp
-api.MapPost("/chat", async (
-    ChatRequest req,
-    IUserRepository users,
-    ISessionRepository sessions,
-    AppDbContext db,
-    ShoppingAssistantAgent shoppingAgent,
-    CancellationToken ct) =>
+api.MapPost("/chat", async (..., ShoppingAssistantAgent shoppingAgent, ...) =>
 {
-    // ... user lookup ...
-
-    // 1. 保存用户消息
-    db.ChatMessages.Add(new ChatMessage { SessionId = sid, Role = "user", Content = req.Message });
-    await db.SaveChangesAsync(ct);
-
-    // 2. 调用 Agent（仅传当前消息 + sessionId）
-    //    Instructions 和最近历史由 Agent/ChatHistoryProvider 自动注入
+    // 1. 获取 Agent 结构化响应（历史由 SqliteChatHistoryProvider 自动加载）
     AgentChatResult result;
     try
     {
@@ -238,24 +167,19 @@ api.MapPost("/chat", async (
         result = new AgentChatResult("抱歉...", []);
     }
 
-    // 3. 白名单过滤 + 推荐（与现有逻辑相同）
-    var validKeywords = (result.Keywords ?? [])
-        .Where(k => ProductCatalog.KeywordMap.ContainsKey(k))
-        .Distinct().Take(5).ToArray();
-
-    // ...
-
-    // 4. 保存助手回复
+    // 2. 保存用户消息 + 助手回复
+    db.ChatMessages.Add(new ChatMessage { SessionId = sid, Role = "user", Content = req.Message });
     db.ChatMessages.Add(new ChatMessage { SessionId = sid, Role = "assistant", Content = result.Reply });
     await db.SaveChangesAsync(ct);
+
+    // 3. 白名单过滤 + 推荐（与现有逻辑相同）
+    // ...
 });
 ```
 
-`/api/recommendations` 同理，简化为仅传分析专用 prompt。
-
 ---
 
-## 数据流对比
+## 数据流
 
 ### Before
 
@@ -278,37 +202,16 @@ Agent 构造时:
   Instructions = "你是购物助手... + KeywordMap"  ← System Message
 
 Agent 运行时:
-  SqliteChatHistoryProvider.InvokingAsync():
-    查 DB → 加载摘要 + 最近 5 条 → 注入到 context（User/Assistant 消息）
+  SqliteChatHistoryProvider.ProvideChatHistoryAsync():
+    查 DB → 加载最近 20 条 → 注入到 context（User/Assistant 消息）
   LLM 收到的完整结构:
     (system) 你是购物助手... + KeywordMap     ← Instructions
-    (system) [历史摘要] ...                  ← Provider 注入
-    (user) 第 N-4 条消息                     ← Provider 注入（最近5条）
+    (user) 第 N-19 条消息                     ← Provider 注入（最近20条）
     (assistant) 回复
     ...
-    (user) 当前消息                          ← RunChatAsync 传入
-  SqliteChatHistoryProvider.InvokedAsync():
-    检查总数 > 10 → 是 → 摘要旧消息 + 删除旧消息
-```
-
----
-
-## 压缩行为
-
-| 阶段 | 动作 |
-|------|------|
-| 1-10 条消息 | 正常，不做任何压缩 |
-| 第 11 条保存后 | 摘要最早的 5 条，存到 `Session.CompactedSummary`，删除这 5 条 |
-| 后续每超 10 条 | 再次压缩最早的非摘要部分 |
-
-每次 Agent 调用时，LLM 看到的：
-
-```
-[历史摘要] 用户之前聊了跑鞋和户外...  ← 压缩摘要
-(user) 最近一条消息                      ← 最近 5 条
-(assistant) 回复
-(user) 当前消息
-(Assistant) 你是购物助手... + KeywordMap  ← 指令
+    (user) 当前消息                           ← RunChatAsync 传入
+  SqliteChatHistoryProvider.StoreChatHistoryAsync():
+    空操作 — 消息已在 ChatEndpoints 中持久化
 ```
 
 ---
@@ -317,37 +220,15 @@ Agent 运行时:
 
 | 场景 | 处理 |
 |------|------|
-| 第一次调用，无历史 | `InvokingAsync` 加载空列表，不注入摘要 |
-| 压缩摘要时 LLM 调用失败 | `SummarizeAsync` catch → 存储空摘要，不删除旧消息 |
-| 并发调用导致重复压缩 | 每次 `InvokedAsync` 重新 `CountAsync`，幂等 |
-| 历史只有 6 条 | < 10 条，不触发压缩 |
-| 压缩后只剩 5 条 + 摘要 | 下次调用只有 5 条 + 摘要，等累积到 10 条再压 |
-
----
-
-## 依赖注入
-
-`SqliteChatHistoryProvider` 不注册到 DI（在 Agent 内部创建），但需要：
-
-```csharp
-// Program.cs — 注册 IDbContextFactory（如果尚未注册）
-builder.Services.AddDbContextFactory<AppDbContext>(...);
-```
-
-同时 `ShoppingAssistantAgent` 需要新增 `IDbContextFactory<AppDbContext>` 注入：
-
-```csharp
-// Program.cs
-builder.Services.AddScoped<ShoppingAssistantAgent>();
-```
-
-已在作用域内，`IDbContextFactory` 是单例，可安全注入。
+| 第一次调用，无历史 | `ProvideChatHistoryAsync` 返回空列表 |
+| 历史超过 20 条 | 取最近 20 条，旧消息保留在 DB 但不再传给 LLM |
+| StateBag 中缺少 SessionId | 抛出 `InvalidOperationException` |
+| 并发调用 | `IDbContextFactory` 每次创建新 DbContext，天然隔离 |
 
 ---
 
 ## 验收标准
 
 1. 登录后发 3-4 条消息 → `/api/chat` 正常工作，推荐逻辑正常
-2. 发 10+ 条消息后 → 检查 DB `ChatMessages` 少于 10 条（旧消息已被压缩删除）
-3. `Session.CompactedSummary` 有值（摘要已存储）
-4. 发 15+ 条消息后 → 第二次压缩触发，摘要字段更新
+2. 发 20+ 条消息后 → LLM 只看到最近 20 条，旧消息保留在 DB
+3. 消息不丢失 → DB 中消息数 = 发送总数
