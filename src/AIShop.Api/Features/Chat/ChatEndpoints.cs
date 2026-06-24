@@ -93,13 +93,6 @@ public static class ChatEndpoints
             });
             await db.SaveChangesAsync(ct);
 
-            Console.WriteLine("==========================");
-            foreach(var item in result.Keywords)
-            {
-                Console.WriteLine(item);
-            }
-            Console.WriteLine("==========================");
-            Console.WriteLine();
             // 3. Validate keywords against white-list
             var validKeywords = (result.Keywords ?? [])
                 .Where(k => ProductCatalog.KeywordMap.ContainsKey(k))
@@ -116,7 +109,7 @@ public static class ChatEndpoints
                 var recDtos = recommended.Select(ToDto).ToList();
                 var otherDtos = recommended.Length == 0
                     ? ProductCatalog.All.Take(6).Select(ToDto).ToList()
-                    : others.Select(ToDto).ToList();
+                    : others.Take(12).Select(ToDto).ToList();
 
                 chatReply = new ChatReply(result.Reply, recDtos, otherDtos,
                     "根据您的兴趣，为您推荐：", HasRecommendation: true,
@@ -161,7 +154,15 @@ public static class ChatEndpoints
             if (lastUserMessage is null)
                 return Results.Ok(new RecommendationResponse(null, [], "暂无对话历史，请先聊天。", null));
 
-            var result = await shoppingAgent.RunChatAsync(sid, lastUserMessage, ct);
+            AgentChatResult result;
+            try
+            {
+                result = await shoppingAgent.RunChatAsync(sid, lastUserMessage, ct);
+            }
+            catch
+            {
+                return Results.Ok(new RecommendationResponse(null, [], "推荐服务暂时不可用，请重试。", null));
+            }
             var preferences = result.Keywords ?? [];
 
             var matched = ProductCatalog.MatchProducts(preferences);

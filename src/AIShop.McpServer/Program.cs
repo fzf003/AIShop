@@ -1,5 +1,6 @@
 using Serilog;
 using ModelContextProtocol.Server;
+using AIShop.ServiceDefaults;
 
 Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()
@@ -13,14 +14,17 @@ try
         .ReadFrom.Configuration(ctx.Configuration)
         .WriteTo.Console());
 
+    builder.AddServiceDefaults();
+
     builder.Services.AddMcpServer()
         .WithHttpTransport()
         .WithToolsFromAssembly();
 
     var app = builder.Build();
 
+    app.MapDefaultEndpoints();
+
     app.MapMcp("/mcp");
-    app.MapGet("/health", () => Results.Ok(new { Status = "healthy" }));
 
     await app.RunAsync();
 }

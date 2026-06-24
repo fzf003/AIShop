@@ -1,7 +1,26 @@
-bin/
-obj/
+# Build outputs
+src/**/bin/
+src/**/obj/
+tests/**/bin/
+tests/**/obj/
+
 .vs/
 *.user
 *.suo
 _Resharper*/
 .DS_Store
+.gstack/
+.env
+_ref
+claude
+CLAUDE-1.md
+bash.exe.stackdump
+CLAUDE copy.md
+AGENTS.md
+.gstack
+Directory.Build.props
+docs/adr
+docs/assets
+docs/design
+docs/superpowers
+
