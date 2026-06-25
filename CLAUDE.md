@@ -176,7 +176,7 @@ git push origin feature/xxx   # 推送 + 创建 PR
 
 三个阶段顺序执行，前一阶段冻结后才进入下一阶段。
 
-## 开发历程最佳实践
+## 开发历程最佳实践 
 
 参考 `docs/agent-journey-best-practices.md`，遵循以下原则：
 - **渐进式复杂度**：从最简单的模式开始，仅在需要时增加复杂度
