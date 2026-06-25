@@ -109,7 +109,7 @@ dotnet clean -c Release
 3. **端点模式**：扩展方法 `static void Map{功能名}Endpoints(this WebApplication app)`
 4. **Agent 分离**：Agent 定义在 `Api/Agents/`，端点逻辑在 `Features/`
 5. **DI 批量注册**：Infrastructure 通过 `AddInfrastructure()` 扩展方法统一注册
-6. **MAF 技能参考**：涉及 MAF API 时，先读 `.codex/skills/maf-reference/references/*.md`
+6. **MAF 技能参考**：涉及 MAF API 时，先调用 `/maf-reference` 技能
 
 ### 异步规范
 
@@ -156,7 +156,7 @@ git push origin feature/xxx   # 推送 + 创建 PR
 在 prompt 中包含 `[dev-agent]` 或描述开发任务即可激活：
 - 实现功能、写 C#/MAF 代码、创建端点、搭建垂直切片
 - 开发过程中有分歧先和架构师Agent 讨论，然后和客户确定之后再改代码
-- 写 MAF 代码前自动读取 `.codex/skills/maf-reference/references/*.md` 获取准确 API
+- 写 MAF 代码前自动调用 `/maf-reference` 技能获取准确 API 参考和代码模板
 - **需要架构师Agent 的设计文档就绪后再开始实现**
 - 完成后运行 `dotnet build` 验证编译
 
@@ -185,7 +185,7 @@ git push origin feature/xxx   # 推送 + 创建 PR
 
 ## MAF 参考文件使用规则
 
-当读取 `.codex/skills/maf-reference/references/` 下的 MAF 参考文件时：
+当 `/maf-reference` 技能被调用并从 `references/` 读取参考文件时：
 - **优先使用不带 `.zh-CN` 后缀的版本**（英文原版）
 - 如果某个文件只有 `.zh-CN` 版本而没有英文原版，则使用 `.zh-CN` 版本
 
@@ -212,6 +212,8 @@ curl -X POST http://localhost:5206/api/chat \
 当用户的请求匹配到可用技能时，通过 Skill 工具调用它。不确定时也优先调用技能。
 
 关键路由规则：
+- MAF/Agent 开发、写 Agent 代码/工作流 → 调用 /maf-reference
+- Agent 相关 Bug 排查/DI 注册失败 → 调用 /maf-reference
 - 产品创意/头脑风暴 → 调用 /office-hours
 - 战略/范围界定 → 调用 /plan-ceo-review
 - 架构设计 → 调用 /plan-eng-review
