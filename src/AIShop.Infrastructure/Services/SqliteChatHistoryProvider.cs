@@ -9,7 +9,7 @@ namespace AIShop.Infrastructure.Services;
 public class SqliteChatHistoryProvider(
     IDbContextFactory<AppDbContext> dbFactory) : ChatHistoryProvider()
 {
-    private const int MaxMessages = 20;
+    private const int MaxMessages = 2;
 
     protected override async ValueTask<IEnumerable<AgentChatMessage>> ProvideChatHistoryAsync(
         ChatHistoryProvider.InvokingContext context, CancellationToken cancellationToken = default)

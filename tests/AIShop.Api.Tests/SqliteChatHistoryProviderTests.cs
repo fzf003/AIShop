@@ -106,21 +106,23 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
 
         var result = await InvokeProvideAsync();
 
-        Assert.Equal(3, result.Count);
-        Assert.Contains(result, m => m.Text == "消息0");
+        // MaxMessages = 2, only the 2 most recent messages are returned
+        Assert.Equal(2, result.Count);
+        Assert.Contains(result, m => m.Text == "消息1");
         Assert.Contains(result, m => m.Text == "消息2");
     }
 
     [Fact]
-    public async Task Provide_LimitTo20()
+    public async Task Provide_LimitTo2()
     {
         SeedMessages(25);
 
         var result = await InvokeProvideAsync();
 
-        Assert.Equal(20, result.Count);
+        Assert.Equal(2, result.Count);
         Assert.DoesNotContain(result, m => m.Text == "消息0"); // oldest trimmed
-        Assert.Contains(result, m => m.Text == "消息24");       // newest present
+        Assert.Contains(result, m => m.Text == "消息23");       // newest 2: index 23, 24
+        Assert.Contains(result, m => m.Text == "消息24");
     }
 
     [Fact]

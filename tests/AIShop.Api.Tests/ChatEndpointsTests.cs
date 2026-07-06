@@ -1,12 +1,12 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using AIShop.Api.Agents;
 using AIShop.Api.Features.Chat;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Extensions.AI;
+using Microsoft.Agents.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using NSubstitute;
-using ChatMessage = Microsoft.Extensions.AI.ChatMessage;
 
 namespace AIShop.Api.Tests;
 
@@ -20,21 +20,15 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         {
             builder.ConfigureServices(services =>
             {
-                services.RemoveAll<IChatClient>();
+                services.RemoveAll<IShoppingAssistantAgent>();
 
-                var mock = Substitute.For<IChatClient>();
-                var fakeResponse = new ChatResponse(
-                    new ChatMessage(ChatRole.Assistant,
-                        JsonSerializer.Serialize(new { Reply = "模拟回复", Keywords = new[] { "跑步" } })))
-                {
-                    ResponseId = "test",
-                    FinishReason = ChatFinishReason.Stop
-                };
+                var mock = Substitute.For<IShoppingAssistantAgent>();
+                var fakeResult = new AgentChatResult("模拟回复", ["跑步"], null);
+                var fakeSession = new TestSession();
+                fakeSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
 
-                // IChatClient.GetResponseAsync has IEnumerable<ChatMessage> + ChatOptions? overload
-                mock.GetResponseAsync(Arg.Any<IList<ChatMessage>>(),
-                        Arg.Any<ChatOptions?>(), Arg.Any<CancellationToken>())
-                    .Returns(fakeResponse);
+                mock.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+                    .Returns((fakeResult, fakeSession));
 
                 services.AddSingleton(mock);
             });
@@ -151,4 +145,9 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     }
 
     private sealed record ProductsResponse(ProductDto[] products);
+
+    private sealed class TestSession : AgentSession
+    {
+        public TestSession() : base(new AgentSessionStateBag()) { }
+    }
 }

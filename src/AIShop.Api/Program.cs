@@ -47,7 +47,7 @@ try
     {
         // Bypass system proxy for direct OpenAI API connection
         var handler = new HttpClientHandler { UseProxy = false, Proxy = null };
-        var httpClient = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(60) };
+        var httpClient = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(60*2) };
         var clientOptions = new OpenAIClientOptions
         {
             Endpoint = new Uri(endpoint),
@@ -59,13 +59,15 @@ try
     });
 
     // Register Agent definitions (Api/Agents/)
-    builder.Services.AddScoped<ShoppingAssistantAgent>();
+    builder.Services.AddScoped<IShoppingAssistantAgent, ShoppingAssistantAgent>();
 
     // Register MCP Product Client — uses Aspire service discovery (http://mcp resolved via WithReference)
     builder.Services.AddHttpClient<McpProductClient>(client =>
     {
 #pragma warning disable S1075 // Aspire service name, not a hardcoded URI
+#pragma warning disable S5332 // Aspire service discovery URI, not user-facing
         client.BaseAddress = new Uri("http://mcp");
+#pragma warning restore S5332
 #pragma warning restore S1075
     });
 

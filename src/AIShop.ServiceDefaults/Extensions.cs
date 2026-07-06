@@ -49,7 +49,8 @@ public static class Extensions
             {
                 tracing.AddAspNetCoreInstrumentation()
                     .AddHttpClientInstrumentation()
-                    .AddSource(builder.Environment.ApplicationName);
+                    .AddSource(builder.Environment.ApplicationName)
+                    .AddSource("Experimental.Microsoft.Agents.AI");
             });
 
         builder.AddOpenTelemetryExporters();

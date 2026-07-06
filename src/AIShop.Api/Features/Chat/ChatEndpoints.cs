@@ -3,11 +3,12 @@ using AIShop.Core.Entities;
 using AIShop.Core.Interfaces;
 using AIShop.Infrastructure.Data;
 using AIShop.Infrastructure.Services;
+using Microsoft.Agents.AI;
 using Microsoft.EntityFrameworkCore;
 
 namespace AIShop.Api.Features.Chat;
 
-public sealed record AgentChatResult(string Reply, string[] Keywords);
+public sealed record AgentChatResult(string Reply, string[] Keywords, string[]? Preferences);
 
 public sealed record ChatRequest(string Username, string Message);
 public sealed record ChatReply(
@@ -60,7 +61,7 @@ public static class ChatEndpoints
             IUserRepository users,
             ISessionRepository sessions,
             AppDbContext db,
-            ShoppingAssistantAgent shoppingAgent,
+            IShoppingAssistantAgent shoppingAgent,
             CancellationToken ct) =>
         {
             var user = await users.GetByUsernameAsync(req.Username, ct);
@@ -72,13 +73,14 @@ public static class ChatEndpoints
 
             // 1. Get response from agent (history loaded from SQLite by provider)
             AgentChatResult result;
+            AgentSession? session = null;
             try
             {
-                result = await shoppingAgent.RunChatAsync(sid, req.Message, ct);
+                (result, session) = await shoppingAgent.RunChatAsync(sid, req.Message, ct);
             }
             catch
             {
-                result = new AgentChatResult("抱歉，暂时无法处理您的请求，请重试。", []);
+                result = new AgentChatResult("抱歉，暂时无法处理您的请求，请重试。", [], null);
             }
 
 
@@ -92,6 +94,12 @@ public static class ChatEndpoints
                 SessionId = sid, Role = "assistant", Content = result.Reply
             });
             await db.SaveChangesAsync(ct);
+
+            // 2.5 Persist extracted preferences to session StateBag for next round
+            if (result.Preferences is { Length: > 0 } && session is not null)
+            {
+                session.StateBag.SetValue("Preferences", string.Join("、", result.Preferences));
+            }
 
             // 3. Validate keywords against white-list
             var validKeywords = (result.Keywords ?? [])
@@ -134,7 +142,7 @@ public static class ChatEndpoints
             IUserRepository users,
             ISessionRepository sessions,
             AppDbContext db,
-            ShoppingAssistantAgent shoppingAgent,
+            IShoppingAssistantAgent shoppingAgent,
             CancellationToken ct) =>
         {
             var user = await users.GetByUsernameAsync(req.Username, ct);
@@ -157,7 +165,7 @@ public static class ChatEndpoints
             AgentChatResult result;
             try
             {
-                result = await shoppingAgent.RunChatAsync(sid, lastUserMessage, ct);
+                (result, _) = await shoppingAgent.RunChatAsync(sid, lastUserMessage, ct);
             }
             catch
             {
