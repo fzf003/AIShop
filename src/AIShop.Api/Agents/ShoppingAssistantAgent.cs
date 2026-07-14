@@ -1,21 +1,22 @@
 #pragma warning disable MAAI001
+using System.Diagnostics;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.EntityFrameworkCore;
 using AIShop.Api.Features.Chat;
 using AIShop.Infrastructure.Data;
-using AIShop.Infrastructure.Services;
+using AIShop.Core.Interfaces;
 using Microsoft.Agents.AI.Compaction;
+using Serilog;
 
 namespace AIShop.Api.Agents;
 
 public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 {
     private readonly HarnessAgent _agent;
+    private static readonly Serilog.ILogger Logger = Log.ForContext<ShoppingAssistantAgent>();
 
-    private static readonly string _instructions = BuildInstructions();
-
-    private static string BuildInstructions()
+    private static string BuildInstructions(IProductCatalogService catalog)
     {
         var lines = new List<string>
         {
@@ -27,7 +28,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             "关键词 | 覆盖的商品标签"
         };
 
-        foreach (var (key, tags) in ProductCatalog.KeywordMap)
+        foreach (var (key, tags) in catalog.KeywordMap)
         {
             lines.Add($"{key} | {string.Join("、", tags)}");
         }
@@ -42,20 +43,23 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         return string.Join("\n", lines);
     }
 
-    public ShoppingAssistantAgent(IChatClient chatClient, IDbContextFactory<AppDbContext> dbFactory)
+    public ShoppingAssistantAgent(IChatClient chatClient, IDbContextFactory<AppDbContext> dbFactory,
+        IProductCatalogService catalog)
     {
+        var instructions = BuildInstructions(catalog);
+
         var options = new HarnessAgentOptions
         {
             Name = "ShoppingAssistant",
             Description = "智能购物助手",
-            HarnessInstructions = _instructions,
+            HarnessInstructions = instructions,
             ChatHistoryProvider = new SqliteChatHistoryProvider(dbFactory),
 
             // 上下文压缩：保留最近 15 轮对话+system，超出自动丢弃
             DisableCompaction = false,
             CompactionStrategy = new SlidingWindowCompactionStrategy(
                 trigger: CompactionTriggers.Always,
-                minimumPreservedTurns: 15),
+                minimumPreservedTurns: 3),
 
             // Loop 循环评估：Agent 未 [COMPLETE] 时自动追问，最多 5 轮
             // LoopEvaluators = [new CompletionMarkerLoopEvaluator("[COMPLETE]")],
@@ -84,6 +88,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     public async Task<(AgentChatResult Result, AgentSession Session)> RunChatAsync(
         Guid sessionId, string userMessage, CancellationToken ct = default)
     {
+        var sw = Stopwatch.StartNew();
         var session = await _agent.CreateSessionAsync(ct);
         session.StateBag.SetValue("SessionId", sessionId.ToString());
 
@@ -94,6 +99,10 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
                 ResponseFormat = ChatResponseFormatJson.ForJsonSchema<AgentChatResult>()
             },
             cancellationToken: ct);
+
+        sw.Stop();
+        Logger.Information("[Diagnose] Agent调用总耗时 AgentCall={ElapsedMs}ms SessionId={SessionId}",
+            sw.ElapsedMilliseconds, sessionId);
         return (response.Result, session);
     }
 }
