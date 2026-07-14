@@ -19,10 +19,7 @@ CLAUDE copy.md
 AGENTS.md
 .gstack
 Directory.Build.props
-docs/adr
-docs/assets
-docs/design
-docs/superpowers
+
 *.db
 .agents/
 .claude/
@@ -31,3 +28,7 @@ docs/superpowers
 tools/
 .vs/
 .teach/
+docs/design
+docs/implementation
+openspec/
+
