@@ -165,6 +165,77 @@
             grid-template-columns: 1fr 1fr; gap: 12px;
         }
         .modal-body .product-card { margin-bottom: 0; }
+
+        /* Modal toolbar: search + sort */
+        .modal-toolbar {
+            display: flex; align-items: center; gap: 12px;
+            padding: 12px 24px; border-bottom: 1px solid #eee;
+        }
+        .search-input {
+            flex: 1; padding: 8px 12px; border: 1px solid #ddd;
+            border-radius: 8px; font-size: 0.9rem; outline: none;
+        }
+        .search-input:focus { border-color: #1a1a2e; }
+        .sort-select {
+            padding: 8px 12px; border: 1px solid #ddd; border-radius: 8px;
+            font-size: 0.9rem; background: white; cursor: pointer;
+        }
+
+        /* Category filter bar */
+        .category-bar {
+            display: flex; flex-wrap: wrap; gap: 8px;
+            padding: 12px 24px; border-bottom: 1px solid #eee;
+        }
+        .category-chip {
+            padding: 4px 14px; border: 1px solid #ddd; border-radius: 20px;
+            font-size: 0.8rem; cursor: pointer; background: white; color: #555;
+            transition: all 0.15s; white-space: nowrap;
+        }
+        .category-chip:hover { border-color: #1a1a2e; color: #1a1a2e; }
+        .category-chip.active {
+            background: #1a1a2e; color: white; border-color: #1a1a2e; font-weight: 600;
+        }
+        .category-chip .count {
+            opacity: 0.7; font-weight: 400; margin-left: 2px;
+        }
+
+        /* Category badge on product card */
+        .product-card { position: relative; }
+        .category-badge {
+            position: absolute; top: 8px; right: 8px;
+            background: rgba(26,26,46,0.08); color: #666;
+            font-size: 0.7rem; padding: 2px 8px; border-radius: 10px;
+            font-weight: 500;
+        }
+
+        /* Product count */
+        .product-count {
+            font-size: 0.85rem; color: #888; font-weight: 400; margin-left: 8px;
+        }
+
+        /* Product detail modal */
+        .modal-detail { width: 480px; }
+        .modal-body-detail { padding: 24px; }
+        .detail-content { display: flex; gap: 24px; align-items: flex-start; }
+        .detail-emoji { font-size: 4rem; line-height: 1; min-width: 100px; text-align: center; }
+        .detail-info { flex: 1; }
+        .detail-name { font-size: 1.4rem; font-weight: 700; color: #1a1a2e; margin-bottom: 12px; }
+        .detail-category {
+            display: inline-block; background: #f0f0f0; color: #888;
+            font-size: 0.8rem; padding: 4px 12px; border-radius: 12px; margin-bottom: 12px;
+        }
+        .detail-tags { font-size: 0.9rem; color: #666; margin-bottom: 12px; }
+        .detail-tags span {
+            display: inline-block; background: #f5f5f5; color: #555;
+            padding: 2px 10px; border-radius: 10px; margin: 2px 4px 2px 0; font-size: 0.8rem;
+        }
+        .detail-price { font-size: 1.8rem; font-weight: 700; color: #16a34a; }
+
+        /* No products message */
+        .no-products {
+            grid-column: 1 / -1; text-align: center; color: #999;
+            padding: 40px 0; font-size: 0.95rem;
+        }
     </style>
 </head>
 <body>
@@ -224,15 +295,126 @@
     <div class="modal">
         <div class="modal-header">
             <h2>📦 全部商品</h2>
+            <span class="product-count" id="productCount"></span>
             <button class="modal-close" onclick="closeProducts()">✕</button>
         </div>
+        <div class="modal-toolbar">
+            <input type="text" class="search-input" placeholder="🔍 搜索商品名称..." oninput="onSearchInput(this.value)">
+            <select class="sort-select" onchange="onSortChange(this.value)">
+                <option value="default">默认排序</option>
+                <option value="price_asc">价格 ↑</option>
+                <option value="price_desc">价格 ↓</option>
+            </select>
+        </div>
+        <div class="category-bar" id="categoryBar"></div>
         <div class="modal-body" id="productsGrid"></div>
+    </div>
+</div>
+
+<!-- Product Detail Modal -->
+<div class="modal-overlay" id="productDetailModal" onclick="if(event.target===this) closeProductDetail()">
+    <div class="modal modal-detail">
+        <div class="modal-header">
+            <h2>商品详情</h2>
+            <button class="modal-close" onclick="closeProductDetail()">✕</button>
+        </div>
+        <div class="modal-body-detail" id="productDetailBody"></div>
     </div>
 </div>
 
 <script>
     let currentUser = null;
     let currentProvider = 'keymatch';
+    let filterCategory = 'all';
+    let searchQuery = '';
+    let sortMode = 'default';
+    let allProducts = [];
+
+    function getFilteredProducts() {
+        let list = allProducts;
+        if (filterCategory !== 'all') {
+            list = list.filter(p => p.category === filterCategory);
+        }
+        if (searchQuery.trim() !== '') {
+            const q = searchQuery.trim().toLowerCase();
+            list = list.filter(p => p.name.toLowerCase().includes(q));
+        }
+        if (sortMode === 'price_asc') {
+            list = [...list].sort((a, b) => a.price - b.price);
+        } else if (sortMode === 'price_desc') {
+            list = [...list].sort((a, b) => b.price - a.price);
+        }
+        return list;
+    }
+
+    function getUniqueCategories() {
+        const seen = new Set();
+        const cats = [];
+        for (const p of allProducts) {
+            if (!seen.has(p.category)) {
+                seen.add(p.category);
+                cats.push(p.category);
+            }
+        }
+        return cats;
+    }
+
+    function getCategoryCount(category) {
+        return allProducts.filter(p => p.category === category).length;
+    }
+
+    function renderCategoryBar() {
+        const bar = document.getElementById('categoryBar');
+        const cats = getUniqueCategories();
+        const totalCount = allProducts.length;
+        let html = `<button class="category-chip ${filterCategory === 'all' ? 'active' : ''}" onclick="setCategoryFilter('all')">全部 <span class="count">(${totalCount})</span></button>`;
+        cats.forEach(cat => {
+            const count = getCategoryCount(cat);
+            html += `<button class="category-chip ${filterCategory === cat ? 'active' : ''}" onclick="setCategoryFilter('${cat}')">${cat} <span class="count">(${count})</span></button>`;
+        });
+        bar.innerHTML = html;
+    }
+
+    function renderProducts() {
+        const grid = document.getElementById('productsGrid');
+        const filtered = getFilteredProducts();
+        grid.innerHTML = '';
+
+        if (filtered.length === 0) {
+            grid.innerHTML = '<div class="no-products">未找到匹配商品，试试其他关键词</div>';
+        } else {
+            filtered.forEach(p => {
+                const encoded = encodeURIComponent(JSON.stringify(p));
+                grid.innerHTML += `
+                    <div class="product-card" style="cursor:pointer" onclick="showProductDetail('${encoded}')">
+                        <span class="category-badge">${p.category}</span>
+                        <div class="product-icon">${p.emoji}</div>
+                        <div class="product-name">${p.name}</div>
+                        <div class="product-tags">${(p.tags || []).join(' · ')}</div>
+                        <div class="product-price">$${p.price.toFixed(2)}</div>
+                    </div>
+                `;
+            });
+        }
+
+        document.getElementById('productCount').textContent = `(${filtered.length})`;
+        renderCategoryBar();
+    }
+
+    function setCategoryFilter(category) {
+        filterCategory = category;
+        renderProducts();
+    }
+
+    function onSearchInput(value) {
+        searchQuery = value;
+        renderProducts();
+    }
+
+    function onSortChange(value) {
+        sortMode = value;
+        renderProducts();
+    }
 
     function setProvider(provider) {
         currentProvider = provider;
@@ -290,8 +472,9 @@
     }
 
     function productCard(p, isBest) {
+        const encoded = encodeURIComponent(JSON.stringify(p));
         return `
-            <div class="product-card ${isBest ? 'best-match' : ''}">
+            <div class="product-card ${isBest ? 'best-match' : ''}" onclick="showProductDetail('${encoded}')">
                 ${isBest ? '<div class="best-badge">⭐ 最佳推荐</div>' : ''}
                 <div class="product-icon">${p.emoji}</div>
                 <div class="product-name">${p.name}</div>
@@ -322,8 +505,9 @@
             if (data.otherProducts?.length > 0) {
                 container.innerHTML += '<div class="section-label other" style="color:#999;">📋 全部商品</div>';
                 data.otherProducts.forEach(p => {
+                    const encoded = encodeURIComponent(JSON.stringify(p));
                     container.innerHTML += `
-                        <div class="product-card" style="opacity:0.7;">
+                        <div class="product-card" style="opacity:0.7;cursor:pointer" onclick="showProductDetail('${encoded}')">
                             <div style="font-size:0.7rem;color:#999;margin-bottom:4px;">未推荐</div>
                             <div class="product-icon">${p.emoji}</div>
                             <div class="product-name">${p.name}</div>
@@ -341,13 +525,18 @@
         const container = document.getElementById('recoProducts');
         container.innerHTML = '';
 
-        if (products.length > 0) {
-            container.innerHTML += '<div class="section-label best">🎯 为您推荐</div>';
-            container.innerHTML += productCard(products[0], true);
+        if (products.length === 0) {
+            document.getElementById('recoMessage').textContent = '暂无推荐';
+            return;
         }
 
+        // 🎯 为您推荐 — best-match style for first product
+        container.innerHTML += '<div class="section-label best">🎯 为您推荐</div>';
+        container.innerHTML += productCard(products[0], true);
+
+        // 📋 其他商品 — remaining products
         if (products.length > 1) {
-            container.innerHTML += '<div class="section-label other">您可能也喜欢</div>';
+            container.innerHTML += '<div class="section-label other">📋 其他商品</div>';
             products.slice(1).forEach(p => {
                 container.innerHTML += productCard(p, false);
             });
@@ -423,17 +612,8 @@
         try {
             const res = await fetch('/api/products');
             const data = await res.json();
-            grid.innerHTML = '';
-            data.products.forEach(p => {
-                grid.innerHTML += `
-                    <div class="product-card">
-                        <div class="product-icon">${p.emoji}</div>
-                        <div class="product-name">${p.name}</div>
-                        <div class="product-tags">${(p.tags || []).join(' · ')}</div>
-                        <div class="product-price">$${p.price.toFixed(2)}</div>
-                    </div>
-                `;
-            });
+            allProducts = data.products;
+            renderProducts();
         } catch (err) {
             grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#c00">加载产品失败。</div>';
         }
@@ -441,6 +621,34 @@
 
     function closeProducts() {
         document.getElementById('productsModal').classList.remove('active');
+        filterCategory = 'all';
+        searchQuery = '';
+        sortMode = 'default';
+        document.getElementById('productsGrid').innerHTML = '';
+        document.getElementById('productCount').textContent = '';
+        document.getElementById('categoryBar').innerHTML = '';
+    }
+
+    function showProductDetail(product) {
+        const p = typeof product === 'string' ? JSON.parse(decodeURIComponent(product)) : product;
+        const body = document.getElementById('productDetailBody');
+        const tags = (p.tags || []).map(t => `<span>${t}</span>`).join('');
+        body.innerHTML = `
+            <div class="detail-content">
+                <div class="detail-emoji">${p.emoji}</div>
+                <div class="detail-info">
+                    <div class="detail-name">${p.name}</div>
+                    <div class="detail-category">${p.category}</div>
+                    ${tags ? `<div class="detail-tags">${tags}</div>` : ''}
+                    <div class="detail-price">$${p.price.toFixed(2)}</div>
+                </div>
+            </div>
+        `;
+        document.getElementById('productDetailModal').classList.add('active');
+    }
+
+    function closeProductDetail() {
+        document.getElementById('productDetailModal').classList.remove('active');
     }
 </script>
 </body>
