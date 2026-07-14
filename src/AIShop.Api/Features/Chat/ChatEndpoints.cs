@@ -63,6 +63,7 @@ public static class ChatEndpoints
             IChatMessageRepository chatRepo,
             IProductCatalogService catalog,
             IShoppingAssistantAgent shoppingAgent,
+            IMemoryCache cache,
             CancellationToken ct) =>
         {
             var endpointSw = Stopwatch.StartNew();
@@ -92,6 +93,11 @@ public static class ChatEndpoints
                 SessionId = sid, Role = "assistant", Content = result.Reply
             });
             await chatRepo.SaveChangesAsync(ct);
+
+            // 2.1 Cache agent result for /recommendations to avoid duplicate LLM call
+            var chatHash = GetMessageHash(req.Message);
+            var chatCacheKey = $"agent_result_{req.Username}_{chatHash}";
+            cache.Set(chatCacheKey, (result, session), TimeSpan.FromMinutes(5));
 
             // 2.5 Persist extracted preferences to session StateBag for next round
             if (result.Preferences is { Length: > 0 } && session is not null)
@@ -174,9 +180,10 @@ public static class ChatEndpoints
             if (lastUserMessage is null)
                 return Results.Ok(new RecommendationResponse(null, [], "暂无对话历史，请先聊天。", null));
 
-            // Build cache key: reco_{username}_{sha256(message)[..16]}
+            // Build cache key: {prefix}_{username}_{sha256(message)[..16]}
             var hash = GetMessageHash(lastUserMessage.Content);
             var cacheKey = $"reco_{req.Username}_{hash}";
+            var agentResultCacheKey = $"agent_result_{req.Username}_{hash}";
 
             if (cache.TryGetValue(cacheKey, out RecommendationResponse? cached) && cached is not null)
             {
@@ -186,15 +193,30 @@ public static class ChatEndpoints
                 return Results.Ok(cached);
             }
 
-            var agentSw = Stopwatch.StartNew();
-            var (result, _) = await shoppingAgent.RunChatAsync(sid, lastUserMessage.Content, ct);
-            agentSw.Stop();
-            logger.Information("[Diagnose] /recommendations Agent调用 AgentCall={ElapsedMs}ms SessionId={SessionId}",
-                agentSw.ElapsedMilliseconds, sid);
+            // Try to reuse agent result cached by /chat endpoint to avoid duplicate LLM call
+            AgentChatResult? agentResult = null;
+            AgentSession? agentSession = null;
+            var agentSw = new Stopwatch();
+            if (cache.TryGetValue(agentResultCacheKey, out var cachedAgentTuple))
+            {
+                var tuple = ((AgentChatResult Result, AgentSession? Session))cachedAgentTuple;
+                agentResult = tuple.Result;
+                agentSession = tuple.Session;
+                logger.Information("[Diagnose] /recommendations AgentCacheHit=true SessionId={SessionId}", sid);
+            }
+
+            if (agentResult is null)
+            {
+                agentSw.Start();
+                (agentResult, agentSession) = await shoppingAgent.RunChatAsync(sid, lastUserMessage.Content, ct);
+                agentSw.Stop();
+                logger.Information("[Diagnose] /recommendations Agent调用 AgentCall={ElapsedMs}ms SessionId={SessionId}",
+                    agentSw.ElapsedMilliseconds, sid);
+            }
 
             // Validate keywords against white-list (same logic as /chat endpoint)
             var keywordSw = Stopwatch.StartNew();
-            var validKeywords = (result.Keywords ?? [])
+            var validKeywords = (agentResult.Keywords ?? [])
                 .Where(k => catalog.KeywordMap.ContainsKey(k))
                 .Distinct()
                 .Take(5)
