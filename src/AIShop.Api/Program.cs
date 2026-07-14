@@ -3,6 +3,7 @@ using AIShop.Infrastructure;
 using AIShop.Infrastructure.Data;
 using AIShop.Api.Agents;
 using AIShop.Api.Features.Chat;
+using AIShop.Api.Middleware;
 using Microsoft.EntityFrameworkCore;
 using System.ClientModel;
 using System.ClientModel.Primitives;
@@ -59,7 +60,12 @@ try
     });
 
     // Register Agent definitions (Api/Agents/)
-    builder.Services.AddScoped<IShoppingAssistantAgent, ShoppingAssistantAgent>();
+    builder.Services.AddScoped<SqliteChatHistoryProvider>();
+    builder.Services.AddSingleton<IShoppingAssistantAgent, ShoppingAssistantAgent>();
+
+    // Add global exception handler
+    builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+    builder.Services.AddProblemDetails();
 
     // Register MCP Product Client — uses Aspire service discovery (http://mcp resolved via WithReference)
     builder.Services.AddHttpClient<McpProductClient>(client =>
@@ -74,6 +80,9 @@ try
     var app = builder.Build();
 
     app.MapDefaultEndpoints();
+
+    // Global exception handler middleware
+    app.UseExceptionHandler();
 
     // Auto-migrate SQLite on startup
     using (var scope = app.Services.CreateScope())

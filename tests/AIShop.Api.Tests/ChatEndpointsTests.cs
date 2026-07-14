@@ -144,6 +144,85 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         Assert.Contains(history, m => m.Role == "assistant");
     }
 
+    [Fact]
+    public async Task Agent_ShouldPreserveLast3Turns()
+    {
+        var client = _factory.CreateClient();
+        for (int i = 1; i <= 4; i++)
+            await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", $"消息{i}"));
+
+        var login = await client.PostAsJsonAsync("/api/login", new LoginRequest("marla"));
+        var profile = await login.Content.ReadFromJsonAsync<LoginResponse>();
+        Assert.NotNull(profile);
+        var userMsgs = profile!.History.Where(m => m.Role == "user").ToList();
+        Assert.Contains(userMsgs, m => m.Content == "消息2");
+        Assert.Contains(userMsgs, m => m.Content == "消息3");
+        Assert.Contains(userMsgs, m => m.Content == "消息4");
+    }
+
+    [Fact]
+    public async Task Recommendations_SecondRequest_ReturnsCachedResult()
+    {
+        var callCount = 0;
+        var factory = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IShoppingAssistantAgent>();
+                var mock = Substitute.For<IShoppingAssistantAgent>();
+                var fakeResult = new AgentChatResult("模拟推荐", ["运动"], null);
+                var fakeSession = new TestSession();
+                fakeSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
+                mock.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+                    .Returns(_ => { callCount++; return (fakeResult, fakeSession); });
+                services.AddSingleton(mock);
+            });
+        });
+        var client = factory.CreateClient();
+        await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐运动"));
+        var resp1 = await client.PostAsJsonAsync("/api/recommendations",
+            new RecommendationRequest("marla", "keymatch"));
+        resp1.EnsureSuccessStatusCode();
+        var resp2 = await client.PostAsJsonAsync("/api/recommendations",
+            new RecommendationRequest("marla", "keymatch"));
+        resp2.EnsureSuccessStatusCode();
+        var r1 = await resp1.Content.ReadFromJsonAsync<RecommendationResponse>();
+        var r2 = await resp2.Content.ReadFromJsonAsync<RecommendationResponse>();
+        Assert.NotNull(r1); Assert.NotNull(r2);
+        Assert.Equal(r1!.BestMatch?.Id, r2!.BestMatch?.Id);
+        Assert.Equal(r1.Message, r2.Message);
+    }
+
+    [Fact]
+    public async Task Recommendations_NewMessage_InvalidatesCache()
+    {
+        var callCount = 0;
+        var factory = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IShoppingAssistantAgent>();
+                var mock = Substitute.For<IShoppingAssistantAgent>();
+                var fakeResult = new AgentChatResult("推荐", ["运动"], null);
+                var fakeSession = new TestSession();
+                fakeSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
+                mock.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+                    .Returns(_ => { callCount++; return (fakeResult, fakeSession); });
+                services.AddSingleton(mock);
+            });
+        });
+        var client = factory.CreateClient();
+        await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐运动鞋"));
+        await client.PostAsJsonAsync("/api/recommendations",
+            new RecommendationRequest("marla", "keymatch"));
+        var firstCalls = callCount;
+        await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐耳机"));
+        await client.PostAsJsonAsync("/api/recommendations",
+            new RecommendationRequest("marla", "keymatch"));
+        Assert.True(callCount > firstCalls,
+            "新消息应使缓存失效，导致 Agent 重新被调用");
+    }
+
     private sealed record ProductsResponse(ProductDto[] products);
 
     private sealed class TestSession : AgentSession

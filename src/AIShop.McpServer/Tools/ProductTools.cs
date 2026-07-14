@@ -1,20 +1,20 @@
 using System.ComponentModel;
 using AIShop.Core.Entities;
-using AIShop.Infrastructure.Services;
+using AIShop.Core.Interfaces;
 using ModelContextProtocol.Server;
 
 namespace AIShop.McpServer.Tools;
 
 [McpServerToolType]
-public static class ProductTools
+public sealed class ProductTools(IProductCatalogService catalog)
 {
     [McpServerTool, Description("根据中文关键词匹配商品。传入中文关键词列表（如 [\"运动\", \"户外\", \"咖啡\"]），返回按相关度排序的最多 6 条匹配商品。")]
-    public static MatchProductDto[] MatchProducts(
+    public MatchProductDto[] MatchProducts(
         [Description("中文关键词列表，例如 [\"运动\", \"户外\", \"咖啡\"]。支持 23 个预定义关键词，自动扩展匹配标签。")]
         string[] keywords,
         CancellationToken cancellationToken = default)
     {
-        var products = ProductCatalog.MatchProducts(keywords);
+        var products = catalog.MatchProducts(keywords);
         return products.Select(MatchProductDto.FromEntity).ToArray();
     }
 }

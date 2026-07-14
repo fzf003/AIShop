@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 using Microsoft.Agents.AI;
 using AIShop.Infrastructure.Data;
-using AIShop.Infrastructure.Services;
+using AIShop.Api.Agents;
 using NSubstitute;
 using AgentChatMessage = Microsoft.Extensions.AI.ChatMessage;
 using CoreChatMessage = AIShop.Core.Entities.ChatMessage;
@@ -106,23 +106,28 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
 
         var result = await InvokeProvideAsync();
 
-        // MaxMessages = 2, only the 2 most recent messages are returned
-        Assert.Equal(2, result.Count);
+        // MaxMessages = 20, all 3 messages fit within limit
+        Assert.Equal(3, result.Count);
+        Assert.Contains(result, m => m.Text == "消息0");
         Assert.Contains(result, m => m.Text == "消息1");
         Assert.Contains(result, m => m.Text == "消息2");
     }
 
     [Fact]
-    public async Task Provide_LimitTo2()
+    public async Task Provide_LimitTo20()
     {
         SeedMessages(25);
 
         var result = await InvokeProvideAsync();
 
-        Assert.Equal(2, result.Count);
+        Assert.Equal(20, result.Count);
         Assert.DoesNotContain(result, m => m.Text == "消息0"); // oldest trimmed
-        Assert.Contains(result, m => m.Text == "消息23");       // newest 2: index 23, 24
-        Assert.Contains(result, m => m.Text == "消息24");
+        Assert.DoesNotContain(result, m => m.Text == "消息1");
+        Assert.DoesNotContain(result, m => m.Text == "消息2");
+        Assert.DoesNotContain(result, m => m.Text == "消息3");
+        Assert.DoesNotContain(result, m => m.Text == "消息4");
+        Assert.Contains(result, m => m.Text == "消息24");       // newest
+        Assert.Contains(result, m => m.Text == "消息23");
     }
 
     [Fact]

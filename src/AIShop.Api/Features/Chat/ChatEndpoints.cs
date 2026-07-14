@@ -78,7 +78,19 @@ public static class ChatEndpoints
 
             // 1. Get response from agent (history loaded from SQLite by provider)
             var agentSw = Stopwatch.StartNew();
-            var (result, session) = await shoppingAgent.RunChatAsync(sid, req.Message, ct);
+            AgentChatResult result;
+            AgentSession? session = null;
+            try
+            {
+                (result, session) = await shoppingAgent.RunChatAsync(sid, req.Message, ct);
+            }
+            catch (Exception ex)
+            {
+                agentSw.Stop();
+                logger.Error(ex, "[Diagnose] /chat Agent调用失败 AgentCall={ElapsedMs}ms SessionId={SessionId}",
+                    agentSw.ElapsedMilliseconds, sid);
+                result = new AgentChatResult("抱歉，暂时无法处理您的请求，请重试。", [], null);
+            }
             agentSw.Stop();
             logger.Information("[Diagnose] /chat Agent调用 AgentCall={ElapsedMs}ms SessionId={SessionId}",
                 agentSw.ElapsedMilliseconds, sid);
@@ -197,9 +209,9 @@ public static class ChatEndpoints
             AgentChatResult? agentResult = null;
             AgentSession? agentSession = null;
             var agentSw = new Stopwatch();
-            if (cache.TryGetValue(agentResultCacheKey, out var cachedAgentTuple))
+            if (cache.TryGetValue(agentResultCacheKey, out var cachedAgentTuple) && cachedAgentTuple is not null)
             {
-                var tuple = ((AgentChatResult Result, AgentSession? Session))cachedAgentTuple;
+                var tuple = ((AgentChatResult Result, AgentSession? Session))cachedAgentTuple!;
                 agentResult = tuple.Result;
                 agentSession = tuple.Session;
                 logger.Information("[Diagnose] /recommendations AgentCacheHit=true SessionId={SessionId}", sid);
@@ -208,7 +220,17 @@ public static class ChatEndpoints
             if (agentResult is null)
             {
                 agentSw.Start();
-                (agentResult, agentSession) = await shoppingAgent.RunChatAsync(sid, lastUserMessage.Content, ct);
+                try
+                {
+                    (agentResult, agentSession) = await shoppingAgent.RunChatAsync(sid, lastUserMessage.Content, ct);
+                }
+                catch (Exception ex)
+                {
+                    agentSw.Stop();
+                    logger.Error(ex, "[Diagnose] /recommendations Agent调用失败 AgentCall={ElapsedMs}ms SessionId={SessionId}",
+                        agentSw.ElapsedMilliseconds, sid);
+                    return Results.Ok(new RecommendationResponse(null, [], "推荐服务暂时不可用，请重试。", null));
+                }
                 agentSw.Stop();
                 logger.Information("[Diagnose] /recommendations Agent调用 AgentCall={ElapsedMs}ms SessionId={SessionId}",
                     agentSw.ElapsedMilliseconds, sid);

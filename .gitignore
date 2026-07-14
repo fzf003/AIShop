@@ -28,3 +28,6 @@ docs/superpowers
 .claude/
 .codex/
 
+tools/
+.vs/
+.teach/

@@ -1,10 +1,11 @@
-﻿using AIShop.Core.Entities;
+using AIShop.Core.Entities;
+using AIShop.Core.Interfaces;
 
 namespace AIShop.Infrastructure.Services;
 
-public static class ProductCatalog
+public sealed class ProductCatalog : IProductCatalogService
 {
-    public static readonly Product[] All =
+    public IReadOnlyList<Product> All { get; } =
     [
         new() { Id = 1,  Name = "经典皮夹克",         Category = "服装",      Tags = ["皮衣", "外套", "时尚", "潮流", "夹克"],  Price = 189.99m, Emoji = "🧥" },
         new() { Id = 2,  Name = "有机棉T恤",           Category = "服装",      Tags = ["有机", "休闲", "环保", "基础款"],         Price = 29.99m,  Emoji = "👕" },
@@ -26,7 +27,7 @@ public static class ProductCatalog
         new() { Id = 18, Name = "手工巧克力礼盒",       Category = "食品",      Tags = ["巧克力", "礼物", "美食", "甜品"],               Price = 27.99m,  Emoji = "🍫" },
     ];
 
-    public static readonly IReadOnlyDictionary<string, string[]> KeywordMap = new Dictionary<string, string[]>
+    public IReadOnlyDictionary<string, string[]> KeywordMap { get; } = new Dictionary<string, string[]>
     {
         ["夹克"] = ["皮衣", "外套", "夹克", "服装"],
         ["鞋子"] = ["鞋子", "跑鞋", "靴子", "鞋类"],
@@ -56,13 +57,14 @@ public static class ProductCatalog
     private static readonly string[] NegativePatterns =
         ["不", "不喜欢", "不要", "讨厌", "别", "没兴趣", "不需要"];
 
-    public static Product[] ScoreProducts(IReadOnlyList<Core.Entities.ChatMessage> history)
+    public Product[] ScoreProducts(IReadOnlyList<ChatMessage> history)
     {
         var likes = new HashSet<string>();
         var dislikes = new HashSet<string>();
 
         foreach (var text in history.Where(m => m.Role == "user").Select(m => m.Content))
-        {            foreach (var (keyword, expansions) in KeywordMap)
+        {
+            foreach (var (keyword, expansions) in KeywordMap)
             {
                 if (!text.Contains(keyword, StringComparison.Ordinal)) continue;
 
@@ -84,11 +86,10 @@ public static class ProductCatalog
         return ScoreByTags(likes, dislikes);
     }
 
-    public static Product[] MatchProducts(string[] preferences)
+    public Product[] MatchProducts(string[] preferences)
     {
         if (preferences.Length == 0) return [];
 
-        // Expand keywords through map for better matching
         var likes = new HashSet<string>(preferences, StringComparer.Ordinal);
         foreach (var kw in preferences)
         {
@@ -99,16 +100,11 @@ public static class ProductCatalog
         return ScoreByTags(likes, []);
     }
 
-    /// <summary>
-    /// Split products into recommended (matching) and others, without truncation.
-    /// Products are sorted by keyword order (earlier keyword match = higher priority).
-    /// </summary>
-    public static (Product[] Recommended, Product[] Others) SplitProducts(string[] keywords)
+    public (Product[] Recommended, Product[] Others) SplitProducts(string[] keywords)
     {
         if (keywords.Length == 0)
             return ([], All.Take(6).ToArray());
 
-        // Build ordered tag set: preserve keyword order, expand each keyword
         var orderedTags = new List<(int Index, string Tag)>();
         for (int i = 0; i < keywords.Length; i++)
         {
@@ -147,7 +143,7 @@ public static class ProductCatalog
         return (recommended.Select(r => r.Product).ToArray(), others.ToArray());
     }
 
-    private static Product[] ScoreByTags(HashSet<string> likes, HashSet<string> dislikes)
+    private Product[] ScoreByTags(HashSet<string> likes, HashSet<string> dislikes)
     {
         var scored = new List<(int Score, Product Product)>();
 
