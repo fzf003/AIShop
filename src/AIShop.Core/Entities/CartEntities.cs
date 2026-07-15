@@ -11,7 +11,7 @@ public sealed class Cart
 
 public sealed class CartItem
 {
-    public Guid Id { get; init; } = Guid.NewGuid();
+    public Guid Id { get; init; }
     public Guid CartId { get; init; }
     public int ProductId { get; init; }
     public string ProductName { get; init; } = string.Empty;

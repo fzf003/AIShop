@@ -6,13 +6,12 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
-
 namespace AIShop.Api.Tests;
 
 /// <summary>
 /// 购物车集成测试。
 /// 每个测试使用独立的 WebApplicationFactory + 临时 SQLite 数据库，完全隔离。
-/// 需要两次 POST 的测使用同一响应中的购物车结构验证多商品逻辑。
+/// 使用 TestContext 确保每次测试后释放 factory 和清理数据库文件。
 /// </summary>
 [CollectionDefinition("Cart Integration Tests", DisableParallelization = true)]
 public sealed class CartIntegrationTestCollection;
@@ -25,24 +24,41 @@ public sealed class CartEndpointsTests
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    private static HttpClient CreateClient()
+    /// <summary>
+    /// 一次性测试上下文，封装 WebApplicationFactory、HttpClient 和临时数据库路径。
+    /// Dispose 时释放 factory 并删除数据库文件。
+    /// </summary>
+    private sealed record TestContext(
+        WebApplicationFactory<Program> Factory,
+        HttpClient Client,
+        string DbPath) : IDisposable
     {
-        var dbPath = Path.Combine(Path.GetTempPath(), $"ais_ct_{Guid.NewGuid():N}.db");
-        var factory = new WebApplicationFactory<Program>()
-            .WithWebHostBuilder(builder =>
-            {
-                builder.ConfigureServices(services =>
-                {
-                    services.RemoveAll<IDbContextFactory<AppDbContext>>();
-                    services.RemoveAll<AppDbContext>();
+        public void Dispose()
+        {
+            Client.Dispose();
+            Factory.Dispose();
+            try { File.Delete(DbPath); } catch { /* best effort */ }
+        }
 
-                    services.AddDbContextFactory<AppDbContext>(options =>
-                        options.UseSqlite($"Data Source={dbPath}"));
-                    services.AddScoped<AppDbContext>(sp =>
-                        sp.GetRequiredService<IDbContextFactory<AppDbContext>>().CreateDbContext());
+        public static TestContext Create()
+        {
+            var dbPath = Path.Combine(Path.GetTempPath(), $"ais_ct_{Guid.NewGuid():N}.db");
+            var factory = new WebApplicationFactory<Program>()
+                .WithWebHostBuilder(builder =>
+                {
+                    builder.ConfigureServices(services =>
+                    {
+                        services.RemoveAll<IDbContextFactory<AppDbContext>>();
+                        services.RemoveAll<AppDbContext>();
+
+                        services.AddDbContextFactory<AppDbContext>(options =>
+                            options.UseSqlite($"Data Source={dbPath}"));
+                        services.AddScoped<AppDbContext>(sp =>
+                            sp.GetRequiredService<IDbContextFactory<AppDbContext>>().CreateDbContext());
+                    });
                 });
-            });
-        return factory.CreateClient();
+            return new TestContext(factory, factory.CreateClient(), dbPath);
+        }
     }
 
     private static async Task<CartResponse> PostItemAsync(HttpClient client, string user, int productId, int quantity)
@@ -65,8 +81,8 @@ public sealed class CartEndpointsTests
     [Fact]
     public async Task ShouldAddItem_WhenProductExists()
     {
-        var client = CreateClient();
-        var cart = await PostItemAsync(client, "marla", 1, 2);
+        using var ctx = TestContext.Create();
+        var cart = await PostItemAsync(ctx.Client, "marla", 1, 2);
 
         Assert.NotEqual(Guid.Empty, cart.Id);
         Assert.Single(cart.Items);
@@ -81,11 +97,11 @@ public sealed class CartEndpointsTests
     [Fact]
     public async Task ShouldUpdateQuantity_WhenItemExists()
     {
-        var client = CreateClient();
-        var cart = await PostItemAsync(client, "marla", 1, 1);
+        using var ctx = TestContext.Create();
+        var cart = await PostItemAsync(ctx.Client, "marla", 1, 1);
         var itemId = cart.Items[0].Id;
 
-        var response = await client.PutAsJsonAsync(
+        var response = await ctx.Client.PutAsJsonAsync(
             $"/api/cart/marla/items/{itemId}", new UpdateQuantityRequest(3));
         response.EnsureSuccessStatusCode();
 
@@ -99,11 +115,11 @@ public sealed class CartEndpointsTests
     [Fact]
     public async Task ShouldRemoveItem_WhenItemExists()
     {
-        var client = CreateClient();
-        var cart = await PostItemAsync(client, "marla", 1, 1);
+        using var ctx = TestContext.Create();
+        var cart = await PostItemAsync(ctx.Client, "marla", 1, 1);
         var itemId = cart.Items[0].Id;
 
-        var response = await client.DeleteAsync($"/api/cart/marla/items/{itemId}");
+        var response = await ctx.Client.DeleteAsync($"/api/cart/marla/items/{itemId}");
         response.EnsureSuccessStatusCode();
 
         var deletedCart = await response.Content.ReadFromJsonAsync<CartResponse>(JsonOptions);
@@ -114,15 +130,15 @@ public sealed class CartEndpointsTests
     [Fact]
     public async Task ShouldClearCart_WhenNotEmpty()
     {
-        var client = CreateClient();
+        using var ctx = TestContext.Create();
 
-        // 一次 POST 添加两个不同商品 + 清空
-        var clearResponse = await client.DeleteAsync("/api/cart/marla");
+        // 清空
+        var clearResponse = await ctx.Client.DeleteAsync("/api/cart/marla");
         clearResponse.EnsureSuccessStatusCode();
         var result = await clearResponse.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("购物车已清空", result.GetProperty("message").GetString());
 
-        var getResponse = await client.GetAsync("/api/cart/marla");
+        var getResponse = await ctx.Client.GetAsync("/api/cart/marla");
         getResponse.EnsureSuccessStatusCode();
         var emptyCart = await getResponse.Content.ReadFromJsonAsync<CartResponse>(JsonOptions);
         Assert.NotNull(emptyCart);
@@ -132,12 +148,12 @@ public sealed class CartEndpointsTests
     [Fact]
     public async Task ShouldGetCart_WhenExists()
     {
-        var client = CreateClient();
+        using var ctx = TestContext.Create();
 
         // 添加 2 件皮夹克
-        await PostItemAsync(client, "marla", 1, 2);
+        await PostItemAsync(ctx.Client, "marla", 1, 2);
 
-        var response = await client.GetAsync("/api/cart/marla");
+        var response = await ctx.Client.GetAsync("/api/cart/marla");
         response.EnsureSuccessStatusCode();
 
         var fetchedCart = await response.Content.ReadFromJsonAsync<CartResponse>(JsonOptions);
@@ -152,13 +168,12 @@ public sealed class CartEndpointsTests
     [Fact]
     public async Task ShouldGetSummary_WhenCartHasItems()
     {
-        var client = CreateClient();
+        using var ctx = TestContext.Create();
 
         // 添加 2 件皮夹克
-        var c = await PostItemAsync(client, "marla", 1, 2);
-        _ = c; // keep for potential future use
+        await PostItemAsync(ctx.Client, "marla", 1, 2);
 
-        var response = await client.GetAsync("/api/cart/marla/summary");
+        var response = await ctx.Client.GetAsync("/api/cart/marla/summary");
         response.EnsureSuccessStatusCode();
 
         var summary = await response.Content.ReadFromJsonAsync<CartSummaryResponse>(JsonOptions);
@@ -174,8 +189,8 @@ public sealed class CartEndpointsTests
     [Fact]
     public async Task ShouldReturn400_WhenProductNotFound()
     {
-        var client = CreateClient();
-        var response = await client.PostAsJsonAsync(
+        using var ctx = TestContext.Create();
+        var response = await ctx.Client.PostAsJsonAsync(
             "/api/cart/marla/items", new AddItemRequest(999, 1));
         Assert.Equal(400, (int)response.StatusCode);
         var error = await response.Content.ReadFromJsonAsync<ErrorResponse>(JsonOptions);
@@ -186,17 +201,17 @@ public sealed class CartEndpointsTests
     [Fact]
     public async Task ShouldReturn400_WhenQuantityIsZeroOrNegative()
     {
-        var client = CreateClient();
+        using var ctx = TestContext.Create();
 
-        var postResponse = await client.PostAsJsonAsync(
+        var postResponse = await ctx.Client.PostAsJsonAsync(
             "/api/cart/marla/items", new AddItemRequest(1, 0));
         Assert.Equal(400, (int)postResponse.StatusCode);
         var postError = await postResponse.Content.ReadFromJsonAsync<ErrorResponse>(JsonOptions);
         Assert.NotNull(postError);
         Assert.Equal("数量必须大于0", postError!.Error);
 
-        var cart = await PostItemAsync(client, "marla", 1, 1);
-        var putResponse = await client.PutAsJsonAsync(
+        var cart = await PostItemAsync(ctx.Client, "marla", 1, 1);
+        var putResponse = await ctx.Client.PutAsJsonAsync(
             $"/api/cart/marla/items/{cart.Items[0].Id}", new UpdateQuantityRequest(0));
         Assert.Equal(400, (int)putResponse.StatusCode);
         var putError = await putResponse.Content.ReadFromJsonAsync<ErrorResponse>(JsonOptions);
@@ -207,8 +222,8 @@ public sealed class CartEndpointsTests
     [Fact]
     public async Task ShouldReturn404_WhenItemNotInCart()
     {
-        var client = CreateClient();
-        var response = await client.DeleteAsync(
+        using var ctx = TestContext.Create();
+        var response = await ctx.Client.DeleteAsync(
             $"/api/cart/marla/items/{Guid.NewGuid()}");
         Assert.Equal(404, (int)response.StatusCode);
         var error = await response.Content.ReadFromJsonAsync<ErrorResponse>(JsonOptions);
@@ -219,19 +234,19 @@ public sealed class CartEndpointsTests
     [Fact]
     public async Task ShouldReturn404_WhenUserNotFound()
     {
-        var client = CreateClient();
-        Assert.Equal(404, (int)(await client.GetAsync("/api/cart/nonexistent_user_xyz")).StatusCode);
-        Assert.Equal(404, (int)(await client.PostAsJsonAsync("/api/cart/nonexistent_user_xyz/items", new AddItemRequest(1, 1))).StatusCode);
-        Assert.Equal(404, (int)(await client.PutAsJsonAsync($"/api/cart/nonexistent_user_xyz/items/{Guid.NewGuid()}", new UpdateQuantityRequest(1))).StatusCode);
-        Assert.Equal(404, (int)(await client.DeleteAsync($"/api/cart/nonexistent_user_xyz/items/{Guid.NewGuid()}")).StatusCode);
-        Assert.Equal(404, (int)(await client.DeleteAsync("/api/cart/nonexistent_user_xyz")).StatusCode);
+        using var ctx = TestContext.Create();
+        Assert.Equal(404, (int)(await ctx.Client.GetAsync("/api/cart/nonexistent_user_xyz")).StatusCode);
+        Assert.Equal(404, (int)(await ctx.Client.PostAsJsonAsync("/api/cart/nonexistent_user_xyz/items", new AddItemRequest(1, 1))).StatusCode);
+        Assert.Equal(404, (int)(await ctx.Client.PutAsJsonAsync($"/api/cart/nonexistent_user_xyz/items/{Guid.NewGuid()}", new UpdateQuantityRequest(1))).StatusCode);
+        Assert.Equal(404, (int)(await ctx.Client.DeleteAsync($"/api/cart/nonexistent_user_xyz/items/{Guid.NewGuid()}")).StatusCode);
+        Assert.Equal(404, (int)(await ctx.Client.DeleteAsync("/api/cart/nonexistent_user_xyz")).StatusCode);
     }
 
     [Fact]
     public async Task ShouldReturn200_WhenClearingEmptyCart()
     {
-        var client = CreateClient();
-        var response = await client.DeleteAsync("/api/cart/marla");
+        using var ctx = TestContext.Create();
+        var response = await ctx.Client.DeleteAsync("/api/cart/marla");
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("购物车已清空", result.GetProperty("message").GetString());
@@ -242,16 +257,16 @@ public sealed class CartEndpointsTests
     [Fact]
     public async Task DifferentUsers_CartsAreIsolated()
     {
-        var client = CreateClient();
-        await PostItemAsync(client, "marla", 1, 2);
+        using var ctx = TestContext.Create();
+        await PostItemAsync(ctx.Client, "marla", 1, 2);
 
-        var steveResponse = await client.GetAsync("/api/cart/steve");
+        var steveResponse = await ctx.Client.GetAsync("/api/cart/steve");
         steveResponse.EnsureSuccessStatusCode();
         var steveCart = await steveResponse.Content.ReadFromJsonAsync<CartResponse>(JsonOptions);
         Assert.NotNull(steveCart);
         Assert.Empty(steveCart!.Items);
 
-        var marlaResponse = await client.GetAsync("/api/cart/marla");
+        var marlaResponse = await ctx.Client.GetAsync("/api/cart/marla");
         marlaResponse.EnsureSuccessStatusCode();
         var marlaCart = await marlaResponse.Content.ReadFromJsonAsync<CartResponse>(JsonOptions);
         Assert.NotNull(marlaCart);
@@ -262,8 +277,8 @@ public sealed class CartEndpointsTests
     [Fact]
     public async Task FirstTimeUser_GetCart_ReturnsEmptyStructure()
     {
-        var client = CreateClient();
-        var response = await client.GetAsync("/api/cart/steve");
+        using var ctx = TestContext.Create();
+        var response = await ctx.Client.GetAsync("/api/cart/steve");
         response.EnsureSuccessStatusCode();
 
         var cart = await response.Content.ReadFromJsonAsync<CartResponse>(JsonOptions);

@@ -47,6 +47,7 @@ public sealed class AppDbContext : DbContext
         modelBuilder.Entity<CartItem>(e =>
         {
             e.HasKey(i => i.Id);
+            e.Property(i => i.Id).ValueGeneratedOnAdd();
             e.HasIndex(i => i.CartId);
         });
     }
