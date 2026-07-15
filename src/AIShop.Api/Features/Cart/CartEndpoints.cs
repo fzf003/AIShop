@@ -1,4 +1,3 @@
-using AIShop.Core.Entities;
 using AIShop.Core.Interfaces;
 
 namespace AIShop.Api.Features.Cart;

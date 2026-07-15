@@ -18,28 +18,36 @@ internal sealed class CartRepository(AppDbContext db) : ICartRepository
         Guid userId, int productId, string productName, decimal productPrice,
         string productEmoji, int quantity, CancellationToken ct = default)
     {
-        var cart = await GetOrCreateCartAsync(userId, ct);
+        try
+        {
+            var cart = await GetOrCreateCartAsync(userId, ct);
 
-        var existingItem = cart.Items.FirstOrDefault(i => i.ProductId == productId);
-        if (existingItem is not null)
-        {
-            existingItem.Quantity += quantity;
-        }
-        else
-        {
-            cart.Items.Add(new CartItem
+            var existingItem = cart.Items.FirstOrDefault(i => i.ProductId == productId);
+            if (existingItem is not null)
             {
-                CartId = cart.Id,
-                ProductId = productId,
-                ProductName = productName,
-                ProductPrice = productPrice,
-                ProductEmoji = productEmoji,
-                Quantity = quantity
-            });
-        }
+                existingItem.Quantity += quantity;
+            }
+            else
+            {
+                cart.Items.Add(new CartItem
+                {
+                    CartId = cart.Id,
+                    ProductId = productId,
+                    ProductName = productName,
+                    ProductPrice = productPrice,
+                    ProductEmoji = productEmoji,
+                    Quantity = quantity
+                });
+            }
 
-        cart.UpdatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(ct);
+            cart.UpdatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+        }
+        catch (Exception ex) when (ex.GetType().Name != "OperationCanceledException")
+        {
+            throw new InvalidOperationException(
+                $"CartRepository.AddItemAsync failed for userId={userId}, productId={productId}: {ex.Message}", ex);
+        }
     }
 
     public async Task UpdateItemQuantityAsync(
