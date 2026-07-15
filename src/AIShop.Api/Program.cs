@@ -63,6 +63,7 @@ try
     // Register Agent definitions (Api/Agents/)
     builder.Services.AddScoped<SqliteChatHistoryProvider>();
     builder.Services.AddSingleton<IShoppingAssistantAgent, ShoppingAssistantAgent>();
+    builder.Services.AddSingleton<CartToolProvider>();
 
     // Add global exception handler
     builder.Services.AddExceptionHandler<GlobalExceptionHandler>();

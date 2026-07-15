@@ -22,6 +22,11 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         {
             "你是智能购物助手。用中文回复，简洁友好，帮助用户找到心仪的商品。",
             "",
+            "你可以使用以下工具帮助用户管理购物车：",
+            "- add_to_cart: 向购物车添加商品，参数 username(用户名), productId(商品ID), quantity(数量)",
+            "- get_cart_summary: 查看购物车内容，参数 username(用户名)",
+            "- remove_from_cart: 从购物车移除商品，参数 username(用户名), itemId(购物车中商品项的ID)",
+            "",
             "【商品关键词参考】",
             "当用户表达购物需求时，从下表选择 0-5 个最匹配的关键词：",
             "",
@@ -44,15 +49,36 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     }
 
     public ShoppingAssistantAgent(IChatClient chatClient, IDbContextFactory<AppDbContext> dbFactory,
-        IProductCatalogService catalog)
+        IProductCatalogService catalog, CartToolProvider cartTools)
     {
         var instructions = BuildInstructions(catalog);
+
+        // 注册购物车工具函数到 Agent
+        var tools = new List<AITool>();
+
+        tools.Add(AIFunctionFactory.Create(
+            (Func<string, int, int, Task<string>>)cartTools.AddToCartAsync,
+            "add_to_cart",
+            "向购物车添加商品。当用户表达购买某商品的意愿时调用此工具。参数包含 username(用户名), productId(商品ID), quantity(数量)"));
+
+        tools.Add(AIFunctionFactory.Create(
+            (Func<string, Task<string>>)cartTools.GetCartSummaryAsync,
+            "get_cart_summary",
+            "查看当前用户的购物车摘要。当用户询问购物车内容时调用此工具。参数包含 username(用户名)"));
+
+        tools.Add(AIFunctionFactory.Create(
+            (Func<string, Guid, Task<string>>)cartTools.RemoveFromCartAsync,
+            "remove_from_cart",
+            "从购物车中移除指定商品。当用户表达移除某商品的意愿时调用此工具。参数包含 username(用户名), itemId(购物车中商品项的ID)"));
+
+        var chartOptions = new ChatOptions { Tools = tools };
 
         var options = new HarnessAgentOptions
         {
             Name = "ShoppingAssistant",
             Description = "智能购物助手",
             HarnessInstructions = instructions,
+            ChatOptions = chartOptions,
             ChatHistoryProvider = new SqliteChatHistoryProvider(dbFactory),
 
             // 上下文压缩：保留最近 15 轮对话+system，超出自动丢弃
@@ -60,10 +86,6 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             CompactionStrategy = new SlidingWindowCompactionStrategy(
                 trigger: CompactionTriggers.Always,
                 minimumPreservedTurns: 3),
-
-            // Loop 循环评估：Agent 未 [COMPLETE] 时自动追问，最多 5 轮
-            // LoopEvaluators = [new CompletionMarkerLoopEvaluator("[COMPLETE]")],
-            // MaximumIterationsPerRequest = 2,
 
             // 明确关闭不需要的内置能力
             DisableToolAutoApproval = true,
