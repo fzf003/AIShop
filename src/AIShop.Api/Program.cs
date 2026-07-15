@@ -2,6 +2,7 @@ using AIShop.Core.Entities;
 using AIShop.Infrastructure;
 using AIShop.Infrastructure.Data;
 using AIShop.Api.Agents;
+using AIShop.Api.Features.Cart;
 using AIShop.Api.Features.Chat;
 using AIShop.Api.Middleware;
 using Microsoft.EntityFrameworkCore;
@@ -117,6 +118,7 @@ try
 
     app.MapChatEndpoints();
     app.MapMcpEndpoints();
+    app.MapCartEndpoints();
 
     app.MapGet("/", () => Results.Ok(new { Status = "AIShop API is running" }));
 
