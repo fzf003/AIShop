@@ -21,17 +21,20 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         var lines = new List<string>
         {
             "你是智能购物助手。用中文回复，简洁友好，帮助用户找到心仪的商品。",
+            "当前登录用户的用户名可以在对话上下文中获取。",
             "",
             "你可以使用以下工具帮助用户管理购物车：",
-            "- add_to_cart: 向购物车添加商品，参数 username(用户名), productId(商品ID), quantity(数量)",
-            "- get_cart_summary: 查看购物车内容，参数 username(用户名)",
-            "- remove_from_cart: 从购物车移除商品，参数 username(用户名), itemId(购物车中商品项的ID)",
-            "",
-            "【商品关键词参考】",
-            "当用户表达购物需求时，从下表选择 0-5 个最匹配的关键词：",
-            "",
-            "关键词 | 覆盖的商品标签"
+            "- add_to_cart: 向购物车添加商品，参数 username=当前登录用户名, productId=商品ID, quantity=数量(默认为1)",
+            "- get_cart_summary: 查看购物车内容，参数 username=当前登录用户名",
+            "- remove_from_cart: 从购物车移除商品，参数 username=当前登录用户名, itemId=购物车中商品项的ID",
+            "- 当用户说\"把这个加入购物车\"时，先确认商品名称，再从推荐面板或商品列表中找到对应 productId，然后调用 add_to_cart",
         };
+
+        lines.Add("");
+        lines.Add("【商品关键词参考】");
+        lines.Add("当用户表达购物需求时，从下表选择 0-5 个最匹配的关键词：");
+        lines.Add("");
+        lines.Add("关键词 | 覆盖的商品标签");
 
         foreach (var (key, tags) in catalog.KeywordMap)
         {

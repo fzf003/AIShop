@@ -11,10 +11,12 @@
 | 5 | 前端购物车 UI | `AIShop.Api/wwwroot/index.html` | Task 3 | [x] |
 | 6 | 集成测试 | `tests/AIShop.Api.Tests/CartEndpointsTests.cs` | Task 3 | [x] |
 | 7 | 加购按钮交互优化 | `AIShop.Api/wwwroot/index.html` | Task 5 | [x] |
-| 8 | 购物车面板结算摘要区 | `AIShop.Api/wwwroot/index.html` | Task 5 | [x] |
+| 8 | 购物车面板结算摘要区 | `AIShop.Api/wwwroot/index.html` | Task 5 | ~~[x]~~ 已取消 |
 | 9 | 加购反馈 Toast + 商品详情弹窗角标 | `AIShop.Api/wwwroot/index.html` | Task 5 | [x] |
 | 10 | 快捷加购区 + 去结算按钮 | `AIShop.Api/wwwroot/index.html` | Task 5 | [x] |
 | 11 | 推荐面板商品卡片 + 详情弹窗加购 | `AIShop.Api/wwwroot/index.html` | Task 5 | [x] |
+| 12 | Agent 聊天后自动刷新购物车 | `AIShop.Api/wwwroot/index.html` | Task 5 | [x] |
+| 13 | Agent 商品目录感知加购 | `AIShop.Api/Agents/ShoppingAssistantAgent.cs` | Task 4 | [x] |
 
 ## Blocking Edges
 
@@ -146,10 +148,11 @@ flowchart TD
 - `src/AIShop.Api/wwwroot/index.html`
 
 **内容**:
-- 商品卡片/商品详情弹窗中，点击"加入购物车"后按钮状态变更为 `✓ 已加`（绿色填充）
+- 商品卡片价格旁放 `🛒` 图标按钮（非全宽文字按钮）
+- 点击 `🛒` 后按钮状态不变，Header 角标即时更新
 - 已加购商品角标 `🛒 xN` 实时更新
 
-### Task 8: 购物车面板结算摘要区
+### Task 8: 购物车面板结算摘要区（已取消）
 
 **文件**:
 - `src/AIShop.Api/wwwroot/index.html`
@@ -185,6 +188,24 @@ flowchart TD
 - `src/AIShop.Api/wwwroot/index.html`
 
 **内容**:
-- 推荐面板（聊天区出现的推荐商品卡片）每个卡片上添加 `🛒` 加购按钮
-- 点击商品卡片弹出自定义详情弹窗（非浏览器默认行为），右上角 `🛒 xN` 角标
-- 详情弹窗内价格旁边 `🛒` 加购按钮，加购后变 `✓ 已加`
+- 推荐面板（聊天区出现的推荐商品卡片）每个卡片上添加 `🛒` 加购按钮，无文字
+- 点击商品卡片弹出自定义详情弹窗，详情弹窗内价格旁 `🛒` 加购按钮（仅标识，无文字）
+- 商品详情弹窗标题 `"商品详情"` 后不显示购物车标识
+
+### Task 12: Agent 聊天后自动刷新购物车
+
+**文件**:
+- `src/AIShop.Api/wwwroot/index.html`
+
+**内容**:
+- 聊天发送消息后，Agent 返回时自动调用 `fetchCart()` 刷新购物车状态和角标
+
+### Task 13: Agent 商品目录感知加购
+
+**文件**:
+- `src/AIShop.Api/Agents/ShoppingAssistantAgent.cs`
+
+**内容**:
+- Agent 指令中不加载完整商品目录（避免 system prompt 膨胀导致超时）
+- Agent 从推荐面板和商品列表的对话上下文中获取 productId
+- 用户说"把咖啡机加到购物车"时，Agent 确认商品名称后调用 `add_to_cart`
