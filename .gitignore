@@ -22,7 +22,9 @@ Directory.Build.props
 
 *.db
 .agents/
-.claude/
+.claude/settings.local.json
+.claude/worktree/
+.claude/workflows/
 .codex/
 
 tools/

@@ -1,0 +1,76 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//tmp/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/check_openspec_gate.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "dotnet format --verify-no-changes --verbosity quiet 2>/dev/null || exit 0",
+            "description": "Edit 后自动检查代码格式，不符合规范时告警但不阻断"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/session_start.sh",
+            "description": "会话启动检查：分支、改动、变更、工单，表格形式输出到终端"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/session_end.sh",
+            "description": "会话结束时检查未提交改动和未完成工单，表格形式输出到终端"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import json,sys; data=json.load(sys.stdin); print(f'[Compact] preserving {len(data.get(\\\"messages\\\",[]))} messages')\" 2>/dev/null || exit 0",
+            "description": "上下文压缩前记录当前消息数，用于诊断上下文溢出问题"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo [Hook] Subagent started: $AGENT_NAME 2>/dev/null || exit 0",
+            "description": "记录 subagent 启动事件，用于调试编排流程"
+          }
+        ]
+      }
+    ]
+  }
+}

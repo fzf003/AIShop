@@ -52,6 +52,7 @@ openspec archive {id}         # 归档变更
 详细规范请参考：
 - 代码规范 → `.claude/rules/dotnet.md`（含命名、架构、异步、测试规范）
 - 技能路由 → `.claude/rules/skill-routing.md`
+- 开发流程 → `.claude/rules/development-flow.md`（小步提交、测试清理、Agent 指令原则）
 
 ## Git 工作流
 
@@ -92,4 +93,11 @@ git clone <repo> && cd AIShop
 dotnet restore && dotnet build
 dotnet run --project src/AIShop.Api
 curl -X POST http://localhost:5206/api/chat -H "Content-Type: application/json" -d '{"username":"marla","message":"你好"}'
+
+## 会话启动检查
+
+每次新会话启动或 /clear 后，先执行以下检查并显示结果：
+1. 显示 Git 分支和未提交改动（`git branch --show-current` + `git status --short | head -5`）
+2. 显示当前 OpenSpec 变更（`cat openspec/.current-change`）
+3. 显示未完成的工单（`grep -E '\[ \]' openspec/changes/*/tasks.md | head -10`）
 ```
