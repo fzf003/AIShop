@@ -21,11 +21,15 @@ AGENTS.md
 Directory.Build.props
 
 *.db
+*.db-shm
+*.db-wal
+*.bak
 .agents/
 .claude/settings.local.json
 .claude/worktree/
 .claude/workflows/
 .codex/
+
 
 tools/
 .vs/

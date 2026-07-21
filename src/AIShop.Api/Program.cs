@@ -1,7 +1,9 @@
 using AIShop.Core.Entities;
+using AIShop.Core.Interfaces;
 using AIShop.Infrastructure;
 using AIShop.Infrastructure.Data;
 using AIShop.Api.Agents;
+using AIShop.Api.Features.Cart;
 using AIShop.Api.Features.Chat;
 using AIShop.Api.Middleware;
 using Microsoft.EntityFrameworkCore;
@@ -12,7 +14,6 @@ using OpenAI;
 using Microsoft.Extensions.AI;
 using Scalar.AspNetCore;
 using AIShop.Api.Features.Mcp;
-using AIShop.Api.Features.McpIntegration;
 using AIShop.ServiceDefaults;
 
 Log.Logger = new LoggerConfiguration()
@@ -46,22 +47,31 @@ try
 
     builder.Services.AddSingleton<IChatClient>(_ =>
     {
-        // Bypass system proxy for direct OpenAI API connection
+        // 统一路径：所有模型走同一管道
+        // ToolMessageFilterChatClient 已删除（CleanOrphanedToolCalls 在 Provider 中兜底）
+        // ResponseFormat 在 ShoppingAssistantAgent 中统一不加（keywords 由服务端提取）
         var handler = new HttpClientHandler { UseProxy = false, Proxy = null };
-        var httpClient = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(60*2) };
+        var httpClient = new HttpClient(new DebugHandler(handler)) { Timeout = TimeSpan.FromSeconds(60*2) };
         var clientOptions = new OpenAIClientOptions
         {
             Endpoint = new Uri(endpoint),
-            Transport = new HttpClientPipelineTransport(httpClient)
+            Transport = new HttpClientPipelineTransport(httpClient),
         };
         var client = new OpenAIClient(new ApiKeyCredential(apiKey), clientOptions);
-        var chatClient = client.GetChatClient(model);
-        return chatClient.AsIChatClient();
+        return client.GetChatClient(model).AsIChatClient();
     });
 
     // Register Agent definitions (Api/Agents/)
     builder.Services.AddScoped<SqliteChatHistoryProvider>();
-    builder.Services.AddSingleton<IShoppingAssistantAgent, ShoppingAssistantAgent>();
+    builder.Services.AddSingleton<IShoppingAssistantAgent>(sp =>
+    {
+        var chatClient = sp.GetRequiredService<IChatClient>();
+        var dbFactory = sp.GetRequiredService<IDbContextFactory<AppDbContext>>();
+        var catalog = sp.GetRequiredService<IProductCatalogService>();
+        var cartTools = sp.GetRequiredService<CartToolProvider>();
+        return new ShoppingAssistantAgent(chatClient, dbFactory, catalog, cartTools, model);
+    });
+    builder.Services.AddSingleton<CartToolProvider>();
 
     // Add global exception handler
     builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
@@ -116,7 +126,7 @@ try
     app.UseStaticFiles();
 
     app.MapChatEndpoints();
-    app.MapMcpEndpoints();
+    app.MapCartEndpoints();
 
     app.MapGet("/", () => Results.Ok(new { Status = "AIShop API is running" }));
 

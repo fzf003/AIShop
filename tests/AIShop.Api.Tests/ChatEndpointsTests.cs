@@ -27,7 +27,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                 var fakeSession = new TestSession();
                 fakeSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
 
-                mock.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+                mock.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
                     .Returns((fakeResult, fakeSession));
 
                 services.AddSingleton(mock);
@@ -173,7 +173,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                 var fakeResult = new AgentChatResult("模拟推荐", ["运动"], null);
                 var fakeSession = new TestSession();
                 fakeSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
-                mock.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+                mock.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
                     .Returns(_ => { callCount++; return (fakeResult, fakeSession); });
                 services.AddSingleton(mock);
             });
@@ -206,7 +206,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                 var fakeResult = new AgentChatResult("推荐", ["运动"], null);
                 var fakeSession = new TestSession();
                 fakeSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
-                mock.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+                mock.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
                     .Returns(_ => { callCount++; return (fakeResult, fakeSession); });
                 services.AddSingleton(mock);
             });

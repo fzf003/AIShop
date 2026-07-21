@@ -22,7 +22,10 @@ public sealed class ChatMessage
     public Guid SessionId { get; init; }
     public string Role { get; set; } = string.Empty;
     public string Content { get; set; } = string.Empty;
+    public string? ContentsJson { get; set; }
+    public string? SourceType { get; set; }
     public DateTime Timestamp { get; init; } = DateTime.UtcNow;
+    public long SequentialNumber { get; set; }
 }
 
 public sealed class Product
