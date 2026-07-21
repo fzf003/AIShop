@@ -1,80 +1,128 @@
 #pragma warning disable MAAI001
-using System.Diagnostics;
-using Microsoft.Agents.AI;
-using Microsoft.Extensions.AI;
-using Microsoft.EntityFrameworkCore;
 using AIShop.Api.Features.Chat;
-using AIShop.Infrastructure.Data;
 using AIShop.Core.Interfaces;
-using Microsoft.Agents.AI.Compaction;
+using AIShop.Infrastructure.Data;
+using Microsoft.Agents.AI;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.AI;
 using Serilog;
+using System.Diagnostics;
+using System.Text.Encodings.Web;
+using System.Text.Json;
 
 namespace AIShop.Api.Agents;
 
 public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 {
     private readonly HarnessAgent _agent;
+    private readonly bool _isOpenAI;
     private static readonly Serilog.ILogger Logger = Log.ForContext<ShoppingAssistantAgent>();
+
+    private static bool IsOpenAIModel(string model) =>
+        model.StartsWith("gpt-", StringComparison.OrdinalIgnoreCase) ||
+        model.StartsWith("o1-", StringComparison.OrdinalIgnoreCase) ||
+        model.StartsWith("o3-", StringComparison.OrdinalIgnoreCase);
 
     private static string BuildInstructions(IProductCatalogService catalog)
     {
+        // 所有模型统一用 Text + Instructions 内嵌 JSON Schema
+        // 测试报告证明这是唯一 4 模型（OpenAI/DeepSeek/Qwen/MiMo）100% 兼容的路径
+        var outputSchemaJson = JsonSerializer.Serialize(new
+        {
+            type = "object",
+            properties = new
+            {
+                Reply = new { type = "string", description = "你的实际回复内容，禁止使用 Markdown，移除多余 Emoji" },
+                Keywords = new { type = "array", description = "提取的标签，如[\"咖啡机\",\"家电\"]；无匹配关键词时返回 []" },
+                Preferences = new { type = "array", description = "用户偏好，如[\"高性价比\",\"便携\"]；无偏好时返回 []" }
+            },
+            required = new[] { "Reply", "Keywords", "Preferences" }
+        },
+        new JsonSerializerOptions { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+
         var lines = new List<string>
         {
-            "你是智能购物助手。用中文回复，简洁友好，帮助用户找到心仪的商品。",
-            "当前登录用户的用户名可以在对话上下文中获取。",
+            "你是购物助手。中文回复，简洁，直接干活。",
+            "用户名自动注入，不用传 username。",
             "",
-            "你可以使用以下工具帮助用户管理购物车：",
-            "- add_to_cart: 向购物车添加商品，参数 username=当前登录用户名, productId=商品ID, quantity=数量(默认为1)",
-            "- get_cart_summary: 查看购物车内容，参数 username=当前登录用户名",
-            "- remove_from_cart: 从购物车移除商品，参数 username=当前登录用户名, itemId=购物车中商品项的ID",
-            "- 当用户说\"把这个加入购物车\"时，先确认商品名称，再从推荐面板或商品列表中找到对应 productId，然后调用 add_to_cart",
+            "可用工具：",
+            "- search_product(keyword): 搜索商品",
+            "- add_to_cart(productId, quantity): **追加**商品到购物车（在原数量上加）",
+            "- update_cart_quantity(productId, quantity): **设置**精确数量（用户说只要X个时调用）",
+            "- get_cart_summary(): 查看购物车",
+            "- remove_from_cart(itemId): 从购物车移除商品",
+            "",
+            "规则：",
+            "- 用户说搜索/想要 → 直接 search_product，不说话先",
+            "- 用户说加购物车/买个 → 直接 add_to_cart(productId, quantity)，不问确认",
+            "- 用户说只要X个/改为X个 → 直接 update_cart_quantity，不问确认",
+            "- **已执行过的工具调用不要重复执行**（已加购的商品不要再次加购）",
+            "- 执行完回复一句话，不要啰嗦，不加emoji，不重复清单",
         };
 
+        // 【回复规范】适用于所有模型
+        // 非 OpenAI 模型依赖此约束替代 ForJsonSchema<T>；
+        // OpenAI 模型有 ForJsonSchema<T> 兜底，此约束作为双重保障
         lines.Add("");
-        lines.Add("【商品关键词参考】");
-        lines.Add("当用户表达购物需求时，从下表选择 0-5 个最匹配的关键词：");
+        lines.Add("【回复规范】");
+        lines.Add("1. 当用户的请求需要查询外部信息时，");
+        lines.Add("   你必须优先调用提供的工具（Function Calling），");
+        lines.Add("   严禁用自然语言或 JSON 描述你要调用工具的动作。");
+        lines.Add("2. 当不需要调用工具时，");
+        lines.Add("   你必须且只能以标准的 JSON 格式回复，");
+        lines.Add("   不要包含任何 Markdown 标记或额外的解释文本。");
         lines.Add("");
-        lines.Add("关键词 | 覆盖的商品标签");
+        lines.Add("【JSON 输出格式要求】");
+        lines.Add($"{outputSchemaJson}");
+
+        lines.Add("");
+        lines.Add("【商品关键词表（用于推荐栏）】");
+        lines.Add("关键词 | 覆盖标签");
 
         foreach (var (key, tags) in catalog.KeywordMap)
         {
             lines.Add($"{key} | {string.Join("、", tags)}");
         }
 
-        lines.Add("");
-        lines.Add("规则：");
-        lines.Add("- 只能从\"关键词\"列选择");
-        lines.Add("- 根据用户对话语义做判断（例如\"运动鞋\"→跑步、运动、鞋子）");
-        lines.Add("- 无匹配返回空数组");
-        lines.Add("- 如果从对话中识别到用户的商品偏好（如品类、预算、品牌），请从对话中提取偏好关键词列表填写到 Preferences 字段");
-
         return string.Join("\n", lines);
     }
 
     public ShoppingAssistantAgent(IChatClient chatClient, IDbContextFactory<AppDbContext> dbFactory,
-        IProductCatalogService catalog, CartToolProvider cartTools)
+        IProductCatalogService catalog, CartToolProvider cartTools, string model)
     {
+        _isOpenAI = IsOpenAIModel(model);
         var instructions = BuildInstructions(catalog);
 
-        // 注册购物车工具函数到 Agent
         var tools = new List<AITool>();
 
         tools.Add(AIFunctionFactory.Create(
-            (Func<string, int, int, Task<string>>)cartTools.AddToCartAsync,
+            (Func<int, int, Task<string>>)((productId, quantity) => cartTools.AddToCartAsync(productId, quantity)),
             "add_to_cart",
-            "向购物车添加商品。当用户表达购买某商品的意愿时调用此工具。参数包含 username(用户名), productId(商品ID), quantity(数量)"));
+            "追加商品到购物车。参数 productId=商品ID, quantity=追加数量。在现有数量上追加，不是设置最终数量。"));
 
         tools.Add(AIFunctionFactory.Create(
-            (Func<string, Task<string>>)cartTools.GetCartSummaryAsync,
+            (Func<int, int, Task<string>>)((productId, quantity) => cartTools.UpdateCartItemQuantityAsync(productId, quantity)),
+            "update_cart_quantity",
+            "设置购物车中某个商品的精确数量。参数 productId=商品ID, quantity=最终数量。用户说'只要X个'时调用。"));
+
+        tools.Add(AIFunctionFactory.Create(
+            (Func<Task<string>>)(() => cartTools.GetCartSummaryAsync()),
             "get_cart_summary",
-            "查看当前用户的购物车摘要。当用户询问购物车内容时调用此工具。参数包含 username(用户名)"));
+            "查看当前用户的购物车摘要，无参数。"));
 
         tools.Add(AIFunctionFactory.Create(
-            (Func<string, Guid, Task<string>>)cartTools.RemoveFromCartAsync,
+            (Func<Guid, Task<string>>)(itemId => cartTools.RemoveFromCartAsync(itemId)),
             "remove_from_cart",
-            "从购物车中移除指定商品。当用户表达移除某商品的意愿时调用此工具。参数包含 username(用户名), itemId(购物车中商品项的ID)"));
+            "从购物车中移除指定商品。参数 itemId=购物车中商品项的ID。"));
+
+        tools.Add(AIFunctionFactory.Create(
+            (Func<string, Task<string>>)(keyword => cartTools.SearchProductAsync(keyword)),
+            "search_product",
+            "搜索商品。参数 keyword=商品关键词（如咖啡机、耳机）。用户提到商品名时调用。"));
 
         var chartOptions = new ChatOptions { Tools = tools };
+
+
 
         var options = new HarnessAgentOptions
         {
@@ -82,24 +130,21 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             Description = "智能购物助手",
             HarnessInstructions = instructions,
             ChatOptions = chartOptions,
-            ChatHistoryProvider = new SqliteChatHistoryProvider(dbFactory),
+            //ChatHistoryProvider = new SqliteChatHistoryProvider(dbFactory),
 
-            // 上下文压缩：保留最近 15 轮对话+system，超出自动丢弃
-            DisableCompaction = false,
-            CompactionStrategy = new SlidingWindowCompactionStrategy(
-                trigger: CompactionTriggers.Always,
-                minimumPreservedTurns: 3),
+            DisableCompaction = true,
+             MaximumIterationsPerRequest=3,// 限制每轮最大工具调用次数
+              
 
-            // 明确关闭不需要的内置能力
-            DisableToolAutoApproval = true,
+            DisableToolAutoApproval = false,//DisableToolAutoApproval = false（即默认启用）。设 true 的话，所有工具都不走审批——包括那些本应审批的
             DisableWebSearch = true,
             DisableFileMemory = true,
             DisableFileAccess = true,
             DisableTodoProvider = true,
             DisableAgentSkillsProvider = true,
             DisableAgentModeProvider = true,
-            DisableNonApprovalRequiredFunctionBypassing = true,
-            // 注入会话偏好记忆 Provider
+            DisableNonApprovalRequiredFunctionBypassing = false,
+     
             AIContextProviders = [new PreferenceMemoryProvider()]
         };
 
@@ -108,26 +153,74 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 
     /// <summary>
     /// 执行一次 Agent 对话。
-    /// 返回 (结果, 会话) — 会话引用用于偏好写回。
+    ///
+    /// 所有模型统一走 Text 模式：
+    /// - Instructions 中内嵌 JSON Schema 约束输出格式
+    /// - 服务端 IndexOf('{') 抠 JSON 反序列化
+    /// - 有 ForJsonSchema 支持的模型才额外做 schema 校验加强
+    ///
+    /// 分叉逻辑：
+    /// - OpenAI (gpt-/o1-/o3-)：用 _isOpenAI 加强 ForJsonSchema 格式兜底
+    /// - 非 OpenAI（千问/DeepSeek/MiMo）：纯 Text 路径
     /// </summary>
     public async Task<(AgentChatResult Result, AgentSession Session)> RunChatAsync(
-        Guid sessionId, string userMessage, CancellationToken ct = default)
+        Guid sessionId, string userMessage, string username, CancellationToken ct = default)
     {
+        CartToolProvider.SetCurrentUser(username);
+
         var sw = Stopwatch.StartNew();
         var session = await _agent.CreateSessionAsync(ct);
         session.StateBag.SetValue("SessionId", sessionId.ToString());
 
-        var response = await _agent.RunAsync<AgentChatResult>(
-            userMessage, session,
-            options: new AgentRunOptions
-            {
-                ResponseFormat = ChatResponseFormatJson.ForJsonSchema<AgentChatResult>()
-            },
-            cancellationToken: ct);
+        AgentChatResult? result = null;
+        string? rawText = null;
 
-        sw.Stop();
-        Logger.Information("[Diagnose] Agent调用总耗时 AgentCall={ElapsedMs}ms SessionId={SessionId}",
-            sw.ElapsedMilliseconds, sessionId);
-        return (response.Result, session);
+        if (_isOpenAI)
+        {
+            // OpenAI 路径：走 ForJsonSchema 加强格式校验
+            var agentResponse = await _agent.RunAsync<AgentChatResult>(
+                userMessage, session,
+                cancellationToken: ct);
+
+            sw.Stop();
+            Logger.Information("[Diagnose] Agent调用总耗时 AgentCall={ElapsedMs}ms SessionId={SessionId}",
+                sw.ElapsedMilliseconds, sessionId);
+
+            result = agentResponse?.Result;
+        }
+        else
+        {
+            // 非 OpenAI 路径：纯 Text，由 Instructions 约束 JSON 格式 + 服务端兜底解析
+            var response = await _agent.RunAsync(
+                userMessage, session,
+                cancellationToken: ct);
+
+            sw.Stop();
+            Logger.Information("[Diagnose] Agent调用总耗时 AgentCall={ElapsedMs}ms SessionId={SessionId}",
+                sw.ElapsedMilliseconds, sessionId);
+
+            rawText = response.Text?.Trim();
+
+            if (!string.IsNullOrEmpty(rawText))
+            {
+                var jsonStart = rawText.IndexOf('{');
+                var jsonEnd = rawText.LastIndexOf('}');
+                if (jsonStart >= 0 && jsonEnd > jsonStart)
+                {
+                    var json = rawText[jsonStart..(jsonEnd + 1)];
+                    try
+                    {
+                        result = JsonSerializer.Deserialize<AgentChatResult>(json,
+                            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    }
+                    catch (JsonException ex)
+                    {
+                        Logger.Warning(ex, "Agent 回复 JSON 解析失败");
+                    }
+                }
+            }
+        }
+
+        return (result ?? new AgentChatResult(rawText ?? "", [], null), session);
     }
 }

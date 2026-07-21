@@ -32,6 +32,8 @@ public sealed class AppDbContext : DbContext
             e.HasKey(m => m.Id);
             e.HasIndex(m => m.SessionId);
             e.Property(m => m.Content).HasColumnType("TEXT");
+            e.Property(m => m.ContentsJson).HasColumnType("TEXT");
+            e.Property(m => m.Id).ValueGeneratedOnAdd();
         });
 
         modelBuilder.Entity<Cart>(e =>

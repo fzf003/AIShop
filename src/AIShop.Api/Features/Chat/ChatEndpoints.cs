@@ -10,7 +10,8 @@ using System.Text;
 
 namespace AIShop.Api.Features.Chat;
 
-public sealed record AgentChatResult(string Reply, string[] Keywords, string[]? Preferences);
+public sealed record AgentChatResult(
+    string Reply, string[] Keywords, string[]? Preferences);
 
 public sealed record ChatRequest(string Username, string Message);
 public sealed record ChatReply(
@@ -82,7 +83,7 @@ public static class ChatEndpoints
             AgentSession? session = null;
             try
             {
-                (result, session) = await shoppingAgent.RunChatAsync(sid, req.Message, ct);
+                (result, session) = await shoppingAgent.RunChatAsync(sid, req.Message, req.Username, ct);
             }
             catch (Exception ex)
             {
@@ -98,16 +99,22 @@ public static class ChatEndpoints
             // 2. Save user message + assistant response to SQLite
             chatRepo.Add(new Core.Entities.ChatMessage
             {
-                SessionId = sid, Role = "user", Content = req.Message
+                SessionId = sid,
+                Role = "user",
+                Content = req.Message ?? ""
             });
             chatRepo.Add(new Core.Entities.ChatMessage
             {
-                SessionId = sid, Role = "assistant", Content = result.Reply
+                SessionId = sid,
+                Role = "assistant",
+                Content = result.Reply ?? ""
             });
-            await chatRepo.SaveChangesAsync(ct);
+            
+                await chatRepo.SaveChangesAsync(ct);
+            
 
             // 2.1 Cache agent result for /recommendations to avoid duplicate LLM call
-            var chatHash = GetMessageHash(req.Message);
+            var chatHash = GetMessageHash(req.Message ?? "");
             var chatCacheKey = $"agent_result_{req.Username}_{chatHash}";
             cache.Set(chatCacheKey, (result, session), TimeSpan.FromMinutes(5));
 
@@ -117,13 +124,28 @@ public static class ChatEndpoints
                 session.StateBag.SetValue("Preferences", string.Join("、", result.Preferences));
             }
 
-            // 3. Validate keywords against white-list
+            // 3. 关键词匹配：从用户输入直接匹配（不依赖模型结构化输出）
+            // 匹配逻辑：消息中包含关键词 → 该关键词对应的所有标签相关产品都推荐
+            // 支持关键词、标签、类别、商品名的多维度匹配
             var keywordSw = Stopwatch.StartNew();
-            var validKeywords = (result.Keywords ?? [])
-                .Where(k => catalog.KeywordMap.ContainsKey(k))
+            var userMsg = req.Message ?? "";
+            var validKeywords = catalog.KeywordMap.Keys
+                .Where(k => userMsg.Contains(k, StringComparison.OrdinalIgnoreCase)
+                    || (catalog.KeywordMap.TryGetValue(k, out var tags)
+                        && tags.Any(tag => userMsg.Contains(tag, StringComparison.OrdinalIgnoreCase))))
                 .Distinct()
                 .Take(5)
                 .ToArray();
+
+            // 如果消息关键词匹配失败，尝试从 AgentChatResult.Keywords 回退
+            if (validKeywords.Length == 0 && result.Keywords is { Length: > 0 })
+            {
+                validKeywords = result.Keywords
+                    .Where(k => catalog.KeywordMap.ContainsKey(k))
+                    .Distinct()
+                    .Take(5)
+                    .ToArray();
+            }
             keywordSw.Stop();
 
             // 4. Build recommendation response
@@ -138,14 +160,14 @@ public static class ChatEndpoints
                     ? catalog.All.Take(6).Select(ToDto).ToList()
                     : others.Take(12).Select(ToDto).ToList();
 
-                chatReply = new ChatReply(result.Reply, recDtos, otherDtos,
+                chatReply = new ChatReply(result.Reply ?? "", recDtos, otherDtos,
                     "根据您的兴趣，为您推荐：", HasRecommendation: true,
                     recDtos.Select(p => p.Category).Distinct().ToArray());
             }
             else
             {
                 var fallback = catalog.All.Take(6).Select(ToDto).ToList();
-                chatReply = new ChatReply(result.Reply,
+                chatReply = new ChatReply(result.Reply ?? "",
                     RecommendedProducts: null,
                     OtherProducts: fallback,
                     "暂无特定推荐 — 浏览精选商品",
@@ -222,7 +244,7 @@ public static class ChatEndpoints
                 agentSw.Start();
                 try
                 {
-                    (agentResult, agentSession) = await shoppingAgent.RunChatAsync(sid, lastUserMessage.Content, ct);
+                    (agentResult, agentSession) = await shoppingAgent.RunChatAsync(sid, lastUserMessage.Content, req.Username, ct);
                 }
                 catch (Exception ex)
                 {

@@ -62,6 +62,32 @@ internal sealed class CartRepository(AppDbContext db) : ICartRepository
         await db.SaveChangesAsync(ct);
     }
 
+    public async Task SetQuantityAsync(
+        Guid userId, int productId, int quantity, CancellationToken ct = default)
+    {
+        var cart = await GetOrCreateCartAsync(userId, ct);
+        var item = cart.Items.FirstOrDefault(i => i.ProductId == productId);
+        if (item is null) return;
+
+        item.Quantity = quantity;
+        cart.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+    }
+
+    public async Task RemoveAllByProductIdAsync(
+        Guid userId, int productId, CancellationToken ct = default)
+    {
+        var cart = await GetByUserIdAsync(userId, ct);
+        var items = cart?.Items.Where(i => i.ProductId == productId).ToList();
+        if (items is null || items.Count == 0) return;
+
+        foreach (var item in items)
+            cart!.Items.Remove(item);
+
+        cart!.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+    }
+
     public async Task RemoveItemAsync(
         Guid userId, Guid itemId, CancellationToken ct = default)
     {

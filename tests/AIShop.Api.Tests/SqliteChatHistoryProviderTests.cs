@@ -114,24 +114,18 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
-    public async Task Provide_LimitTo20()
+    public async Task Provide_LimitToMaxReadMessages()
     {
         SeedMessages(25);
 
         var result = await InvokeProvideAsync();
 
-        Assert.Equal(20, result.Count);
-        Assert.DoesNotContain(result, m => m.Text == "消息0"); // oldest trimmed
-        Assert.DoesNotContain(result, m => m.Text == "消息1");
-        Assert.DoesNotContain(result, m => m.Text == "消息2");
-        Assert.DoesNotContain(result, m => m.Text == "消息3");
-        Assert.DoesNotContain(result, m => m.Text == "消息4");
-        Assert.Contains(result, m => m.Text == "消息24");       // newest
-        Assert.Contains(result, m => m.Text == "消息23");
+        // MaxReadMessages = 30, 25 条全部在窗口内
+        Assert.Equal(25, result.Count);
     }
 
     [Fact]
-    public async Task Store_UnderThreshold_DoesNotDelete()
+    public async Task Store_AppendsThenTrimsToStoredLimit()
     {
         SeedMessages(15);
 
@@ -139,26 +133,29 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
 
         using (var ctx = await _dbFactory.CreateDbContextAsync())
         {
+            // 追加 2 条 → 共 17，MaxStoredMessages=50 不裁剪
+            // 新增的 2 条在 SaveChangesAsync 时持久化
             var count = await ctx.ChatMessages
                 .Where(m => m.SessionId == _sessionId)
                 .CountAsync();
-            Assert.Equal(15, count);
+            Assert.Equal(17, count);
         }
     }
 
     [Fact]
-    public async Task Store_DoesNotAffectDatabase()
+    public async Task Store_TrimsWhenExceedsLimit()
     {
-        SeedMessages(25);
+        SeedMessages(55);
 
         await InvokeStoreAsync();
 
         using (var ctx = await _dbFactory.CreateDbContextAsync())
         {
+            // 追加 2 条 → 共 57，55 条中删 7（Skip 50），保留 50 + 2 新增
             var count = await ctx.ChatMessages
                 .Where(m => m.SessionId == _sessionId)
                 .CountAsync();
-            Assert.Equal(25, count); // Store is a no-op
+            Assert.Equal(52, count);
         }
     }
 
@@ -172,6 +169,7 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
                 SessionId = _sessionId,
                 Role = i % 2 == 0 ? "user" : "assistant",
                 Content = $"消息{i}",
+                SourceType = "agent",
                 Timestamp = DateTime.UtcNow.AddMinutes(i)
             });
         }

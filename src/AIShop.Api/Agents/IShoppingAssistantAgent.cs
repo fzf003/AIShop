@@ -6,5 +6,5 @@ namespace AIShop.Api.Agents;
 public interface IShoppingAssistantAgent
 {
     Task<(AgentChatResult Result, AgentSession Session)> RunChatAsync(
-        Guid sessionId, string userMessage, CancellationToken ct = default);
+        Guid sessionId, string userMessage, string username, CancellationToken ct = default);
 }

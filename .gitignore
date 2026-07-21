@@ -21,9 +21,12 @@ AGENTS.md
 Directory.Build.props
 
 *.db
+*.db-shm
+*.db-wal
+*.bak
 .agents/
-.claude/
 .codex/
+
 
 tools/
 .vs/

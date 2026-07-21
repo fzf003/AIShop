@@ -1,12 +1,11 @@
+// Copyright (c) AIShop. All rights reserved.
+// MCP Server 暂不启用，代码保留不动。
+#pragma warning disable S125
 using AIShop.Api.Features.Mcp;
 using Microsoft.AspNetCore.Mvc;
-
+/*
 namespace AIShop.Api.Features.McpIntegration;
 
-/// <summary>
-/// Standalone endpoints that use MCP Server for product matching.
-/// These bypass the LLM-based ShoppingAssistantAgent entirely.
-/// </summary>
 public static class McpEndpoints
 {
     public static void MapMcpEndpoints(this WebApplication app)
@@ -27,3 +26,5 @@ public static class McpEndpoints
 }
 
 public sealed record McpMatchRequest(string[] Keywords);
+*/
+#pragma warning restore S125
