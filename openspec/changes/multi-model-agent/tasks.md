@@ -146,3 +146,20 @@
 - [x] 验证 models 内容与 GET /api/models 返回一致（数量、id、name）
 
 **验证**：dotnet build 0 错误 + dotnet test 55/55 通过 ✅（对应 commit `c110b77`）
+
+---
+
+### [x] T14 (预计 5min) 测试：POST /api/chat 省略 model 时使用默认模型路由
+- [x] mock ModelRouter，设置默认模型 ActiveModel="qwen"
+- [x] 发送 POST /api/chat 仅含 { username, message }（无 model）
+- [x] 验证 ModelRouter.GetAgent("qwen") 被调用，即路由到默认模型 Agent
+- [x] 验证返回的 ChatReply 内容由默认 Agent 生成
+
+**验证**：dotnet build 0 错误 + dotnet test 56/56 通过 ✅（对应 commit `eb2dee5`）
+
+### [x] T15 (预计 5min) 测试：POST /api/chat 带 model 参数时路由到对应 Agent
+- [x] mock ModelRouter，注册 "gpt-4.1" 和 "qwen"
+- [x] 发送 POST /api/chat 含 { username: "marla", message: "推荐跑鞋", model: "gpt-4.1" }
+- [x] 验证 ModelRouter.GetAgent("gpt-4.1") 被调用且返回 Agent 处理请求
+
+**验证**：dotnet build 0 错误 + dotnet test 57/57 通过 ✅（对应 commit `a6d77a8`）
