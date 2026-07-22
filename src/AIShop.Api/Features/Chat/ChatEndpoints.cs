@@ -202,7 +202,7 @@ public static class ChatEndpoints
             ISessionRepository sessions,
             IChatMessageRepository chatRepo,
             IProductCatalogService catalog,
-            ModelRouter router,
+            IShoppingAssistantAgent shoppingAgent,
             IMemoryCache cache,
             CancellationToken ct) =>
         {
@@ -215,9 +215,6 @@ public static class ChatEndpoints
 
             var sessionId = await sessions.GetOrCreateSessionIdAsync(user.Id, ct);
             var sid = Guid.Parse(sessionId);
-
-            // Use default agent for recommendations
-            var defaultAgent = router.GetDefaultAgent();
 
             // Load last user message and ask Agent for keyword matching
             var lastUserMessage = await chatRepo.GetLastUserMessageAsync(sid, ct);
@@ -255,7 +252,7 @@ public static class ChatEndpoints
                 agentSw.Start();
                 try
                 {
-                    (agentResult, agentSession) = await defaultAgent.RunChatAsync(sid, lastUserMessage.Content, req.Username, ct);
+                    (agentResult, agentSession) = await shoppingAgent.RunChatAsync(sid, lastUserMessage.Content, req.Username, ct);
                 }
                 catch (Exception ex)
                 {
@@ -328,9 +325,6 @@ public static class ChatEndpoints
 
             return Results.Ok(response);
         });
-
-        api.MapGet("/models", (ModelRouter router) =>
-            Results.Ok(router.GetAvailableModels()));
 
         api.MapGet("/products", (IProductRepository products) =>
             Results.Ok(new { products = products.GetAll() }));
