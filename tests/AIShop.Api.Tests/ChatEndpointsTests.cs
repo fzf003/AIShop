@@ -384,6 +384,55 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         Assert.Equal("qwen", usedModel);
     }
 
+    [Fact]
+    public async Task Chat_WithModelParameter_RoutesToCorrectAgent()
+    {
+        string? usedModel = null;
+        var factory = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<ModelRouter>();
+
+                var mockRouter = Substitute.For<ModelRouter>();
+                var mockAgent = Substitute.For<IShoppingAssistantAgent>();
+                var fakeResult = new AgentChatResult("GPT-4.1 推荐跑鞋", ["跑步"], null);
+                var fakeSession = new TestSession();
+                fakeSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
+
+                mockAgent.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+                    .Returns((fakeResult, fakeSession));
+
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(callInfo =>
+                {
+                    usedModel = callInfo.Arg<string>();
+                    return mockAgent;
+                });
+                mockRouter.GetDefaultAgent().Returns(mockAgent);
+                mockRouter.ActiveModel.Returns("qwen");
+                mockRouter.GetAvailableModels().Returns([
+                    new ModelInfo("qwen", "Qwen 3.7", true),
+                    new ModelInfo("gpt-4.1", "GPT 4.1", false),
+                ]);
+
+                services.AddSingleton(mockRouter);
+            });
+        });
+        var client = factory.CreateClient();
+
+        // Act: send chat request with model="gpt-4.1"
+        var response = await client.PostAsJsonAsync("/api/chat",
+            new ChatRequest("marla", "推荐跑鞋", "gpt-4.1"));
+
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<ChatReply>();
+        Assert.NotNull(result);
+        Assert.Equal("GPT-4.1 推荐跑鞋", result!.Response);
+
+        // Assert: routed to gpt-4.1 agent
+        Assert.Equal("gpt-4.1", usedModel);
+    }
+
     private sealed record ProductsResponse(ProductDto[] products);
 
     private sealed class TestSession : AgentSession
