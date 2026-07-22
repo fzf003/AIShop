@@ -247,6 +247,44 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     // ============ Multi-Model Tests ============
 
     [Fact]
+    public async Task GetModels_ReturnsModelInfoWithCorrectFields()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.GetAsync("/api/models");
+
+        // 验证响应 200
+        response.EnsureSuccessStatusCode();
+
+        // 验证可反序列化为 List<ModelInfo>
+        var models = await response.Content.ReadFromJsonAsync<List<ModelInfo>>();
+        Assert.NotNull(models);
+        Assert.NotEmpty(models);
+
+        // 验证每个元素有 id/name/isDefault 字段
+        foreach (var model in models!)
+        {
+            Assert.False(string.IsNullOrWhiteSpace(model.Id), "Id 不应为空");
+            Assert.False(string.IsNullOrWhiteSpace(model.Name), "Name 不应为空");
+        }
+
+        // 验证 JSON 不包含 Key/Endpoint 等敏感字段
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        foreach (var element in doc.RootElement.EnumerateArray())
+        {
+            Assert.False(element.TryGetProperty("key", out _), "应不包含 key 字段");
+            Assert.False(element.TryGetProperty("Key", out _), "应不包含 Key 字段");
+            Assert.False(element.TryGetProperty("endpoint", out _), "应不包含 endpoint 字段");
+            Assert.False(element.TryGetProperty("Endpoint", out _), "应不包含 Endpoint 字段");
+        }
+
+        // 验证 isDefault: true 的模型与 ActiveModel 配置一致
+        var defaultModels = models!.Where(m => m.IsDefault).ToList();
+        Assert.Single(defaultModels);
+        Assert.Equal("qwen", defaultModels[0].Id);
+    }
+
+    [Fact]
     public async Task GetModels_ReturnsAvailableModels()
     {
         var client = _factory.CreateClient();
@@ -270,12 +308,29 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     public async Task Login_ResponseContainsModels()
     {
         var client = _factory.CreateClient();
-        var response = await client.PostAsJsonAsync("/api/login",
+
+        // Act: POST /api/login
+        var loginResponse = await client.PostAsJsonAsync("/api/login",
             new LoginRequest("marla"));
-        var result = await response.Content.ReadFromJsonAsync<LoginResponse>();
-        Assert.NotNull(result);
-        Assert.NotNull(result!.Models);
-        Assert.NotEmpty(result.Models);
+        var loginResult = await loginResponse.Content.ReadFromJsonAsync<LoginResponse>();
+        Assert.NotNull(loginResult);
+        Assert.NotNull(loginResult!.Models);
+        Assert.NotEmpty(loginResult.Models);
+
+        // Act: GET /api/models
+        var modelsResponse = await client.GetAsync("/api/models");
+        modelsResponse.EnsureSuccessStatusCode();
+        var modelsList = await modelsResponse.Content.ReadFromJsonAsync<List<ModelInfo>>();
+        Assert.NotNull(modelsList);
+
+        // Assert: login response models match GET /api/models (count, id, name)
+        Assert.Equal(modelsList!.Count, loginResult.Models.Count);
+        foreach (var expected in modelsList)
+        {
+            var actual = loginResult.Models.FirstOrDefault(m => m.Id == expected.Id);
+            Assert.NotNull(actual);
+            Assert.Equal(expected.Name, actual!.Name);
+        }
     }
 
     private sealed record ProductsResponse(ProductDto[] products);
