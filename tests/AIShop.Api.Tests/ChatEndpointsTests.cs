@@ -20,22 +20,32 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         {
             builder.ConfigureServices(services =>
             {
-                services.RemoveAll<IShoppingAssistantAgent>();
+                services.RemoveAll<ModelRouter>();
 
-                var mock = Substitute.For<IShoppingAssistantAgent>();
+                var mockRouter = Substitute.For<ModelRouter>();
+                var mockAgent = Substitute.For<IShoppingAssistantAgent>();
                 var fakeResult = new AgentChatResult("模拟回复", ["跑步"], null);
                 var fakeSession = new TestSession();
                 fakeSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
 
-                mock.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+                mockAgent.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
                     .Returns((fakeResult, fakeSession));
 
-                services.AddSingleton(mock);
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(callInfo =>
+                {
+                    var modelName = callInfo.Arg<string>();
+                    if (modelName == "nonexistent")
+                        throw new KeyNotFoundException("model not found");
+                    return mockAgent;
+                });
+                mockRouter.GetDefaultAgent().Returns(mockAgent);
+                mockRouter.GetAvailableModels().Returns([
+                    new ModelInfo("qwen", "Qwen 3.7", true),
+                    new ModelInfo("gpt-4.1", "GPT 4.1", false),
+                    new ModelInfo("deepseek", "DeepSeek Chat", false),
+                ]);
 
-                // Replace ModelRouter with TestModelRouter backed by mock agent
-                services.RemoveAll<ModelRouter>();
-                services.AddSingleton<ModelRouter>(sp =>
-                    new TestModelRouter(sp.GetRequiredService<IShoppingAssistantAgent>()));
+                services.AddSingleton(mockRouter);
             });
         });
     }
@@ -173,17 +183,17 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         {
             builder.ConfigureServices(services =>
             {
-                services.RemoveAll<IShoppingAssistantAgent>();
+                services.RemoveAll<ModelRouter>();
+                var mockRouter = Substitute.For<ModelRouter>();
                 var mock = Substitute.For<IShoppingAssistantAgent>();
                 var fakeResult = new AgentChatResult("模拟推荐", ["运动"], null);
                 var fakeSession = new TestSession();
                 fakeSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
                 mock.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
                     .Returns(_ => { callCount++; return (fakeResult, fakeSession); });
-                services.AddSingleton(mock);
-                services.RemoveAll<ModelRouter>();
-                services.AddSingleton<ModelRouter>(sp =>
-                    new TestModelRouter(sp.GetRequiredService<IShoppingAssistantAgent>()));
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(mock);
+                mockRouter.GetDefaultAgent().Returns(mock);
+                services.AddSingleton(mockRouter);
             });
         });
         var client = factory.CreateClient();
@@ -209,17 +219,17 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         {
             builder.ConfigureServices(services =>
             {
-                services.RemoveAll<IShoppingAssistantAgent>();
+                services.RemoveAll<ModelRouter>();
+                var mockRouter = Substitute.For<ModelRouter>();
                 var mock = Substitute.For<IShoppingAssistantAgent>();
                 var fakeResult = new AgentChatResult("推荐", ["运动"], null);
                 var fakeSession = new TestSession();
                 fakeSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
                 mock.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
                     .Returns(_ => { callCount++; return (fakeResult, fakeSession); });
-                services.AddSingleton(mock);
-                services.RemoveAll<ModelRouter>();
-                services.AddSingleton<ModelRouter>(sp =>
-                    new TestModelRouter(sp.GetRequiredService<IShoppingAssistantAgent>()));
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(mock);
+                mockRouter.GetDefaultAgent().Returns(mock);
+                services.AddSingleton(mockRouter);
             });
         });
         var client = factory.CreateClient();
@@ -234,26 +244,44 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
             "新消息应使缓存失效，导致 Agent 重新被调用");
     }
 
+    // ============ Multi-Model Tests ============
+
+    [Fact]
+    public async Task GetModels_ReturnsAvailableModels()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.GetAsync("/api/models");
+        response.EnsureSuccessStatusCode();
+        var models = await response.Content.ReadFromJsonAsync<List<ModelInfo>>();
+        Assert.NotNull(models);
+        Assert.NotEmpty(models);
+    }
+
+    [Fact]
+    public async Task Chat_WithNonExistentModel_ReturnsBadRequest()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/chat",
+            new ChatRequest("marla", "Hello", "nonexistent"));
+        Assert.Equal(400, (int)response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Login_ResponseContainsModels()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/login",
+            new LoginRequest("marla"));
+        var result = await response.Content.ReadFromJsonAsync<LoginResponse>();
+        Assert.NotNull(result);
+        Assert.NotNull(result!.Models);
+        Assert.NotEmpty(result.Models);
+    }
+
     private sealed record ProductsResponse(ProductDto[] products);
 
     private sealed class TestSession : AgentSession
     {
         public TestSession() : base(new AgentSessionStateBag()) { }
-    }
-
-    /// <summary>
-    /// 测试用 ModelRouter，使用注入的 mock IShoppingAssistantAgent。
-    /// </summary>
-    private sealed class TestModelRouter : ModelRouter
-    {
-        private readonly IShoppingAssistantAgent _agent;
-
-        public TestModelRouter(IShoppingAssistantAgent agent) : base()
-        {
-            _agent = agent;
-        }
-
-        public override IShoppingAssistantAgent GetAgent(string modelName) => _agent;
-        public override IShoppingAssistantAgent GetDefaultAgent() => _agent;
     }
 }

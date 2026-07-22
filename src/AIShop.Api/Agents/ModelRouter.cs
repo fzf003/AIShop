@@ -75,7 +75,7 @@ public class ModelRouter
         }
     }
 
-    public IEnumerable<ModelInfo> GetAvailableModels()
+    public virtual IEnumerable<ModelInfo> GetAvailableModels()
     {
         foreach (var (id, config) in _modelConfigs)
         {
