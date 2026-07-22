@@ -35,6 +35,17 @@ public class ModelRouter
     private readonly ConcurrentDictionary<string, Lazy<ShoppingAssistantAgent>> _agents = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Serilog.ILogger Logger = Serilog.Log.ForContext<ModelRouter>();
 
+    /// <summary>
+    /// 用于测试的受保护无参构造函数。
+    /// 子类应覆盖 <see cref="GetAgent"/> 和 <see cref="GetDefaultAgent"/> 方法。
+    /// </summary>
+    protected ModelRouter()
+    {
+        _models = new Dictionary<string, ModelConfig>(StringComparer.OrdinalIgnoreCase);
+        _activeModel = "default";
+        _sp = null!;
+    }
+
     public ModelRouter(IConfiguration configuration, IServiceProvider sp)
     {
         _sp = sp;
@@ -150,7 +161,7 @@ public class ModelRouter
     /// <param name="modelName">模型 ID（配置节键名）。</param>
     /// <returns>Agent 实例。</returns>
     /// <exception cref="KeyNotFoundException">模型未注册时抛出。</exception>
-    public ShoppingAssistantAgent GetAgent(string modelName)
+    public virtual IShoppingAssistantAgent GetAgent(string modelName)
     {
         if (!_models.ContainsKey(modelName))
             throw new KeyNotFoundException($"模型 '{modelName}' 未注册");
@@ -170,5 +181,5 @@ public class ModelRouter
     /// <summary>
     /// 获取默认 Agent 实例（当前激活模型）。
     /// </summary>
-    public ShoppingAssistantAgent GetDefaultAgent() => GetAgent(_activeModel);
+    public virtual IShoppingAssistantAgent GetDefaultAgent() => GetAgent(_activeModel);
 }
