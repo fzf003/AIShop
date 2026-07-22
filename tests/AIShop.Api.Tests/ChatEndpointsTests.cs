@@ -305,6 +305,10 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         var response = await client.PostAsJsonAsync("/api/chat",
             new ChatRequest("marla", "Hello", "nonexistent"));
         Assert.Equal(400, (int)response.StatusCode);
+
+        // 验证错误信息包含"不支持的模型"
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("不支持的模型", body.GetProperty("detail").GetString());
     }
 
     [Fact]
