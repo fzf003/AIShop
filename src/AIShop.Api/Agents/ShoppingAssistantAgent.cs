@@ -18,7 +18,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     private readonly bool _isOpenAI;
     private static readonly Serilog.ILogger Logger = Log.ForContext<ShoppingAssistantAgent>();
 
-    private static bool IsOpenAIModel(string model) =>
+    internal static bool IsOpenAIModel(string model) =>
         model.StartsWith("gpt-", StringComparison.OrdinalIgnoreCase) ||
         model.StartsWith("o1-", StringComparison.OrdinalIgnoreCase) ||
         model.StartsWith("o3-", StringComparison.OrdinalIgnoreCase);
@@ -88,9 +88,9 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     }
 
     public ShoppingAssistantAgent(IChatClient chatClient, IDbContextFactory<AppDbContext> dbFactory,
-        IProductCatalogService catalog, CartToolProvider cartTools, string model)
+        IProductCatalogService catalog, CartToolProvider cartTools, bool isOpenAI)
     {
-        _isOpenAI = IsOpenAIModel(model);
+        _isOpenAI = isOpenAI;
         var instructions = BuildInstructions(catalog);
 
         var tools = new List<AITool>();

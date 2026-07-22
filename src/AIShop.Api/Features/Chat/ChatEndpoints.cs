@@ -13,7 +13,7 @@ namespace AIShop.Api.Features.Chat;
 public sealed record AgentChatResult(
     string Reply, string[] Keywords, string[]? Preferences);
 
-public sealed record ChatRequest(string Username, string Message);
+public sealed record ChatRequest(string Username, string Message, string? Model = null);
 public sealed record ChatReply(
     string Response,
     List<ProductDto>? RecommendedProducts,

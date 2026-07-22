@@ -69,7 +69,7 @@ try
         var dbFactory = sp.GetRequiredService<IDbContextFactory<AppDbContext>>();
         var catalog = sp.GetRequiredService<IProductCatalogService>();
         var cartTools = sp.GetRequiredService<CartToolProvider>();
-        return new ShoppingAssistantAgent(chatClient, dbFactory, catalog, cartTools, model);
+        return new ShoppingAssistantAgent(chatClient, dbFactory, catalog, cartTools, ShoppingAssistantAgent.IsOpenAIModel(model));
     });
     builder.Services.AddSingleton<CartToolProvider>();
 

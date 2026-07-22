@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>多模型 Agent — 界面原型</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f2f5; }
+
+  .prototype-container {
+    max-width: 900px; margin: 40px auto; padding: 0 20px;
+  }
+
+  .proto-header {
+    text-align: center; margin-bottom: 32px;
+  }
+  .proto-header h1 { font-size: 1.6rem; color: #1a1a2e; }
+  .proto-header p { color: #888; margin-top: 6px; font-size: 0.9rem; }
+
+  /* ========== VARIANT A: Side-by-Side Cards ========== */
+  .variant-a { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  .variant-a .login-box {
+    background: white; border-radius: 20px; padding: 40px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.08); max-width: 700px; margin: 0 auto;
+  }
+  .variant-a .login-box h2 {
+    text-align: center; font-size: 1.3rem; color: #1a1a2e; margin-bottom: 28px;
+  }
+  .variant-a .selection-rows {
+    display: flex; flex-direction: column; gap: 24px;
+  }
+  .variant-a .selection-group label {
+    display: block; font-size: 0.8rem; font-weight: 700; color: #888;
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px;
+  }
+  .variant-a .card-grid {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;
+  }
+  .variant-a .option-card {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 16px 12px; border: 2px solid #eee; border-radius: 14px;
+    cursor: pointer; transition: all 0.15s; background: white;
+  }
+  .variant-a .option-card:hover { border-color: #1a1a2e; transform: translateY(-2px); }
+  .variant-a .option-card.selected {
+    border-color: #1a1a2e; background: #f8f8ff;
+    box-shadow: 0 0 0 3px rgba(26,26,46,0.1);
+  }
+  .variant-a .option-card .avatar { font-size: 2rem; }
+  .variant-a .option-card .name { font-weight: 600; color: #1a1a2e; font-size: 0.95rem; }
+  .variant-a .option-card .desc { font-size: 0.75rem; color: #999; text-align: center; }
+  .variant-a .option-card .badge {
+    font-size: 0.65rem; background: #e8f5e9; color: #2e7d32;
+    padding: 2px 8px; border-radius: 10px; font-weight: 600;
+  }
+  .variant-a .start-btn {
+    display: block; width: 100%; margin-top: 28px; padding: 14px;
+    background: #1a1a2e; color: white; border: none; border-radius: 12px;
+    font-size: 1rem; font-weight: 700; cursor: pointer; transition: opacity 0.15s;
+  }
+  .variant-a .start-btn:hover { opacity: 0.9; }
+  .variant-a .start-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Header A */
+  .variant-a .header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 24px; background: #1a1a2e; color: white;
+  }
+  .variant-a .header-left { display: flex; align-items: center; gap: 16px; }
+  .variant-a .header-left h2 { font-size: 1.1rem; }
+  .variant-a .model-badge {
+    display: flex; align-items: center; gap: 6px;
+    background: rgba(255,255,255,0.15); padding: 4px 12px;
+    border-radius: 20px; font-size: 0.8rem; cursor: pointer; position: relative;
+  }
+  .variant-a .model-badge:hover { background: rgba(255,255,255,0.25); }
+  .variant-a .model-dropdown {
+    display: none; position: absolute; top: 100%; left: 0; margin-top: 6px;
+    background: white; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.15);
+    min-width: 180px; overflow: hidden; z-index: 50;
+  }
+  .variant-a .model-badge:hover .model-dropdown,
+  .variant-a .model-dropdown:hover { display: block; }
+  .variant-a .model-dropdown-item {
+    padding: 10px 16px; color: #333; font-size: 0.85rem; cursor: pointer;
+    display: flex; align-items: center; gap: 8px; transition: background 0.1s;
+  }
+  .variant-a .model-dropdown-item:hover { background: #f5f5f5; }
+  .variant-a .model-dropdown-item .check { margin-left: auto; color: #16a34a; font-weight: 700; }
+  .variant-a .header-right { display: flex; align-items: center; gap: 12px; }
+
+  /* ========== VARIANT B: Stepped Wizard ========== */
+  .variant-b { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  .variant-b .wizard {
+    background: white; border-radius: 20px; padding: 40px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.08); max-width: 580px; margin: 0 auto;
+  }
+  .variant-b .steps {
+    display: flex; justify-content: center; gap: 0; margin-bottom: 36px;
+  }
+  .variant-b .step {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 16px; border-radius: 20px; font-size: 0.85rem;
+    color: #ccc; font-weight: 500;
+  }
+  .variant-b .step .num {
+    width: 24px; height: 24px; border-radius: 50%; background: #eee;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.75rem; font-weight: 700; color: #999;
+  }
+  .variant-b .step.active { color: #1a1a2e; }
+  .variant-b .step.active .num { background: #1a1a2e; color: white; }
+  .variant-b .step.done { color: #16a34a; }
+  .variant-b .step.done .num { background: #16a34a; color: white; }
+  .variant-b .step-connector { width: 40px; height: 2px; background: #eee; align-self: center; }
+  .variant-b .step-connector.done { background: #16a34a; }
+
+  .variant-b .wizard-content { text-align: center; }
+  .variant-b .wizard-content h3 { font-size: 1.1rem; color: #1a1a2e; margin-bottom: 20px; }
+  .variant-b .option-list {
+    display: flex; flex-direction: column; gap: 8px; text-align: left;
+  }
+  .variant-b .option-row {
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 18px; border: 2px solid #eee; border-radius: 12px;
+    cursor: pointer; transition: all 0.12s;
+  }
+  .variant-b .option-row:hover { border-color: #1a1a2e; }
+  .variant-b .option-row.selected { border-color: #1a1a2e; background: #f8f8ff; }
+  .variant-b .option-row .radio {
+    width: 20px; height: 20px; border-radius: 50%; border: 2px solid #ddd;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .variant-b .option-row.selected .radio { border-color: #1a1a2e; }
+  .variant-b .option-row.selected .radio::after {
+    content: ''; width: 10px; height: 10px; border-radius: 50%; background: #1a1a2e;
+  }
+  .variant-b .option-row .icon { font-size: 1.6rem; }
+  .variant-b .option-row .info .title { font-weight: 600; color: #1a1a2e; }
+  .variant-b .option-row .info .sub { font-size: 0.8rem; color: #999; margin-top: 2px; }
+  .variant-b .wizard-nav {
+    display: flex; justify-content: space-between; margin-top: 28px;
+  }
+  .variant-b .wizard-nav button {
+    padding: 10px 28px; border-radius: 10px; font-weight: 600; font-size: 0.9rem;
+    border: none; cursor: pointer; transition: opacity 0.15s;
+  }
+  .variant-b .wizard-nav .back { background: #f0f0f0; color: #555; }
+  .variant-b .wizard-nav .back:hover { background: #e5e5e5; }
+  .variant-b .wizard-nav .next { background: #1a1a2e; color: white; }
+  .variant-b .wizard-nav .next:hover { opacity: 0.9; }
+  .variant-b .wizard-nav .next:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Header B */
+  .variant-b .header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 24px; background: linear-gradient(135deg, #1a1a2e, #16213e); color: white;
+  }
+  .variant-b .header-left { display: flex; align-items: center; gap: 20px; }
+  .variant-b .header-left h2 { font-size: 1.1rem; }
+  .variant-b .model-tabs { display: flex; gap: 4px; background: rgba(255,255,255,0.08); padding: 3px; border-radius: 8px; }
+  .variant-b .model-tab {
+    padding: 5px 14px; border-radius: 6px; font-size: 0.78rem; cursor: pointer;
+    color: rgba(255,255,255,0.6); border: none; background: none; font-weight: 500;
+    transition: all 0.15s;
+  }
+  .variant-b .model-tab:hover { color: white; }
+  .variant-b .model-tab.active { background: rgba(255,255,255,0.2); color: white; font-weight: 700; }
+  .variant-b .header-right { display: flex; align-items: center; gap: 12px; }
+
+  /* ========== VARIANT C: Minimal Compact ========== */
+  .variant-c { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  .variant-c .login-panel {
+    background: white; border-radius: 16px; padding: 32px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.06); max-width: 440px; margin: 0 auto; text-align: center;
+  }
+  .variant-c .login-panel .brand-icon { font-size: 3rem; margin-bottom: 8px; }
+  .variant-c .login-panel h2 { font-size: 1.3rem; color: #1a1a2e; margin-bottom: 4px; }
+  .variant-c .login-panel .tagline { font-size: 0.85rem; color: #888; margin-bottom: 24px; }
+  .variant-c .login-panel .field-group {
+    text-align: left; margin-bottom: 16px;
+  }
+  .variant-c .login-panel .field-group label {
+    display: block; font-size: 0.8rem; font-weight: 600; color: #555; margin-bottom: 6px;
+  }
+  .variant-c .login-panel select {
+    width: 100%; padding: 12px 14px; border: 1.5px solid #ddd; border-radius: 10px;
+    font-size: 0.95rem; background: white; cursor: pointer; outline: none;
+    appearance: none; -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 14px center;
+  }
+  .variant-c .login-panel select:focus { border-color: #1a1a2e; }
+  .variant-c .login-panel .enter-btn {
+    width: 100%; padding: 13px; margin-top: 8px;
+    background: #1a1a2e; color: white; border: none; border-radius: 10px;
+    font-size: 1rem; font-weight: 700; cursor: pointer;
+  }
+  .variant-c .login-panel .enter-btn:hover { opacity: 0.9; }
+
+  /* Header C */
+  .variant-c .header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 20px; background: white; border-bottom: 1px solid #eee;
+  }
+  .variant-c .header-left { display: flex; align-items: center; gap: 12px; }
+  .variant-c .header-left h2 { font-size: 1rem; color: #1a1a2e; }
+  .variant-c .model-chip {
+    display: flex; align-items: center; gap: 4px;
+    padding: 3px 10px; background: #f0f0f0; border-radius: 6px;
+    font-size: 0.75rem; color: #555; cursor: pointer; position: relative;
+  }
+  .variant-c .model-chip:hover { background: #e5e5e5; }
+  .variant-c .model-popup {
+    display: none; position: absolute; top: 100%; left: 0; margin-top: 4px;
+    background: white; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.12);
+    min-width: 160px; overflow: hidden; z-index: 50;
+  }
+  .variant-c .model-chip:hover .model-popup { display: block; }
+  .variant-c .model-popup-item {
+    padding: 8px 14px; font-size: 0.8rem; cursor: pointer; color: #333;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .variant-c .model-popup-item:hover { background: #f8f8ff; }
+  .variant-c .header-right { display: flex; align-items: center; gap: 10px; }
+
+  /* Shared header elements */
+  .user-greeting { font-size: 0.85rem; color: rgba(255,255,255,0.85); }
+  .header .cart-btn {
+    background: none; border: none; font-size: 1.2rem; cursor: pointer; padding: 4px 6px; border-radius: 6px; color: white; position: relative;
+  }
+  .header .cart-btn:hover { background: rgba(255,255,255,0.15); }
+  .header .nav-link {
+    padding: 5px 12px; background: none; border: 1px solid rgba(255,255,255,0.3); border-radius: 6px;
+    color: rgba(255,255,255,0.8); cursor: pointer; font-size: 0.8rem; text-decoration: none;
+  }
+  .header .nav-link:hover { background: rgba(255,255,255,0.15); color: white; }
+  .logout-btn {
+    padding: 5px 12px; background: rgba(255,255,255,0.12); color: white;
+    border: none; border-radius: 6px; cursor: pointer; font-size: 0.78rem;
+  }
+  .logout-btn:hover { background: rgba(255,255,255,0.2); }
+
+  /* C header override for white bg */
+  .variant-c .user-greeting { color: #555; }
+  .variant-c .header .cart-btn { color: #1a1a2e; }
+  .variant-c .header .nav-link { color: #555; border-color: #ddd; }
+  .variant-c .header .nav-link:hover { background: #f5f5f5; }
+  .variant-c .logout-btn { background: #f0f0f0; color: #555; }
+  .variant-c .logout-btn:hover { background: #e5e5e5; }
+
+  /* Chat area mockup */
+  .chat-mock {
+    display: flex; flex: 1; padding: 20px; gap: 20px; height: 300px;
+  }
+  .chat-mock .messages-area {
+    flex: 1; background: white; border-radius: 12px; padding: 16px;
+    display: flex; flex-direction: column; gap: 10px; box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  }
+  .chat-mock .msg-bubble {
+    max-width: 70%; padding: 10px 14px; border-radius: 14px; font-size: 0.85rem;
+  }
+  .chat-mock .msg-bubble.user { align-self: flex-end; background: #1a1a2e; color: white; }
+  .chat-mock .msg-bubble.assistant { align-self: flex-start; background: #f0f0f0; color: #333; }
+  .chat-mock .input-bar {
+    display: flex; gap: 8px; margin-top: auto;
+  }
+  .chat-mock .input-bar input {
+    flex: 1; padding: 10px 14px; border: 1px solid #ddd; border-radius: 20px; font-size: 0.85rem;
+  }
+  .chat-mock .input-bar button {
+    padding: 10px 20px; background: #1a1a2e; color: white; border: none; border-radius: 20px; cursor: pointer;
+  }
+  .chat-mock .reco-side {
+    width: 260px; background: #fafafa; border-radius: 12px; padding: 14px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  }
+  .chat-mock .reco-side .mock-card {
+    background: white; border-radius: 8px; padding: 12px; margin-bottom: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+
+  /* Model indicator in chat area */
+  .chat-model-indicator {
+    font-size: 0.7rem; color: #999; display: flex; align-items: center; gap: 4px;
+    margin-bottom: 8px;
+  }
+
+  /* Prototype switcher bar */
+  .switcher-bar {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: white; border-radius: 40px; padding: 8px 16px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.2); z-index: 1000;
+    display: flex; align-items: center; gap: 12px;
+    font-size: 0.85rem; user-select: none;
+  }
+  .switcher-bar button {
+    background: none; border: none; font-size: 1.3rem; cursor: pointer;
+    width: 36px; height: 36px; border-radius: 50%; display: flex;
+    align-items: center; justify-content: center; transition: background 0.12s;
+  }
+  .switcher-bar button:hover { background: #f0f0f0; }
+  .switcher-bar .label {
+    font-weight: 600; color: #1a1a2e; min-width: 140px; text-align: center;
+  }
+  .switcher-bar .dots { display: flex; gap: 4px; }
+  .switcher-bar .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #ddd;
+    transition: background 0.2s;
+  }
+  .switcher-bar .dot.active { background: #1a1a2e; }
+
+  /* hide/show variants */
+  .variant { display: none; }
+  .variant.visible { display: block; }
+
+  .mt-4 { margin-top: 16px; }
+</style>
+</head>
+<body>
+
+<div class="prototype-container">
+  <div class="proto-header">
+    <h1>🛍️ 多模型 Agent — 登录选型界面原型</h1>
+    <p>三种不同的登录 + Header 模型切换方案，用底部栏切换</p>
+  </div>
+
+  <!-- ============================================================= -->
+  <!-- VARIANT A: 双列卡片布局 -->
+  <!-- ============================================================= -->
+  <div class="variant variant-a visible" id="variantA">
+    <!-- Login -->
+    <div class="login-box">
+      <h2>👋 选择您的身份和 AI 助手</h2>
+      <div class="selection-rows">
+        <div class="selection-group">
+          <label>👤 选择用户</label>
+          <div class="card-grid">
+            <div class="option-card selected">
+              <div class="avatar">👩</div>
+              <div class="name">Marla</div>
+              <div class="desc">个人购物</div>
+            </div>
+            <div class="option-card">
+              <div class="avatar">👨</div>
+              <div class="name">Steve</div>
+              <div class="desc">家庭采购</div>
+            </div>
+            <div class="option-card">
+              <div class="avatar">🧑</div>
+              <div class="name">fzf003</div>
+              <div class="desc">开发测试</div>
+            </div>
+          </div>
+        </div>
+        <div class="selection-group">
+          <label>🤖 选择 AI 模型</label>
+          <div class="card-grid">
+            <div class="option-card selected">
+              <div class="avatar">🌊</div>
+              <div class="name">DeepSeek</div>
+              <div class="desc">v3 · 快速精确</div>
+              <span class="badge">推荐</span>
+            </div>
+            <div class="option-card">
+              <div class="avatar">🌟</div>
+              <div class="name">Qwen 3.7</div>
+              <div class="desc">千问 · 中文优化</div>
+            </div>
+            <div class="option-card">
+              <div class="avatar">⚡</div>
+              <div class="name">GPT-4.1</div>
+              <div class="desc">OpenAI · 全面</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <button class="start-btn">🚀 开始聊天</button>
+    </div>
+
+    <!-- Header mock -->
+    <div class="header" style="margin-top:24px;border-radius:12px">
+      <div class="header-left">
+        <h2>🛍️ 智能购物助手</h2>
+        <div class="model-badge">
+          🌊 DeepSeek ▼
+          <div class="model-dropdown">
+            <div class="model-dropdown-item">🌊 DeepSeek <span class="check">✓</span></div>
+            <div class="model-dropdown-item">🌟 Qwen 3.7</div>
+            <div class="model-dropdown-item">⚡ GPT-4.1</div>
+          </div>
+        </div>
+      </div>
+      <div class="header-right">
+        <button class="cart-btn">🛒</button>
+        <a class="nav-link">📦 产品</a>
+        <span class="user-greeting">你好, Marla!</span>
+        <button class="logout-btn">退出</button>
+      </div>
+    </div>
+    <!-- Chat mock -->
+    <div class="chat-mock">
+      <div class="messages-area">
+        <div class="chat-model-indicator">🤖 当前模型: DeepSeek</div>
+        <div class="msg-bubble user">推荐跑鞋</div>
+        <div class="msg-bubble assistant">为您找到以下跑鞋：...</div>
+        <div class="input-bar">
+          <input placeholder="说说您喜欢什么..." value="我要个咖啡机">
+          <button>发送</button>
+        </div>
+      </div>
+      <div class="reco-side">
+        <div style="font-size:0.75rem;font-weight:700;color:#999;margin-bottom:10px;">🎯 为您推荐</div>
+        <div class="mock-card">👟 专业跑鞋 $129.99</div>
+        <div class="mock-card">👟 轻量跑鞋 $89.99</div>
+        <div style="font-size:0.75rem;font-weight:700;color:#999;margin:10px 0 8px;">📋 其他</div>
+        <div class="mock-card">☕ 咖啡机 $349.99</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================= -->
+  <!-- VARIANT B: 逐步引导向导 -->
+  <!-- ============================================================= -->
+  <div class="variant variant-b" id="variantB">
+    <!-- Wizard login -->
+    <div class="wizard">
+      <div class="steps">
+        <div class="step active"><span class="num">1</span> 选择身份</div>
+        <div class="step-connector"></div>
+        <div class="step"><span class="num">2</span> 选择模型</div>
+        <div class="step-connector"></div>
+        <div class="step"><span class="num">3</span> 开始对话</div>
+      </div>
+      <div class="wizard-content">
+        <h3>选择您的身份</h3>
+        <div class="option-list">
+          <div class="option-row selected">
+            <div class="radio"></div>
+            <span class="icon">👩</span>
+            <div class="info"><div class="title">Marla</div><div class="sub">个人购物</div></div>
+          </div>
+          <div class="option-row">
+            <div class="radio"></div>
+            <span class="icon">👨</span>
+            <div class="info"><div class="title">Steve</div><div class="sub">家庭采购</div></div>
+          </div>
+          <div class="option-row">
+            <div class="radio"></div>
+            <span class="icon">🧑</span>
+            <div class="info"><div class="title">fzf003</div><div class="sub">开发测试</div></div>
+          </div>
+        </div>
+      </div>
+      <div class="wizard-nav">
+        <button class="back" disabled>返回</button>
+        <button class="next">选择模型 →</button>
+      </div>
+    </div>
+
+    <!-- Header mock -->
+    <div class="header" style="margin-top:24px;border-radius:12px">
+      <div class="header-left">
+        <h2>🛍️ 智能购物助手</h2>
+        <div class="model-tabs">
+          <button class="model-tab">🌊 DeepSeek</button>
+          <button class="model-tab active">🌟 Qwen 3.7</button>
+          <button class="model-tab">⚡ GPT-4.1</button>
+        </div>
+      </div>
+      <div class="header-right">
+        <button class="cart-btn">🛒</button>
+        <a class="nav-link">📦 产品</a>
+        <span class="user-greeting">你好, Marla!</span>
+        <button class="logout-btn">退出</button>
+      </div>
+    </div>
+    <!-- Chat mock -->
+    <div class="chat-mock">
+      <div class="messages-area">
+        <div class="chat-model-indicator">🤖 当前模型: Qwen 3.7</div>
+        <div class="msg-bubble user">推荐跑鞋</div>
+        <div class="msg-bubble assistant">为您找到以下跑鞋：...</div>
+        <div class="input-bar">
+          <input placeholder="说说您喜欢什么..." value="我要个咖啡机">
+          <button>发送</button>
+        </div>
+      </div>
+      <div class="reco-side">
+        <div style="font-size:0.75rem;font-weight:700;color:#999;margin-bottom:10px;">🎯 为您推荐</div>
+        <div class="mock-card">👟 专业跑鞋 $129.99</div>
+        <div class="mock-card">👟 轻量跑鞋 $89.99</div>
+        <div style="font-size:0.75rem;font-weight:700;color:#999;margin:10px 0 8px;">📋 其他</div>
+        <div class="mock-card">☕ 咖啡机 $349.99</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================= -->
+  <!-- VARIANT C: 极简下拉表单 -->
+  <!-- ============================================================= -->
+  <div class="variant variant-c" id="variantC">
+    <!-- Compact login -->
+    <div class="login-panel">
+      <div class="brand-icon">🛍️</div>
+      <h2>智能购物助手</h2>
+      <p class="tagline">选择身份和 AI 模型后开始对话</p>
+      <div class="field-group">
+        <label>👤 用户</label>
+        <select>
+          <option selected>Marla — 个人购物</option>
+          <option>Steve — 家庭采购</option>
+          <option>fzf003 — 开发测试</option>
+        </select>
+      </div>
+      <div class="field-group">
+        <label>🤖 AI 模型</label>
+        <select>
+          <option>🌊 DeepSeek — 快速精确</option>
+          <option selected>🌟 Qwen 3.7 — 中文优化</option>
+          <option>⚡ GPT-4.1 — 全面能力</option>
+        </select>
+      </div>
+      <button class="enter-btn">开始对话 →</button>
+    </div>
+
+    <!-- Header mock -->
+    <div class="header" style="margin-top:24px;border-radius:12px;border:1px solid #eee">
+      <div class="header-left">
+        <h2>🛍️ 智能购物助手</h2>
+        <div class="model-chip">
+          🌟 Qwen 3.7 ▾
+          <div class="model-popup">
+            <div class="model-popup-item">🌊 DeepSeek</div>
+            <div class="model-popup-item">🌟 Qwen 3.7</div>
+            <div class="model-popup-item">⚡ GPT-4.1</div>
+          </div>
+        </div>
+      </div>
+      <div class="header-right">
+        <button class="cart-btn" style="color:#1a1a2e">🛒</button>
+        <a class="nav-link" style="color:#555;border-color:#ddd">📦 产品</a>
+        <span class="user-greeting">你好, Marla!</span>
+        <button class="logout-btn" style="background:#f0f0f0;color:#555">退出</button>
+      </div>
+    </div>
+    <!-- Chat mock -->
+    <div class="chat-mock">
+      <div class="messages-area">
+        <div class="chat-model-indicator">🤖 当前模型: Qwen 3.7</div>
+        <div class="msg-bubble user">推荐跑鞋</div>
+        <div class="msg-bubble assistant">为您找到以下跑鞋：...</div>
+        <div class="input-bar">
+          <input placeholder="说说您喜欢什么..." value="我要个咖啡机">
+          <button>发送</button>
+        </div>
+      </div>
+      <div class="reco-side">
+        <div style="font-size:0.75rem;font-weight:700;color:#999;margin-bottom:10px;">🎯 为您推荐</div>
+        <div class="mock-card">👟 专业跑鞋 $129.99</div>
+        <div class="mock-card">👟 轻量跑鞋 $89.99</div>
+        <div style="font-size:0.75rem;font-weight:700;color:#999;margin:10px 0 8px;">📋 其他</div>
+        <div class="mock-card">☕ 咖啡机 $349.99</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ============================================================= -->
+<!-- Prototype Switcher -->
+<!-- ============================================================= -->
+<div class="switcher-bar" id="switcher">
+  <button id="prevBtn" onclick="prevVariant()">‹</button>
+  <div class="dots" id="dots"></div>
+  <span class="label" id="variantLabel">A — 双列卡片</span>
+  <button id="nextBtn" onclick="nextVariant()">›</button>
+</div>
+
+<script>
+const VARIANTS = [
+  { id: 'variantA', label: 'A — 双列卡片' },
+  { id: 'variantB', label: 'B — 步骤向导' },
+  { id: 'variantC', label: 'C — 极简下拉' },
+];
+
+let currentIdx = 0;
+
+function switchVariant(idx) {
+  // hide all
+  document.querySelectorAll('.variant').forEach(v => v.classList.remove('visible'));
+  // show target
+  const target = document.getElementById(VARIANTS[idx].id);
+  if (target) target.classList.add('visible');
+  // update label
+  document.getElementById('variantLabel').textContent = VARIANTS[idx].label;
+  // update dots
+  document.querySelectorAll('.dot').forEach((d, i) => d.classList.toggle('active', i === idx));
+  currentIdx = idx;
+
+  // update URL
+  const url = new URL(window.location);
+  url.searchParams.set('variant', ['A','B','C'][idx]);
+  window.history.replaceState({}, '', url);
+}
+
+function prevVariant() {
+  switchVariant((currentIdx - 1 + VARIANTS.length) % VARIANTS.length);
+}
+function nextVariant() {
+  switchVariant((currentIdx + 1) % VARIANTS.length);
+}
+
+// Init dots
+const dotsEl = document.getElementById('dots');
+VARIANTS.forEach((_, i) => {
+  const dot = document.createElement('div');
+  dot.className = 'dot' + (i === 0 ? ' active' : '');
+  dotsEl.appendChild(dot);
+});
+
+// Keyboard
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
+  if (e.key === 'ArrowLeft') prevVariant();
+  if (e.key === 'ArrowRight') nextVariant();
+});
+
+// URL param
+const params = new URLSearchParams(window.location.search);
+const v = params.get('variant');
+if (v && ['A','B','C'].includes(v)) {
+  switchVariant(['A','B','C'].indexOf(v));
+}
+</script>
+</body>
+</html>
