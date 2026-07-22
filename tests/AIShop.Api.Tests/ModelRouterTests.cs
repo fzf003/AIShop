@@ -22,8 +22,8 @@ public sealed class ModelRouterTests
             })
             .Build();
 
-        var mockAgent = Substitute.For<IShoppingAssistantAgent>();
-        var router = new ModelRouter(config, mockAgent);
+        var sp = Substitute.For<IServiceProvider>();
+        var router = new ModelRouter(config, sp);
 
         // Act
         var models = router.GetAvailableModels().ToList();
@@ -56,8 +56,8 @@ public sealed class ModelRouterTests
             })
             .Build();
 
-        var mockAgent = Substitute.For<IShoppingAssistantAgent>();
-        var router = new ModelRouter(config, mockAgent);
+        var sp = Substitute.For<IServiceProvider>();
+        var router = new ModelRouter(config, sp);
 
         // Act
         var models = router.GetAvailableModels().ToList();
@@ -80,9 +80,9 @@ public sealed class ModelRouterTests
     {
         // Arrange: neither "Models" nor "OpenAI" section exists
         var config = new ConfigurationBuilder().Build();
-        var mockAgent = Substitute.For<IShoppingAssistantAgent>();
+        var sp = Substitute.For<IServiceProvider>();
 
         // Act & Assert
-        Assert.Throws<InvalidOperationException>(() => new ModelRouter(config, mockAgent));
+        Assert.Throws<InvalidOperationException>(() => new ModelRouter(config, sp));
     }
 }

@@ -41,28 +41,6 @@ try
 
     // Register Agent definitions (Api/Agents/)
     builder.Services.AddScoped<SqliteChatHistoryProvider>();
-    builder.Services.AddSingleton<IShoppingAssistantAgent>(sp =>
-    {
-        var openaiConfig = sp.GetRequiredService<IConfiguration>().GetSection("OpenAI");
-        var endpoint = openaiConfig["Endpoint"] ?? builder.Configuration.GetSection("OpenAI:Endpoint")!.Value!;
-        var apiKey = openaiConfig["Key"] ?? builder.Configuration.GetSection("OpenAI:Key")!.Value!;
-        var model = openaiConfig["Model"] ?? builder.Configuration.GetSection("OpenAI:Model")!.Value!;
-
-        var handler = new HttpClientHandler { UseProxy = false, Proxy = null };
-        var httpClient = new HttpClient(new DebugHandler(handler)) { Timeout = TimeSpan.FromSeconds(60 * 2) };
-        var clientOptions = new OpenAIClientOptions
-        {
-            Endpoint = new Uri(endpoint),
-            Transport = new HttpClientPipelineTransport(httpClient),
-        };
-        var client = new OpenAIClient(new ApiKeyCredential(apiKey), clientOptions);
-        var chatClient = client.GetChatClient(model).AsIChatClient();
-        var dbFactory = sp.GetRequiredService<IDbContextFactory<AppDbContext>>();
-        var catalog = sp.GetRequiredService<IProductCatalogService>();
-        var cartTools = sp.GetRequiredService<CartToolProvider>();
-        var isOpenAi = ShoppingAssistantAgent.IsOpenAIModel(model);
-        return new ShoppingAssistantAgent(chatClient, dbFactory, catalog, cartTools, isOpenAi);
-    });
     builder.Services.AddSingleton<CartToolProvider>();
     builder.Services.AddSingleton<ModelRouter>();
 

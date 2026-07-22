@@ -1,5 +1,12 @@
 using Serilog;
-using AIShop.Api.Features.Chat;
+using Microsoft.Extensions.AI;
+using System.ClientModel;
+using System.ClientModel.Primitives;
+using System.Collections.Concurrent;
+using AIShop.Core.Interfaces;
+using AIShop.Infrastructure.Data;
+using Microsoft.EntityFrameworkCore;
+using OpenAI;
 
 namespace AIShop.Api.Agents;
 
@@ -9,11 +16,12 @@ public class ModelRouter
 {
     private static readonly Serilog.ILogger Logger = Log.ForContext<ModelRouter>();
 
-    private readonly Dictionary<string, ModelConfig> _modelConfigs;
+    private readonly IReadOnlyDictionary<string, ModelConfig> _modelConfigs;
     private readonly string _activeModel;
-    private readonly IShoppingAssistantAgent _defaultAgent;
+    private readonly IServiceProvider _sp;
+    private readonly ConcurrentDictionary<string, Lazy<ShoppingAssistantAgent>> _agents = new(StringComparer.OrdinalIgnoreCase);
 
-    private sealed record ModelConfig(string Endpoint, string Key, string Model, string Name);
+    internal sealed record ModelConfig(string Endpoint, string Key, string Model, string Name);
 
     public string ActiveModel => _activeModel;
 
@@ -22,19 +30,19 @@ public class ModelRouter
     {
         _modelConfigs = new Dictionary<string, ModelConfig>(StringComparer.OrdinalIgnoreCase);
         _activeModel = string.Empty;
-        _defaultAgent = null!;
+        _sp = null!;
     }
 
-    public ModelRouter(IConfiguration configuration, IShoppingAssistantAgent defaultAgent)
+    public ModelRouter(IConfiguration configuration, IServiceProvider sp)
     {
-        _defaultAgent = defaultAgent;
+        _sp = sp;
         var modelsSection = configuration.GetSection("Models");
         var openaiSection = configuration.GetSection("OpenAI");
 
         if (modelsSection.Exists() && modelsSection.GetChildren().Any())
         {
             // 新版格式："Models" 节下多个子节
-            _modelConfigs = new Dictionary<string, ModelConfig>(StringComparer.OrdinalIgnoreCase);
+            var models = new Dictionary<string, ModelConfig>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var section in modelsSection.GetChildren())
             {
@@ -44,10 +52,11 @@ public class ModelRouter
                     section["Model"] ?? "",
                     section["Name"] ?? section.Key
                 );
-                _modelConfigs[section.Key] = config;
+                models[section.Key] = config;
             }
 
-            _activeModel = configuration["ActiveModel"] ?? _modelConfigs.Keys.FirstOrDefault() ?? "";
+            _modelConfigs = models;
+            _activeModel = configuration["ActiveModel"] ?? models.Keys.FirstOrDefault() ?? "";
         }
         else if (openaiSection.Exists())
         {
@@ -86,16 +95,38 @@ public class ModelRouter
         }
     }
 
-    /// <summary>获取指定模型对应的 Agent 实例。</summary>
+    /// <summary>获取指定模型对应的 Agent 实例（首次访问时延迟创建，后续复用）。</summary>
     /// <exception cref="KeyNotFoundException">模型未注册时抛出。</exception>
     public virtual IShoppingAssistantAgent GetAgent(string modelName)
     {
         if (!_modelConfigs.ContainsKey(modelName))
             throw new KeyNotFoundException($"模型 '{modelName}' 未注册");
 
-        return _defaultAgent;
+        return _agents.GetOrAdd(modelName, key => new Lazy<ShoppingAssistantAgent>(() =>
+        {
+            var cfg = _modelConfigs[key];
+            var chatClient = CreateChatClient(cfg);
+            var dbFactory = _sp.GetRequiredService<IDbContextFactory<AppDbContext>>();
+            var catalog = _sp.GetRequiredService<IProductCatalogService>();
+            var cartTools = _sp.GetRequiredService<CartToolProvider>();
+            var isOpenAI = ShoppingAssistantAgent.IsOpenAIModel(cfg.Model);
+            return new ShoppingAssistantAgent(chatClient, dbFactory, catalog, cartTools, isOpenAI);
+        })).Value;
     }
 
     /// <summary>获取当前激活模型的默认 Agent 实例。</summary>
-    public virtual IShoppingAssistantAgent GetDefaultAgent() => _defaultAgent;
+    public virtual IShoppingAssistantAgent GetDefaultAgent() => GetAgent(_activeModel);
+
+    private static IChatClient CreateChatClient(ModelConfig cfg)
+    {
+        var handler = new HttpClientHandler { UseProxy = false, Proxy = null };
+        var httpClient = new HttpClient(new DebugHandler(handler)) { Timeout = TimeSpan.FromSeconds(120) };
+        var clientOptions = new OpenAIClientOptions
+        {
+            Endpoint = new Uri(cfg.Endpoint),
+            Transport = new HttpClientPipelineTransport(httpClient),
+        };
+        var client = new OpenAIClient(new ApiKeyCredential(cfg.Key), clientOptions);
+        return client.GetChatClient(cfg.Model).AsIChatClient();
+    }
 }
