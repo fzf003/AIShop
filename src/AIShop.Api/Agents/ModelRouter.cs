@@ -22,7 +22,7 @@ public record ModelInfo(string Id, string Name, bool IsDefault);
 /// 多模型 Agent 切换核心类。
 /// 从 IConfiguration 读取模型配置，支持向后兼容旧版 "OpenAI" 配置格式。
 /// </summary>
-public sealed class ModelRouter
+public class ModelRouter
 {
     /// <summary>
     /// 内部使用的完整模型配置（含 Key/Endpoint，不对外暴露）。

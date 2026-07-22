@@ -23,7 +23,7 @@ public sealed record ChatReply(
     string[]? MatchedCategories);
 
 public sealed record LoginRequest(string Username);
-public sealed record LoginResponse(string Username, string DisplayName, string SessionId, List<ChatMessageDto> History);
+public sealed record LoginResponse(string Username, string DisplayName, string SessionId, List<ChatMessageDto> History, List<ModelInfo> Models);
 
 public sealed record ChatMessageDto(string Role, string Content);
 
@@ -43,6 +43,7 @@ public static class ChatEndpoints
             IUserRepository users,
             ISessionRepository sessions,
             IChatMessageRepository chatRepo,
+            ModelRouter router,
             CancellationToken ct) =>
         {
             var user = await users.GetByUsernameAsync(req.Username, ct);
@@ -54,7 +55,8 @@ public static class ChatEndpoints
 
             return Results.Ok(new LoginResponse(
                 user.Username, user.DisplayName, sessionId,
-                history.Select(m => new ChatMessageDto(m.Role, m.Content)).ToList()));
+                history.Select(m => new ChatMessageDto(m.Role, m.Content)).ToList(),
+                router.GetAvailableModels().ToList()));
         });
 
         api.MapPost("/chat", async (
@@ -63,7 +65,7 @@ public static class ChatEndpoints
             ISessionRepository sessions,
             IChatMessageRepository chatRepo,
             IProductCatalogService catalog,
-            IShoppingAssistantAgent shoppingAgent,
+            ModelRouter router,
             IMemoryCache cache,
             CancellationToken ct) =>
         {
@@ -77,13 +79,19 @@ public static class ChatEndpoints
             var sessionId = await sessions.GetOrCreateSessionIdAsync(user.Id, ct);
             var sid = Guid.Parse(sessionId);
 
-            // 1. Get response from agent (history loaded from SQLite by provider)
+            // 1. Get agent and response (history loaded from SQLite by provider)
             var agentSw = Stopwatch.StartNew();
             AgentChatResult result;
             AgentSession? session = null;
             try
             {
-                (result, session) = await shoppingAgent.RunChatAsync(sid, req.Message, req.Username, ct);
+                var modelId = req.Model ?? router.ActiveModel;
+                var agent = router.GetAgent(modelId);
+                (result, session) = await agent.RunChatAsync(sid, req.Message, req.Username, ct);
+            }
+            catch (KeyNotFoundException)
+            {
+                return Results.BadRequest(new { detail = "不支持的模型" });
             }
             catch (Exception ex)
             {
@@ -194,7 +202,7 @@ public static class ChatEndpoints
             ISessionRepository sessions,
             IChatMessageRepository chatRepo,
             IProductCatalogService catalog,
-            IShoppingAssistantAgent shoppingAgent,
+            ModelRouter router,
             IMemoryCache cache,
             CancellationToken ct) =>
         {
@@ -207,6 +215,9 @@ public static class ChatEndpoints
 
             var sessionId = await sessions.GetOrCreateSessionIdAsync(user.Id, ct);
             var sid = Guid.Parse(sessionId);
+
+            // Use default agent for recommendations
+            var defaultAgent = router.GetDefaultAgent();
 
             // Load last user message and ask Agent for keyword matching
             var lastUserMessage = await chatRepo.GetLastUserMessageAsync(sid, ct);
@@ -244,7 +255,7 @@ public static class ChatEndpoints
                 agentSw.Start();
                 try
                 {
-                    (agentResult, agentSession) = await shoppingAgent.RunChatAsync(sid, lastUserMessage.Content, req.Username, ct);
+                    (agentResult, agentSession) = await defaultAgent.RunChatAsync(sid, lastUserMessage.Content, req.Username, ct);
                 }
                 catch (Exception ex)
                 {
@@ -317,6 +328,9 @@ public static class ChatEndpoints
 
             return Results.Ok(response);
         });
+
+        api.MapGet("/models", (ModelRouter router) =>
+            Results.Ok(router.GetAvailableModels()));
 
         api.MapGet("/products", (IProductRepository products) =>
             Results.Ok(new { products = products.GetAll() }));
