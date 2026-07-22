@@ -20,6 +20,9 @@
 
 <!-- 发现的模块间依赖关系 -->
 
+- ModelRouter 使用 `IServiceProvider` 在 `GetOrAdd` 回调中延迟解析依赖，注意 SonarAnalyzer 规则 S6612 要求使用 lambda 参数（`key =>`）替代捕获的变量（`modelName`），以避免闭包捕获开销
+- PostToolUse hook 可能会在 Edit 后自动格式化/还原文件，每次 Edit 前必须重新 Read 目标文件确认状态
+
 ## 测试习惯
 
 <!-- 测试框架偏好、mock 策略等 -->
