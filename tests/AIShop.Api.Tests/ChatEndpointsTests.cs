@@ -437,6 +437,75 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         Assert.Equal("gpt-4.1", usedModel);
     }
 
+    [Fact]
+    public async Task History_IsPreserved_WhenSwitchingModels()
+    {
+        // Arrange: create mock router with two separate agents
+        var qwenResult = new AgentChatResult("这是 Qwen 回复", ["测试"], null);
+        var gptResult = new AgentChatResult("这是 GPT 回复", ["测试"], null);
+        var qwenSession = new TestSession();
+        var gptSession = new TestSession();
+        qwenSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
+        gptSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
+
+
+        var mockQwenAgent = Substitute.For<IShoppingAssistantAgent>();
+        mockQwenAgent.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns((qwenResult, qwenSession));
+
+        var mockGptAgent = Substitute.For<IShoppingAssistantAgent>();
+        mockGptAgent.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns((gptResult, gptSession));
+
+        var factory = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<ModelRouter>();
+
+                var mockRouter = Substitute.For<ModelRouter>();
+                mockRouter.GetAgent("qwen").Returns(mockQwenAgent);
+                mockRouter.GetAgent("gpt-4.1").Returns(mockGptAgent);
+                mockRouter.GetDefaultAgent().Returns(mockQwenAgent);
+                mockRouter.ActiveModel.Returns("qwen");
+                mockRouter.GetAvailableModels().Returns([
+                    new ModelInfo("qwen", "Qwen 3.7", true),
+                    new ModelInfo("gpt-4.1", "GPT 4.1", false),
+                ]);
+
+                services.AddSingleton(mockRouter);
+            });
+        });
+        var client = factory.CreateClient();
+
+        // Act 1: send chat with model="qwen"
+        var resp1 = await client.PostAsJsonAsync("/api/chat",
+            new ChatRequest("marla", "Qwen 帮我推荐跑鞋", "qwen"));
+        resp1.EnsureSuccessStatusCode();
+
+        // Act 2: send chat with model="gpt-4.1" (same user → same sessionId)
+        var resp2 = await client.PostAsJsonAsync("/api/chat",
+            new ChatRequest("marla", "GPT 推荐耳机", "gpt-4.1"));
+        resp2.EnsureSuccessStatusCode();
+
+        // Act 3: login to get full history
+        var loginResponse = await client.PostAsJsonAsync("/api/login",
+            new LoginRequest("marla"));
+        loginResponse.EnsureSuccessStatusCode();
+        var profile = await loginResponse.Content.ReadFromJsonAsync<LoginResponse>();
+        Assert.NotNull(profile);
+
+        // Assert: history contains user messages from both conversations
+        var userMsgs = profile!.History.Where(m => m.Role == "user").ToList();
+        Assert.Contains(userMsgs, m => m.Content == "Qwen 帮我推荐跑鞋");
+        Assert.Contains(userMsgs, m => m.Content == "GPT 推荐耳机");
+
+        // Assert: history contains assistant responses from both conversations
+        var assistantMsgs = profile.History.Where(m => m.Role == "assistant").ToList();
+        Assert.Contains(assistantMsgs, m => m.Content == "这是 Qwen 回复");
+        Assert.Contains(assistantMsgs, m => m.Content == "这是 GPT 回复");
+    }
+
     private sealed record ProductsResponse(ProductDto[] products);
 
     private sealed class TestSession : AgentSession

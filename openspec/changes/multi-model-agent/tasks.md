@@ -163,3 +163,11 @@
 - [x] 验证 ModelRouter.GetAgent("gpt-4.1") 被调用且返回 Agent 处理请求
 
 **验证**：dotnet build 0 错误 + dotnet test 57/57 通过 ✅（对应 commit `a6d77a8`）
+
+### [x] T18 (预计 5min) 测试：跨模型切换保持同一会话的历史连续
+- [x] 创建两个独立 mock Agent（qwen, gpt-4.1），各返回不同回复内容
+- [x] 先发送 model="qwen" 的消息，再发送 model="gpt-4.1" 的消息（同一用户 -> 同一 sessionId）
+- [x] 调用 POST /api/login 获取完整历史
+- [x] 验证历史中包含来自两次对话的用户消息和助手回复
+
+**验证**：dotnet build 0 错误 + dotnet test 46/46 通过 ✅
