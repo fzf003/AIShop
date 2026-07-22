@@ -37,9 +37,9 @@ public sealed class ModelRouterTests
     }
 
     [Fact]
-    public void GetAvailableModels_WithMultipleModels_ReturnsAll()
+    public void GetAvailableModels_DoesNotExposeSensitiveFields()
     {
-        // Arrange: new-style "Models" section with 3 entries + ActiveModel
+        // Arrange: 3 models, "qwen" as ActiveModel
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
@@ -65,17 +65,27 @@ public sealed class ModelRouterTests
         // Act
         var models = router.GetAvailableModels().ToList();
 
-        // Assert
+        // Assert: length 3
         Assert.Equal(3, models.Count);
-        var defaultModel = models.Single(m => m.IsDefault);
-        Assert.Equal("qwen", defaultModel.Id);
 
-        // ModelInfo is a record with only Id, Name, IsDefault — no Key/Endpoint exposed
+        // Assert: each model serializes to exactly { id, name, isDefault } — no Key/Endpoint leak
+        var jsonOptions = new System.Text.Json.JsonSerializerOptions
+        {
+            PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+        };
+        var allowedKeys = new[] { "id", "name", "isDefault" };
         foreach (var model in models)
         {
-            Assert.NotNull(model.Id);
-            Assert.NotNull(model.Name);
+            var json = System.Text.Json.JsonSerializer.Serialize(model, jsonOptions);
+            var dict = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, System.Text.Json.JsonElement>>(json);
+            Assert.NotNull(dict);
+            Assert.Equal(3, dict.Count);
+            Assert.All(allowedKeys, key => Assert.Contains(key, dict.Keys));
         }
+
+        // Assert: isDefault: true matches ActiveModel
+        var defaultModel = models.Single(m => m.IsDefault);
+        Assert.Equal("qwen", defaultModel.Id);
     }
 
     [Fact]

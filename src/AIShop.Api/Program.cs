@@ -101,32 +101,7 @@ try
 
     app.MapGet("/", () => Results.Ok(new { Status = "AIShop API is running" }));
 
-    // Auto-open browser in development
-    if (app.Environment.IsDevelopment())
-    {
-#pragma warning disable S1075 // URI should not be hardcoded
-        var baseUrl = app.Urls.FirstOrDefault() ?? "http://localhost:5206";
-#pragma warning restore S1075
-        var url = baseUrl + "/index.html";
-        _ = Task.Run(async () =>
-        {
-            await Task.Delay(1500);
-            try
-            {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = url,
-                    UseShellExecute = true
-                });
-            }
-#pragma warning disable S2486, S108 // Ignore if browser not available
-            catch (Exception ex)
-#pragma warning restore S2486, S108
-            {
-                Log.Warning(ex, "Unable to auto-open browser");
-            }
-        });
-    }
+    // Auto-open browser in development（已注释，避免每次启动弹新标签 --fzf-0）
 
     await app.RunAsync();
 }
