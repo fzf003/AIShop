@@ -25,6 +25,56 @@
         .login-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.15); }
         .login-btn.marla { background: #e8d5f5; color: #6b21a8; }
         .login-btn.steve { background: #d5e8f5; color: #1e40af; }
+        .login-btn.selected {
+            outline: 3px solid #1a1a2e; outline-offset: 2px;
+            transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.15);
+        }
+
+        .login-card {
+            background: white; border-radius: 20px; padding: 32px 36px;
+            box-shadow: 0 8px 40px rgba(0,0,0,0.08); max-width: 620px; width: 100%;
+            text-align: center;
+        }
+        .selection-group { margin-top: 24px; text-align: left; }
+        .selection-group .selection-label {
+            font-size: 0.8rem; font-weight: 700; color: #888;
+            text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px;
+        }
+        .model-grid {
+            display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;
+        }
+        .model-card {
+            padding: 16px 12px; border: 2px solid #eee; border-radius: 12px;
+            cursor: pointer; transition: all 0.15s; background: white;
+            display: flex; flex-direction: column; align-items: center; gap: 6px;
+        }
+        .model-card:hover {
+            transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.1);
+            border-color: #1a1a2e;
+        }
+        .model-card.selected {
+            border-color: #1a1a2e; background: #f8f8ff;
+            box-shadow: 0 0 0 3px rgba(26,26,46,0.1);
+        }
+        .model-card .model-emoji { font-size: 1.8rem; }
+        .model-card .model-name { font-weight: 600; color: #1a1a2e; font-size: 0.95rem; }
+        .model-card .badge {
+            font-size: 0.65rem; background: #e8f5e9; color: #2e7d32;
+            padding: 2px 8px; border-radius: 10px; font-weight: 600;
+        }
+        .model-error {
+            margin-top: 8px; font-size: 0.85rem; color: #dc2626; text-align: center;
+        }
+        .model-loading {
+            margin-top: 8px; font-size: 0.85rem; color: #888; text-align: center;
+        }
+        .start-btn {
+            display: block; width: 100%; margin-top: 24px; padding: 14px;
+            background: #1a1a2e; color: white; border: none; border-radius: 12px;
+            font-size: 1rem; font-weight: 700; cursor: pointer; transition: opacity 0.15s;
+        }
+        .start-btn:hover { opacity: 0.9; }
+        .start-btn:disabled { background: #ccc; color: #999; cursor: not-allowed; opacity: 1; }
 
         .app { display: none; height: 100vh; flex-direction: column; }
         .app.active { display: flex; }
@@ -34,6 +84,26 @@
             padding: 12px 24px; background: #1a1a2e; color: white;
         }
         .header h2 { font-size: 1.1rem; }
+        .header-left { display: flex; align-items: center; gap: 16px; }
+        .model-badge {
+            display: flex; align-items: center; gap: 6px;
+            background: rgba(255,255,255,0.15); padding: 4px 12px;
+            border-radius: 20px; font-size: 0.8rem; cursor: pointer; position: relative;
+        }
+        .model-badge:hover { background: rgba(255,255,255,0.25); }
+        .model-dropdown {
+            display: none; position: absolute; top: 100%; left: 0; margin-top: 6px;
+            background: white; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.15);
+            min-width: 180px; overflow: hidden; z-index: 50;
+        }
+        .model-badge:hover .model-dropdown,
+        .model-dropdown:hover { display: block; }
+        .model-dropdown-item {
+            padding: 10px 16px; color: #333; font-size: 0.85rem; cursor: pointer;
+            display: flex; align-items: center; gap: 8px; transition: background 0.1s;
+        }
+        .model-dropdown-item:hover { background: #f5f5f5; }
+        .model-dropdown-item .check { margin-left: auto; color: #16a34a; font-weight: 700; }
         .header .user-info { display: flex; align-items: center; gap: 12px; }
         .logout-btn {
             padding: 6px 16px; background: rgba(255,255,255,0.15); color: white;
@@ -395,19 +465,40 @@
     <div class="login-nav">
         <button class="nav-link" onclick="showProducts()">📦 产品列表</button>
     </div>
-    <h1>🛍️ 智能购物助手</h1>
-    <p>登录后与您的私人购物助手聊天</p>
-    <div class="login-buttons">
-        <button class="login-btn marla" onclick="login('marla')">👩 以 Marla 登录</button>
-        <button class="login-btn steve" onclick="login('steve')">👨 以 Steve 登录</button>
-        <button class="login-btn" style="background:#d1fae5;color:#065f46" onclick="login('fzf003')">🧑 以 fzf003 登录</button>
+    <div class="login-card">
+        <h1>🛍️ 智能购物助手</h1>
+        <p style="margin-top:8px;">选择身份与 AI 模型后开始对话</p>
+
+        <div class="selection-group">
+            <div class="selection-label">👤 选择用户</div>
+            <div class="login-buttons">
+                <button class="login-btn marla" data-user="marla" onclick="selectUser('marla')">👩 Marla</button>
+                <button class="login-btn steve" data-user="steve" onclick="selectUser('steve')">👨 Steve</button>
+                <button class="login-btn" style="background:#d1fae5;color:#065f46" data-user="fzf003" onclick="selectUser('fzf003')">🧑 fzf003</button>
+            </div>
+        </div>
+
+        <div class="selection-group">
+            <div class="selection-label">🤖 选择模型</div>
+            <div class="model-grid" id="modelGrid"></div>
+            <div class="model-loading" id="modelLoading">加载模型中...</div>
+            <div class="model-error" id="modelError" style="display:none">模型加载失败</div>
+        </div>
+
+        <button class="start-btn" id="startBtn" onclick="startChat()" disabled>🚀 开始聊天</button>
     </div>
 </div>
 
 <!-- App -->
 <div class="app" id="app">
     <div class="header">
-        <h2>🛍️ 智能购物助手</h2>
+        <div class="header-left">
+            <h2>🛍️ 智能购物助手</h2>
+            <div class="model-badge" id="headerModelBadge" style="display:none">
+                <span id="headerModelName"></span> ▼
+                <div class="model-dropdown" id="headerModelDropdown"></div>
+            </div>
+        </div>
         <div class="provider-switch">
             <label>推荐方式:</label>
             <button class="provider-opt active" data-provider="keymatch" onclick="setProvider('keymatch')">关键词匹配</button>
@@ -513,6 +604,72 @@
     let searchQuery = '';
     let sortMode = 'default';
     let allProducts = [];
+    let selectedUser = null;
+    let selectedModel = null;
+    let models = [];
+
+    // ========== Login / Model Selection ==========
+
+    async function loadModels() {
+        const grid = document.getElementById('modelGrid');
+        const loadingEl = document.getElementById('modelLoading');
+        const errorEl = document.getElementById('modelError');
+        try {
+            const res = await fetch('/api/models');
+            if (!res.ok) throw new Error('Failed to load');
+            models = await res.json();
+            loadingEl.style.display = 'none';
+            errorEl.style.display = 'none';
+            if (models.length === 0) {
+                grid.innerHTML = '<div style="grid-column:1/-1;color:#999;text-align:center;padding:20px;">暂无可选模型</div>';
+                return;
+            }
+            grid.innerHTML = models.map(m => `
+                <div class="model-card ${m.isDefault ? 'selected' : ''}" data-model="${m.id}" onclick="selectModel('${m.id}')">
+                    <div class="model-name">${m.name}</div>
+                    ${m.isDefault ? '<span class="badge">默认</span>' : ''}
+                </div>
+            `).join('');
+            // Auto-select default model
+            const defaultModel = models.find(m => m.isDefault);
+            if (defaultModel) selectedModel = defaultModel;
+            updateStartBtn();
+
+            // Populate header dropdown
+            renderHeaderModelDropdown();
+        } catch (err) {
+            loadingEl.style.display = 'none';
+            errorEl.style.display = 'block';
+        }
+    }
+
+    function selectUser(username) {
+        selectedUser = username;
+        document.querySelectorAll('.login-btn').forEach(btn => {
+            btn.classList.toggle('selected', btn.dataset.user === username);
+        });
+        updateStartBtn();
+    }
+
+    function selectModel(modelId) {
+        const model = models.find(m => m.id === modelId);
+        if (!model) return;
+        selectedModel = model;
+        document.querySelectorAll('.model-card').forEach(card => {
+            card.classList.toggle('selected', card.dataset.model === modelId);
+        });
+        updateStartBtn();
+    }
+
+    function updateStartBtn() {
+        const btn = document.getElementById('startBtn');
+        btn.disabled = !(selectedUser && selectedModel);
+    }
+
+    async function startChat() {
+        if (!selectedUser || !selectedModel) return;
+        await login(selectedUser);
+    }
 
     function getFilteredProducts() {
         let list = allProducts;
@@ -646,8 +803,17 @@
         currentUser = null;
         cart = null;
         allProducts = [];
+        selectedUser = null;
+        selectedModel = null;
         document.getElementById('app').classList.remove('active');
         document.getElementById('loginScreen').style.display = 'flex';
+        // Reset selection visual state
+        document.querySelectorAll('.login-btn.selected').forEach(b => b.classList.remove('selected'));
+        document.querySelectorAll('.model-card.selected').forEach(c => c.classList.remove('selected'));
+        updateStartBtn();
+        if (document.getElementById('loginScreen').style.display !== 'none') {
+            loadModels();
+        }
         closeCart();
         updateCartBadge();
     }
@@ -757,10 +923,15 @@
         const typing = addMessage('typing', '思考中...');
 
         try {
+            const modelName = selectedModel ? selectedModel.id : undefined;
             const res = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: currentUser.username, message })
+                body: JSON.stringify({
+                    username: currentUser.username,
+                    message,
+                    model: modelName
+                })
             });
             const data = await res.json();
             typing.remove();
@@ -1072,6 +1243,9 @@
             badge.classList.add('hidden');
         }
     }
+
+    // Load models on page load
+    loadModels();
 </script>
 </body>
 </html>
