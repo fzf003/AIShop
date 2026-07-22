@@ -23,7 +23,7 @@ public sealed record ChatReply(
     string[]? MatchedCategories);
 
 public sealed record LoginRequest(string Username);
-public sealed record LoginResponse(string Username, string DisplayName, string SessionId, List<ChatMessageDto> History);
+public sealed record LoginResponse(string Username, string DisplayName, string SessionId, List<ChatMessageDto> History, List<ModelInfo> Models);
 
 public sealed record ChatMessageDto(string Role, string Content);
 
@@ -43,6 +43,7 @@ public static class ChatEndpoints
             IUserRepository users,
             ISessionRepository sessions,
             IChatMessageRepository chatRepo,
+            ModelRouter router,
             CancellationToken ct) =>
         {
             var user = await users.GetByUsernameAsync(req.Username, ct);
@@ -54,7 +55,8 @@ public static class ChatEndpoints
 
             return Results.Ok(new LoginResponse(
                 user.Username, user.DisplayName, sessionId,
-                history.Select(m => new ChatMessageDto(m.Role, m.Content)).ToList()));
+                history.Select(m => new ChatMessageDto(m.Role, m.Content)).ToList(),
+                router.GetAvailableModels().ToList()));
         });
 
         api.MapPost("/chat", async (

@@ -72,6 +72,7 @@ try
         return new ShoppingAssistantAgent(chatClient, dbFactory, catalog, cartTools, model);
     });
     builder.Services.AddSingleton<CartToolProvider>();
+    builder.Services.AddSingleton<ModelRouter>();
 
     // Add global exception handler
     builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
