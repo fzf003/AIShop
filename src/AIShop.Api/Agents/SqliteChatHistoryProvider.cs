@@ -107,12 +107,37 @@ public sealed class SqliteChatHistoryProvider(
             return msg;
         }).ToList();
 
-        // 【核心策略】保留完整的消息配对结构：
-        // 保留所有角色（user / assistant / tool），确保 assistant{tool_calls} ↔ tool 一一对应，
-        // 满足 OpenAI 兼容 API 的约束（tool 消息前必须有 assistant 且有匹配 tool_call_id）。
-        // 历史中的 FunctionCallContent 不会被 FICC 重执行，FICC 只执行 LLM 当前响应中的 FCC。
-        // 只过滤掉剥离 FCC 后变空的 Assistant 消息（纯 tool_call 无文本的情况）。
-        result = result.Where(m => !(m.Role == ChatRole.Assistant && m.Contents.Count == 0)).ToList();
+        // 【核心策略】提供给模型的历史中剥离工具调用相关内容：
+        // 1. 移除所有 Tool 角色消息 — 旧模型的 tool_call_id 在新模型下毫无意义
+        //    且会触发 API 错误："messages with role 'tool' must be a response to ... 'tool_calls'"
+        // 2. 从 Assistant 消息的 Contents 中移除 FunctionCallContent — FICC 不会重执行历史 FCC
+        // 3. 移除后变空的 Assistant 消息也删掉
+        var filtered = new List<AgentChatMessage>(result.Count);
+        foreach (var m in result)
+        {
+            // 跳过 Tool 角色消息
+            if (m.Role == ChatRole.Tool)
+                continue;
+
+            // 从 Assistant 消息中去掉 FunctionCallContent，仅保留文本
+            if (m.Role == ChatRole.Assistant)
+            {
+                var textContents = m.Contents
+                    .Where(c => c is TextContent)
+                    .ToList();
+
+                if (textContents.Count == 0)
+                    continue; // 纯 tool_call 无文本 → 跳过
+
+                // 重设 Contents 为纯文本内容
+                m.Contents.Clear();
+                foreach (var tc in textContents)
+                    m.Contents.Add(tc);
+            }
+
+            filtered.Add(m);
+        }
+        result = filtered;
 
         Logger.Debug("ProvideChatHistory 返回: Count={Count} Roles=[{Roles}]",
             result.Count,
