@@ -23,7 +23,7 @@ public class ModelRouter
 
     internal sealed record ModelConfig(string Endpoint, string Key, string Model, string Name);
 
-    public string ActiveModel => _activeModel;
+    public virtual string ActiveModel => _activeModel;
 
     /// <summary>用于测试的受保护无参构造函数。</summary>
     protected ModelRouter()

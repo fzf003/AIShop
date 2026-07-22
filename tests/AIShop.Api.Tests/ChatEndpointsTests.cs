@@ -31,6 +31,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                 mockAgent.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
                     .Returns((fakeResult, fakeSession));
 
+                mockRouter.ActiveModel.Returns("qwen");
                 mockRouter.GetAgent(Arg.Any<string>()).Returns(callInfo =>
                 {
                     var modelName = callInfo.Arg<string>();
@@ -193,6 +194,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     .Returns(_ => { callCount++; return (fakeResult, fakeSession); });
                 mockRouter.GetAgent(Arg.Any<string>()).Returns(mock);
                 mockRouter.GetDefaultAgent().Returns(mock);
+                mockRouter.ActiveModel.Returns("qwen");
                 services.AddSingleton(mockRouter);
             });
         });
@@ -229,6 +231,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     .Returns(_ => { callCount++; return (fakeResult, fakeSession); });
                 mockRouter.GetAgent(Arg.Any<string>()).Returns(mock);
                 mockRouter.GetDefaultAgent().Returns(mock);
+                mockRouter.ActiveModel.Returns("qwen");
                 services.AddSingleton(mockRouter);
             });
         });
@@ -331,6 +334,54 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
             Assert.NotNull(actual);
             Assert.Equal(expected.Name, actual!.Name);
         }
+    }
+
+    [Fact]
+    public async Task Chat_WithoutModel_UsesDefaultModel()
+    {
+        string? usedModel = null;
+        var factory = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<ModelRouter>();
+
+                var mockRouter = Substitute.For<ModelRouter>();
+                var mockAgent = Substitute.For<IShoppingAssistantAgent>();
+                var fakeResult = new AgentChatResult("默认模型回复", ["测试"], null);
+                var fakeSession = new TestSession();
+                fakeSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
+
+                mockAgent.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+                    .Returns((fakeResult, fakeSession));
+
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(callInfo =>
+                {
+                    usedModel = callInfo.Arg<string>();
+                    return mockAgent;
+                });
+                mockRouter.GetDefaultAgent().Returns(mockAgent);
+                mockRouter.ActiveModel.Returns("qwen");
+                mockRouter.GetAvailableModels().Returns([
+                    new ModelInfo("qwen", "Qwen 3.7", true),
+                ]);
+
+                services.AddSingleton(mockRouter);
+            });
+        });
+        var client = factory.CreateClient();
+
+        // Act: send chat request without model parameter
+        var response = await client.PostAsJsonAsync("/api/chat",
+            new ChatRequest("marla", "测试默认模型路由"));
+
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<ChatReply>();
+        Assert.NotNull(result);
+        Assert.Equal("默认模型回复", result!.Response);
+
+        // Assert: routed through ActiveModel = "qwen"
+        Assert.Equal("qwen", usedModel);
     }
 
     private sealed record ProductsResponse(ProductDto[] products);
