@@ -1,6 +1,15 @@
 using Serilog;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.AI;
+using System.ClientModel;
+using System.ClientModel.Primitives;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using AIShop.Core.Interfaces;
+using AIShop.Infrastructure.Data;
+using Microsoft.EntityFrameworkCore;
+using OpenAI;
 
 namespace AIShop.Api.Agents;
 
@@ -18,14 +27,17 @@ public sealed class ModelRouter
     /// <summary>
     /// 内部使用的完整模型配置（含 Key/Endpoint，不对外暴露）。
     /// </summary>
-    private sealed record ModelConfig(string Endpoint, string Key, string Model, string Name);
+    internal sealed record ModelConfig(string Endpoint, string Key, string Model, string Name);
 
     private readonly IReadOnlyDictionary<string, ModelConfig> _models;
     private readonly string _activeModel;
+    private readonly IServiceProvider _sp;
+    private readonly ConcurrentDictionary<string, Lazy<ShoppingAssistantAgent>> _agents = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Serilog.ILogger Logger = Serilog.Log.ForContext<ModelRouter>();
 
-    public ModelRouter(IConfiguration configuration)
+    public ModelRouter(IConfiguration configuration, IServiceProvider sp)
     {
+        _sp = sp;
         var modelsSection = configuration.GetSection("Models");
         var openaiSection = configuration.GetSection("OpenAI");
 
@@ -98,8 +110,65 @@ public sealed class ModelRouter
     }
 
     /// <summary>
+    /// 检查模型是否已注册。
+    /// </summary>
+    public bool IsModelRegistered(string modelName) =>
+        _models.ContainsKey(modelName);
+
+    /// <summary>
+    /// 获取当前激活的模型 ID。
+    /// </summary>
+    internal string ActiveModel => _activeModel;
+
+    /// <summary>
     /// 判断模型是否为 OpenAI 模型（gpt- / o1- / o3- 前缀），
     /// 委托至 <see cref="ShoppingAssistantAgent.IsOpenAIModel"/>。
     /// </summary>
     public static bool IsOpenAIModel(string model) => ShoppingAssistantAgent.IsOpenAIModel(model);
+
+    /// <summary>
+    /// 根据模型配置创建 IChatClient 实例。
+    /// 每个 Agent 拥有独立的 HTTP 客户端和连接，避免并发竞争。
+    /// </summary>
+    private static IChatClient CreateChatClient(ModelConfig cfg)
+    {
+        var handler = new HttpClientHandler { UseProxy = false, Proxy = null };
+        var httpClient = new HttpClient(new DebugHandler(handler)) { Timeout = TimeSpan.FromSeconds(120) };
+        var clientOptions = new OpenAIClientOptions
+        {
+            Endpoint = new Uri(cfg.Endpoint),
+            Transport = new HttpClientPipelineTransport(httpClient),
+        };
+        var client = new OpenAIClient(new ApiKeyCredential(cfg.Key), clientOptions);
+        return client.GetChatClient(cfg.Model).AsIChatClient();
+    }
+
+    /// <summary>
+    /// 获取指定模型名称对应的 <see cref="ShoppingAssistantAgent"/> 实例。
+    /// 每个模型首次访问时延迟创建，后续复用，线程安全。
+    /// </summary>
+    /// <param name="modelName">模型 ID（配置节键名）。</param>
+    /// <returns>Agent 实例。</returns>
+    /// <exception cref="KeyNotFoundException">模型未注册时抛出。</exception>
+    public ShoppingAssistantAgent GetAgent(string modelName)
+    {
+        if (!_models.ContainsKey(modelName))
+            throw new KeyNotFoundException($"模型 '{modelName}' 未注册");
+
+        return _agents.GetOrAdd(modelName, key => new Lazy<ShoppingAssistantAgent>(() =>
+        {
+            var cfg = _models[key];
+            var chatClient = CreateChatClient(cfg);
+            var dbFactory = _sp.GetRequiredService<IDbContextFactory<AppDbContext>>();
+            var catalog = _sp.GetRequiredService<IProductCatalogService>();
+            var cartTools = _sp.GetRequiredService<CartToolProvider>();
+            var isOpenAI = IsOpenAIModel(cfg.Model);
+            return new ShoppingAssistantAgent(chatClient, dbFactory, catalog, cartTools, isOpenAI);
+        })).Value;
+    }
+
+    /// <summary>
+    /// 获取默认 Agent 实例（当前激活模型）。
+    /// </summary>
+    public ShoppingAssistantAgent GetDefaultAgent() => GetAgent(_activeModel);
 }
