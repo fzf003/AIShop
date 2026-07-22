@@ -31,6 +31,11 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     .Returns((fakeResult, fakeSession));
 
                 services.AddSingleton(mock);
+
+                // Replace ModelRouter with TestModelRouter backed by mock agent
+                services.RemoveAll<ModelRouter>();
+                services.AddSingleton<ModelRouter>(sp =>
+                    new TestModelRouter(sp.GetRequiredService<IShoppingAssistantAgent>()));
             });
         });
     }
@@ -176,6 +181,9 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                 mock.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
                     .Returns(_ => { callCount++; return (fakeResult, fakeSession); });
                 services.AddSingleton(mock);
+                services.RemoveAll<ModelRouter>();
+                services.AddSingleton<ModelRouter>(sp =>
+                    new TestModelRouter(sp.GetRequiredService<IShoppingAssistantAgent>()));
             });
         });
         var client = factory.CreateClient();
@@ -209,6 +217,9 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                 mock.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
                     .Returns(_ => { callCount++; return (fakeResult, fakeSession); });
                 services.AddSingleton(mock);
+                services.RemoveAll<ModelRouter>();
+                services.AddSingleton<ModelRouter>(sp =>
+                    new TestModelRouter(sp.GetRequiredService<IShoppingAssistantAgent>()));
             });
         });
         var client = factory.CreateClient();
@@ -228,5 +239,21 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     private sealed class TestSession : AgentSession
     {
         public TestSession() : base(new AgentSessionStateBag()) { }
+    }
+
+    /// <summary>
+    /// 测试用 ModelRouter，使用注入的 mock IShoppingAssistantAgent。
+    /// </summary>
+    private sealed class TestModelRouter : ModelRouter
+    {
+        private readonly IShoppingAssistantAgent _agent;
+
+        public TestModelRouter(IShoppingAssistantAgent agent) : base()
+        {
+            _agent = agent;
+        }
+
+        public override IShoppingAssistantAgent GetAgent(string modelName) => _agent;
+        public override IShoppingAssistantAgent GetDefaultAgent() => _agent;
     }
 }
