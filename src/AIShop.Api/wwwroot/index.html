@@ -659,11 +659,56 @@
             card.classList.toggle('selected', card.dataset.model === modelId);
         });
         updateStartBtn();
+        updateHeaderModelBadge();
+        // Sync header dropdown checkmarks
+        document.querySelectorAll('#headerModelDropdown .model-dropdown-item').forEach(item => {
+            const check = item.querySelector('.check');
+            if (check) {
+                check.style.visibility = item.dataset.model === modelId ? 'visible' : 'hidden';
+            }
+        });
     }
 
     function updateStartBtn() {
         const btn = document.getElementById('startBtn');
         btn.disabled = !(selectedUser && selectedModel);
+    }
+
+    function updateHeaderModelBadge() {
+        const nameEl = document.getElementById('headerModelName');
+        if (selectedModel) {
+            nameEl.textContent = selectedModel.name;
+        }
+    }
+
+    function renderHeaderModelDropdown() {
+        const badge = document.getElementById('headerModelBadge');
+        const nameEl = document.getElementById('headerModelName');
+        const dropdown = document.getElementById('headerModelDropdown');
+        if (!models || models.length === 0) { badge.style.display = 'none'; return; }
+
+        // Update current model name
+        const current = selectedModel || models.find(m => m.isDefault) || models[0];
+        nameEl.textContent = current ? current.name : '';
+        badge.style.display = 'flex';
+
+        dropdown.innerHTML = models.map(m => `
+            <div class="model-dropdown-item" data-model="${m.id}" onclick="switchModel('${m.id}')">
+                ${m.name}
+                ${(selectedModel && selectedModel.id === m.id) ? '<span class="check">✓</span>' : ''}
+            </div>
+        `).join('');
+    }
+
+    function switchModel(modelId) {
+        const model = models.find(m => m.id === modelId);
+        if (!model) return;
+        selectedModel = model;
+        renderHeaderModelDropdown();
+        // Update login page model card selection too
+        document.querySelectorAll('.model-card').forEach(card => {
+            card.classList.toggle('selected', card.dataset.model === modelId);
+        });
     }
 
     async function startChat() {
@@ -781,6 +826,11 @@
         document.getElementById('loginScreen').style.display = 'none';
         document.getElementById('app').classList.add('active');
 
+        // Sync header model badge with login-page selection
+        updateHeaderModelBadge();
+        renderHeaderModelDropdown();
+        document.getElementById('headerModelBadge').style.display = 'flex';
+
         const messagesEl = document.getElementById('messages');
         messagesEl.innerHTML = '';
         if (data.history && data.history.length > 0) {
@@ -807,6 +857,7 @@
         selectedModel = null;
         document.getElementById('app').classList.remove('active');
         document.getElementById('loginScreen').style.display = 'flex';
+        document.getElementById('headerModelBadge').style.display = 'none';
         // Reset selection visual state
         document.querySelectorAll('.login-btn.selected').forEach(b => b.classList.remove('selected'));
         document.querySelectorAll('.model-card.selected').forEach(c => c.classList.remove('selected'));
