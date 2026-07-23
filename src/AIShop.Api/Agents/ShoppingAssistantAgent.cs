@@ -135,7 +135,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             ChatHistoryProvider = new SqliteChatHistoryProvider(dbFactory),
 
             DisableCompaction = true,
-            MaximumIterationsPerRequest = 3,
+            MaximumIterationsPerRequest = isOpenAI ? 3 : 1,
               
 
             DisableToolAutoApproval = false,//DisableToolAutoApproval = false（即默认启用）。设 true 的话，所有工具都不走审批——包括那些本应审批的
