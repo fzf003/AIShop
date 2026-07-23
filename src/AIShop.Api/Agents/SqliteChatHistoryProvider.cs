@@ -107,35 +107,30 @@ public sealed class SqliteChatHistoryProvider(
             return msg;
         }).ToList();
 
-        // 【核心策略】提供给模型的历史中剥离工具调用相关内容：
-        // 1. 移除所有 Tool 角色消息 — 旧模型的 tool_call_id 在新模型下毫无意义
-        //    且会触发 API 错误："messages with role 'tool' must be a response to ... 'tool_calls'"
-        // 2. 从 Assistant 消息的 Contents 中移除 FunctionCallContent — FICC 不会重执行历史 FCC
-        // 3. Assistant 的 TextContent 可能包含原始 JSON 回复（{"Reply":"...","Keywords":[...]}），
-        //    剥离出纯文本，避免 JSON 元数据泄漏给模型
-        // 4. 移除后变空的 Assistant 消息也删掉
+        // 【核心策略】保留完整对话上下文，仅移除成对缺失的 Tool 消息
+        // Tool 消息只有在最近出现了 Assistant{tool_calls} 时才保留，
+        // 否则视为 orphaned（跨模型切换时旧的 tool_call_id 不匹配），丢弃以避免 API 400。
+        // 其他所有消息（User、Assistant 文本含 FCC、Tool 文本）均保留。
         var filtered = new List<AgentChatMessage>(result.Count);
+        bool hasPendingToolCalls = false;
         foreach (var m in result)
         {
-            // 跳过 Tool 角色消息
             if (m.Role == ChatRole.Tool)
-                continue;
-
-            // 从 Assistant 消息中去掉 FunctionCallContent，仅保留文本
-            if (m.Role == ChatRole.Assistant)
             {
-                var textContents = m.Contents
-                    .Where(c => c is TextContent)
-                    .Select(c => new TextContent(StripAgentReplyJson(((TextContent)c).Text)))
-                    .ToList();
+                if (!hasPendingToolCalls)
+                    continue; // orphaned tool → 跳过
+                filtered.Add(m);
+                hasPendingToolCalls = false;
+                continue;
+            }
 
-                if (textContents.Count == 0)
-                    continue; // 纯 tool_call 无文本 → 跳过
-
-                // 重设 Contents 为剥离后的纯文本内容
-                m.Contents.Clear();
-                foreach (var tc in textContents)
-                    m.Contents.Add(tc);
+            if (m.Role == ChatRole.Assistant && m.Contents.OfType<FunctionCallContent>().Any())
+            {
+                hasPendingToolCalls = true;
+            }
+            else
+            {
+                hasPendingToolCalls = false;
             }
 
             filtered.Add(m);
@@ -180,6 +175,19 @@ public sealed class SqliteChatHistoryProvider(
 
         foreach (var (msg, i) in allMessages.Select((m, i) => (m, i)))
         {
+            // assistant 消息：只保留最后一段非空 TextContent 作为回复
+            // 丢弃内部思考过程（chain-of-thought），避免思考和错误推理累积到下一轮
+            if (msg.Role == ChatRole.Assistant && msg.Contents.Count > 1)
+            {
+                var lastRelevant = msg.Contents
+                    .OfType<TextContent>()
+                    .LastOrDefault(t => !string.IsNullOrWhiteSpace(t.Text));
+
+                msg.Contents.Clear();
+                if (lastRelevant is not null)
+                    msg.Contents.Add(lastRelevant);
+            }
+
             var contentsJson = msg.Contents.Count > 0
                 ? JsonSerializer.Serialize(msg.Contents, JsonOptions)
                 : null;
