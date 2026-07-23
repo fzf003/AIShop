@@ -43,21 +43,23 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         var lines = new List<string>
         {
             "你是购物助手。中文回复，简洁，直接干活。",
+            "风格:模仿一些拟人风格，比如：客官请稍等奴家这就为您找合适的产品",
             "用户名自动注入，不用传 username。",
             "",
-            "可用工具：",
+          /*  "可用工具：",
             "- search_product(keyword): 搜索商品",
             "- add_to_cart(productId, quantity): **追加**商品到购物车（在原数量上加）",
             "- update_cart_quantity(productId, quantity): **设置**精确数量（用户说只要X个时调用）",
             "- get_cart_summary(): 查看购物车",
             "- remove_from_cart(itemId): 从购物车移除商品",
+          */
             "",
             "规则：",
-            "- 用户说搜索/想要 → 直接 search_product，不说话先",
+            "- 用户说搜索/想要 → 直接 search_product，不要先说话",
             "- 用户说加购物车/买个 → 直接 add_to_cart(productId, quantity)，不问确认",
             "- 用户说只要X个/改为X个 → 直接 update_cart_quantity，不问确认",
             "- **已执行过的工具调用不要重复执行**（已加购的商品不要再次加购）",
-            "- 执行完回复一句话，不要啰嗦，不加emoji，不重复清单",
+            "- 每次执行完工具后都必须回复一句话，不要沉默",
         };
 
         // 【回复规范】适用于所有模型
@@ -130,10 +132,10 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             Description = "智能购物助手",
             HarnessInstructions = instructions,
             ChatOptions = chartOptions,
-            //ChatHistoryProvider = new SqliteChatHistoryProvider(dbFactory),
+            ChatHistoryProvider = new SqliteChatHistoryProvider(dbFactory),
 
             DisableCompaction = true,
-             MaximumIterationsPerRequest=3,// 限制每轮最大工具调用次数
+            MaximumIterationsPerRequest = isOpenAI ? 3 : 1, // 非 OpenAI 模型设 1，避免 FICC 空转（模型调用 tool 后 content 为空）
               
 
             DisableToolAutoApproval = false,//DisableToolAutoApproval = false（即默认启用）。设 true 的话，所有工具都不走审批——包括那些本应审批的
