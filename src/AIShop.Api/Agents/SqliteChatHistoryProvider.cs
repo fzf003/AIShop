@@ -95,7 +95,7 @@ public sealed class SqliteChatHistoryProvider(
                 {
                     Logger.Warning(ex, "ContentsJson 反序列化失败, 降级为纯文本");
                     msg.Contents = !string.IsNullOrEmpty(row.Content)
-                        ? [new TextContent(row.Content)]
+                        ? [new TextContent(StripAgentReplyJson(row.Content))]
                         : [];
                 }
             }
@@ -111,7 +111,9 @@ public sealed class SqliteChatHistoryProvider(
         // 1. 移除所有 Tool 角色消息 — 旧模型的 tool_call_id 在新模型下毫无意义
         //    且会触发 API 错误："messages with role 'tool' must be a response to ... 'tool_calls'"
         // 2. 从 Assistant 消息的 Contents 中移除 FunctionCallContent — FICC 不会重执行历史 FCC
-        // 3. 移除后变空的 Assistant 消息也删掉
+        // 3. Assistant 的 TextContent 可能包含原始 JSON 回复（{"Reply":"...","Keywords":[...]}），
+        //    剥离出纯文本，避免 JSON 元数据泄漏给模型
+        // 4. 移除后变空的 Assistant 消息也删掉
         var filtered = new List<AgentChatMessage>(result.Count);
         foreach (var m in result)
         {
@@ -124,12 +126,13 @@ public sealed class SqliteChatHistoryProvider(
             {
                 var textContents = m.Contents
                     .Where(c => c is TextContent)
+                    .Select(c => new TextContent(StripAgentReplyJson(((TextContent)c).Text)))
                     .ToList();
 
                 if (textContents.Count == 0)
                     continue; // 纯 tool_call 无文本 → 跳过
 
-                // 重设 Contents 为纯文本内容
+                // 重设 Contents 为剥离后的纯文本内容
                 m.Contents.Clear();
                 foreach (var tc in textContents)
                     m.Contents.Add(tc);
