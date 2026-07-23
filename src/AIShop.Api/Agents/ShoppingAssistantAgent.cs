@@ -135,7 +135,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             ChatHistoryProvider = new SqliteChatHistoryProvider(dbFactory),
 
             DisableCompaction = true,
-            MaximumIterationsPerRequest = isOpenAI ? 3 : 1, // 非 OpenAI 模型设 1，避免 FICC 空转（模型调用 tool 后 content 为空）
+            MaximumIterationsPerRequest = 3,
               
 
             DisableToolAutoApproval = false,//DisableToolAutoApproval = false（即默认启用）。设 true 的话，所有工具都不走审批——包括那些本应审批的
@@ -202,6 +202,20 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
                 sw.ElapsedMilliseconds, sessionId);
 
             rawText = response.Text?.Trim();
+
+            // 兜底：模型（如 Qwen）在 FICC 循环后只调用工具未输出文本
+            if (string.IsNullOrEmpty(rawText))
+            {
+                var toolResults = response.Messages
+                    .Where(m => m.Role == ChatRole.Tool)
+                    .SelectMany(m => m.Contents.OfType<TextContent>())
+                    .Select(tc => tc.Text)
+                    .Where(t => !string.IsNullOrWhiteSpace(t))
+                    .ToList();
+
+                if (toolResults.Count > 0)
+                    rawText = toolResults[^1];
+            }
 
             if (!string.IsNullOrEmpty(rawText))
             {
