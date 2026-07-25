@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using AIShop.Core.Entities;
+using AIShop.Infrastructure.Entities;
 
 namespace AIShop.Infrastructure.Data;
 
@@ -12,6 +13,7 @@ public sealed class AppDbContext : DbContext
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     public DbSet<Cart> Carts => Set<Cart>();
     public DbSet<CartItem> CartItems => Set<CartItem>();
+    public DbSet<ChatMessageRecord> ChatMessageRecords => Set<ChatMessageRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -51,6 +53,28 @@ public sealed class AppDbContext : DbContext
             e.HasKey(i => i.Id);
             e.Property(i => i.Id).ValueGeneratedOnAdd();
             e.HasIndex(i => i.CartId);
+        });
+
+        modelBuilder.Entity<ChatMessageRecord>(e =>
+        {
+            e.ToTable("chat_messages");
+            e.HasKey(m => m.Id);
+            e.Property(m => m.Id).HasColumnName("id").ValueGeneratedOnAdd();
+
+            e.Property(m => m.SessionId).HasColumnName("session_id");
+            e.Property(m => m.Role).HasColumnName("role");
+            e.Property(m => m.Content).HasColumnName("content").HasColumnType("TEXT");
+            e.Property(m => m.ToolCalls).HasColumnName("tool_calls").HasColumnType("TEXT");
+            e.Property(m => m.ToolCallId).HasColumnName("tool_call_id");
+            e.Property(m => m.ToolName).HasColumnName("tool_name");
+            e.Property(m => m.Reasoning).HasColumnName("reasoning").HasColumnType("TEXT");
+            e.Property(m => m.CreatedAt).HasColumnName("created_at");
+            e.Property(m => m.IsCompacted).HasColumnName("is_compacted");
+
+            e.HasIndex(m => new { m.SessionId, m.IsCompacted, m.Id },
+                "idx_cm_session_active");
+            e.HasIndex(m => new { m.SessionId, m.Id },
+                "idx_cm_session_id");
         });
     }
 }
