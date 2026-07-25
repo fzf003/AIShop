@@ -1,10 +1,10 @@
 using System.Diagnostics;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 using Microsoft.Agents.AI;
 using AIShop.Infrastructure.Data;
+using AIShop.Infrastructure.Entities;
 using Serilog;
 using AgentChatMessage = Microsoft.Extensions.AI.ChatMessage;
 
@@ -16,11 +16,9 @@ namespace AIShop.Api.Agents;
 /// 设计原则：
 /// - **增量追加 + 后台裁剪**：Store 时先追加本轮消息，然后裁剪该 session 超出上限的旧消息
 ///   → 既保障跨 FICC 轮次的消息完整性（不丢 tool_calls 配对），又控制存储不无限膨胀
-/// - **读取时截断**：MaxReadMessages 仅在 ProvideChatHistoryAsync 读取时应用
-///   → 存储层保留更多作为缓冲，未来调大读取窗口也有历史可用
-/// - **ContentsJson 全量序列化**：FunctionCallContent / FunctionResultContent / TextContent
-///   全量序列化到 contents_json 字段，反序列化时 1:1 还原
-/// - **不过滤 tool 消息**：历史中保留 ToolMessage，确保 Assistant{tool_calls} 与 ToolMessage 配对
+/// - **行列化存储**：Store 时解包 MEAI ChatMessage.Contents，按角色分列写入 chat_messages 表
+///   → 不再依赖 AIContentListConverter 的 ContentsJson 序列化
+/// - **reasoning 独立列**：TextReasoningContent 仅存于 reasoning 列，Provide 时不重建
 /// </summary>
 public sealed class SqliteChatHistoryProvider(
     IDbContextFactory<AppDbContext> dbFactory) : ChatHistoryProvider()
@@ -35,20 +33,19 @@ public sealed class SqliteChatHistoryProvider(
     {
         return base.InvokedCoreAsync(context, cancellationToken);
     }
-    /// <summary>每次 Provide 返回给 LLM 的消息上限。</summary>
-    private const int MaxReadMessages = 30;
 
-    /// <summary>
-    /// 每个 session 存储的消息上限，需 >= MaxReadMessages。
-    /// </summary>
+    /// <summary>每次 Store 后保留的最大消息数。</summary>
     private const int MaxStoredMessages = 50;
 
     private static readonly Serilog.ILogger Logger = Log.ForContext<SqliteChatHistoryProvider>();
 
+    /// <summary>
+    /// tool_calls JSON 的序列化选项（小驼峰，无缩进）。
+    /// </summary>
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = false,
-        Converters = { new AIContentListConverter() }
     };
 
     protected override async ValueTask<IEnumerable<AgentChatMessage>> ProvideChatHistoryAsync(
@@ -59,35 +56,37 @@ public sealed class SqliteChatHistoryProvider(
         var sessionId = GetSessionId(context.Session!);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
 
-        // 取该 session 最新 N 条，不按 SourceType / Role 过滤
-        // 保留所有角色（user / assistant / tool），让 Assistant{tool_calls} 与 ToolMessage 配对完整
-        var rows = await db.ChatMessages
-            .Where(m => m.SessionId == sessionId)
-            .OrderByDescending(m => m.SequentialNumber)
-            .Take(MaxReadMessages)
-            .OrderBy(m => m.SequentialNumber)
+        // 全量加载 is_compacted=0 的消息，按 id 升序
+        var rows = await db.ChatMessageRecords
+            .Where(m => m.SessionId == sessionId && !m.IsCompacted)
+            .OrderBy(m => m.Id)
             .ToListAsync(cancellationToken);
 
         sw.Stop();
         Logger.Information("ProvideChatHistory: Session={SessionId} Count={Count} Elapsed={ElapsedMs}ms",
             sessionId, rows.Count, sw.ElapsedMilliseconds);
 
-        var result = rows.Select(row =>
+        var result = new List<AgentChatMessage>(rows.Count);
+
+        foreach (var row in rows)
         {
             var role = row.Role switch
             {
                 "user" => ChatRole.User,
                 "assistant" => ChatRole.Assistant,
                 "tool" => ChatRole.Tool,
+                "system" => ChatRole.System,
                 _ => ChatRole.User
             };
 
-            var msg = new AgentChatMessage { Role = role };
+            var contents = new List<AIContent>();
 
-            if (!string.IsNullOrEmpty(row.ContentsJson))
+            if (role == ChatRole.Tool)
             {
-                try
+                // tool 消息：重建为 FunctionResultContent
+                if (!string.IsNullOrEmpty(row.Content))
                 {
+<<<<<<< HEAD
                     msg.Contents = JsonSerializer.Deserialize<List<AIContent>>(
                         row.ContentsJson, JsonOptions) ?? [];
                 }
@@ -97,16 +96,60 @@ public sealed class SqliteChatHistoryProvider(
                     msg.Contents = !string.IsNullOrEmpty(row.Content)
                         ? [new TextContent(StripAgentReplyJson(row.Content))]
                         : [];
+=======
+                    contents.Add(new FunctionResultContent(row.ToolCallId ?? "", row.Content));
+>>>>>>> fb6af5f (feat(sqlitechat): T2 - SqliteChatHistoryProvider 重写 Store/Provide 适配 chat_messages 表)
                 }
             }
-            else if (!string.IsNullOrEmpty(row.Content))
+            else
             {
-                msg.Contents = [new TextContent(row.Content)];
+                // user/assistant: 文本内容
+                if (!string.IsNullOrEmpty(row.Content))
+                {
+                    contents.Add(new TextContent(row.Content));
+                }
+
+                // assistant: 反序列化 tool_calls JSON 重建 FunctionCallContent
+                if (role == ChatRole.Assistant && !string.IsNullOrEmpty(row.ToolCalls))
+                {
+                    try
+                    {
+                        var toolCalls = JsonSerializer.Deserialize<List<ToolCallJson>>(row.ToolCalls, JsonOptions);
+                        if (toolCalls is not null)
+                        {
+                            foreach (var tc in toolCalls)
+                            {
+                                Dictionary<string, object?>? args = null;
+                                if (!string.IsNullOrEmpty(tc.Function?.Arguments))
+                                {
+                                    try
+                                    {
+                                        args = JsonSerializer.Deserialize<Dictionary<string, object?>>(
+                                            tc.Function.Arguments, JsonOptions);
+                                    }
+                                    catch (JsonException)
+                                    {
+                                        // arguments 不是合法 JSON 对象时降级为空
+                                    }
+                                }
+                                contents.Add(new FunctionCallContent(tc.Id, tc.Function?.Name ?? "", args));
+                            }
+                        }
+                    }
+                    catch (JsonException ex)
+                    {
+                        Logger.Warning(ex, "tool_calls 反序列化失败 Session={SessionId} RowId={RowId}",
+                            sessionId, row.Id);
+                    }
+                }
+
+                // reasoning 不重建为 TextReasoningContent —— 仅调试用
             }
 
-            return msg;
-        }).ToList();
+            var hasNonEmptyText = contents.OfType<TextContent>().Any(t => !string.IsNullOrEmpty(t.Text));
+            var hasToolCalls = contents.OfType<FunctionCallContent>().Any();
 
+<<<<<<< HEAD
         // 【核心策略】保留完整对话上下文，仅移除成对缺失的 Tool 消息
         // Tool 消息只有在最近出现了 Assistant{tool_calls} 时才保留，
         // 否则视为 orphaned（跨模型切换时旧的 tool_call_id 不匹配），丢弃以避免 API 400。
@@ -136,6 +179,17 @@ public sealed class SqliteChatHistoryProvider(
             filtered.Add(m);
         }
         result = filtered;
+=======
+            // 过滤纯 FCC 无有效文本的 assistant 消息（只调工具不说话的中间轮次）
+            if (role == ChatRole.Assistant && hasToolCalls && !hasNonEmptyText)
+            {
+                Logger.Debug("跳过纯 FCC 无文本的 assistant 消息 RowId={RowId}", row.Id);
+                continue;
+            }
+
+            result.Add(new AgentChatMessage(role, contents));
+        }
+>>>>>>> fb6af5f (feat(sqlitechat): T2 - SqliteChatHistoryProvider 重写 Store/Provide 适配 chat_messages 表)
 
         Logger.Debug("ProvideChatHistory 返回: Count={Count} Roles=[{Roles}]",
             result.Count,
@@ -167,14 +221,9 @@ public sealed class SqliteChatHistoryProvider(
         // 注意：绝不先删再插。FICC 在第 2 轮只传了 [ToolMessage] 进来，
         // 如果先删历史再插，第 1 轮的 UserMessage + Assistant{tool_calls} 会丢失，
         // 下次 Provide 就凑不出完整的消息配对，导致 400。
-
-        // 获取当前 session 最大序号，用于新消息的递增赋值
-        var maxSeq = await db.ChatMessages
-            .Where(m => m.SessionId == sessionId)
-            .MaxAsync(m => (long?)m.SequentialNumber, cancellationToken) ?? 0;
-
-        foreach (var (msg, i) in allMessages.Select((m, i) => (m, i)))
+        foreach (var msg in allMessages)
         {
+<<<<<<< HEAD
             // assistant 消息：只保留最后一段非空 TextContent 作为回复
             // 丢弃内部思考过程（chain-of-thought），避免思考和错误推理累积到下一轮
             if (msg.Role == ChatRole.Assistant && msg.Contents.Count > 1)
@@ -191,7 +240,11 @@ public sealed class SqliteChatHistoryProvider(
             var contentsJson = msg.Contents.Count > 0
                 ? JsonSerializer.Serialize(msg.Contents, JsonOptions)
                 : null;
+=======
+            var role = msg.Role.ToString() ?? "user";
+>>>>>>> fb6af5f (feat(sqlitechat): T2 - SqliteChatHistoryProvider 重写 Store/Provide 适配 chat_messages 表)
 
+            // 提取纯文本内容
             var rawText = string.Join(Environment.NewLine,
                 msg.Contents.OfType<TextContent>().Select(t => t.Text));
 
@@ -201,23 +254,69 @@ public sealed class SqliteChatHistoryProvider(
                 ? StripAgentReplyJson(rawText)
                 : rawText;
 
-            db.ChatMessages.Add(new Core.Entities.ChatMessage
+            string? toolCalls = null;
+            string? toolCallId = null;
+            string? reasoning = null;
+
+            if (msg.Role == ChatRole.Assistant)
+            {
+                // 提取 FunctionCallContent 序列化为 tool_calls JSON
+                var fccList = msg.Contents.OfType<FunctionCallContent>().ToList();
+                if (fccList.Count > 0)
+                {
+                    var serializedCalls = fccList.Select(fcc => new
+                    {
+                        id = fcc.CallId,
+                        type = "function",
+                        function = new
+                        {
+                            name = fcc.Name,
+                            arguments = fcc.Arguments is not null
+                                ? JsonSerializer.Serialize(fcc.Arguments, JsonOptions)
+                                : null
+                        }
+                    }).ToList();
+
+                    toolCalls = JsonSerializer.Serialize(serializedCalls, JsonOptions);
+                }
+
+                // 提取 TextReasoningContent
+                reasoning = string.Join(Environment.NewLine,
+                    msg.Contents.OfType<TextReasoningContent>().Select(r => r.Text));
+                if (string.IsNullOrEmpty(reasoning))
+                    reasoning = null;
+            }
+            else if (msg.Role == ChatRole.Tool)
+            {
+                // 提取 FunctionResultContent 的 CallId 和结果文本
+                var frc = msg.Contents.OfType<FunctionResultContent>().FirstOrDefault();
+                if (frc is not null)
+                {
+                    toolCallId = frc.CallId;
+                    // 如果 TextContent 为空，从 FRC.Result 提取文本
+                    if (string.IsNullOrEmpty(textContent) && frc.Result is string resultStr)
+                        textContent = resultStr;
+                }
+            }
+
+            db.ChatMessageRecords.Add(new ChatMessageRecord
             {
                 SessionId = sessionId,
-                Role = msg.Role.ToString() ?? "user",
+                Role = role,
                 Content = textContent,
-                ContentsJson = contentsJson,
-                SequentialNumber = maxSeq + i + 1,
-                Timestamp = DateTime.UtcNow,
+                ToolCalls = toolCalls,
+                ToolCallId = toolCallId,
+                Reasoning = reasoning,
+                CreatedAt = DateTime.UtcNow,
             });
         }
 
         // 步骤 2：裁剪旧消息，控制存储大小
-        // 只保留该 session 最新的 MaxStoredMessages 条，超出部分删除。
+        // 只保留该 session 最新的 MaxStoredMessages 条，超出部分物理删除。
         // 使用 Skip + 批量删除，避免一次加载全量到内存。
-        var toDelete = await db.ChatMessages
+        var toDelete = await db.ChatMessageRecords
             .Where(m => m.SessionId == sessionId)
-            .OrderByDescending(m => m.SequentialNumber)
+            .OrderByDescending(m => m.Id)
             .Skip(MaxStoredMessages)
             .ToListAsync(cancellationToken);
 
@@ -225,7 +324,7 @@ public sealed class SqliteChatHistoryProvider(
         {
             Logger.Debug("裁剪旧消息 Session={SessionId} Count={DeleteCount}",
                 sessionId, toDelete.Count);
-            db.ChatMessages.RemoveRange(toDelete);
+            db.ChatMessageRecords.RemoveRange(toDelete);
         }
 
         await db.SaveChangesAsync(cancellationToken);
@@ -269,200 +368,24 @@ public sealed class SqliteChatHistoryProvider(
 
         return raw;
     }
-}
 
-/// <summary>
-/// AIContent 多态序列化/反序列化转换器。
-///
-/// 支持三种子类型：FunctionCallContent / FunctionResultContent / TextContent。
-///
-/// 判断规则（Read）：
-/// - 含 "CallId" + "Result" → FunctionResultContent
-/// - 含 "Name" + "Arguments" → FunctionCallContent
-/// - 其他 → TextContent
-///
-/// MEAI 10.8.0 兼容：
-/// - FunctionCallContent: 构造函数 (string? callId, string name, IDictionary<string, object?>? arguments)
-/// - FunctionResultContent: 构造函数 (string? callId, object? result), Exception 是属性赋值
-/// </summary>
-public sealed class AIContentListConverter : JsonConverter<List<AIContent>>
-{
-    public override List<AIContent>? Read(
-        ref Utf8JsonReader reader,
-        Type typeToConvert,
-        JsonSerializerOptions options)
+    /// <summary>
+    /// tool_calls JSON 反序列化用模型。
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarAnalyzer.CSharp", "S3459", Justification = "JSON deserialization target")]
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarAnalyzer.CSharp", "S1144", Justification = "JSON deserialization target")]
+    private sealed class ToolCallJson
     {
-        if (reader.TokenType != JsonTokenType.StartArray)
-            throw new JsonException("Expected JSON array for AIContent list");
-
-        var result = new List<AIContent>();
-
-        while (reader.Read())
-        {
-            if (reader.TokenType == JsonTokenType.EndArray)
-                break;
-
-            using var doc = JsonDocument.ParseValue(ref reader);
-            var obj = doc.RootElement;
-
-            AIContent? content = null;
-
-            // 规则 1: FunctionResultContent — 有 CallId + Result 字段
-            if (obj.TryGetProperty("CallId", out var callIdEl) &&
-                obj.TryGetProperty("Result", out var resultEl))
-            {
-                var callId = callIdEl.GetString();
-                if (callId is not null)
-                {
-                    object? resultValue = null;
-                    if (resultEl.ValueKind == JsonValueKind.String)
-                    {
-                        var raw = resultEl.GetString();
-                        if (raw is not null)
-                        {
-                            try
-                            {
-                                // 旧格式：双重序列化的 JSON 字符串（"找到..." 带引号）
-                                resultValue = JsonSerializer.Deserialize<object>(raw, options);
-                            }
-                            catch (JsonException)
-                            {
-                                // 新格式：纯文本字符串，直接使用
-                                resultValue = raw;
-                            }
-                        }
-                    }
-                    else if (resultEl.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
-                    {
-                        resultValue = JsonSerializer.Deserialize<object>(resultEl.GetRawText(), options);
-                    }
-
-                    content = new FunctionResultContent(callId, resultValue);
-
-                    // Exception 是属性赋值，不是构造函数参数
-                    if (obj.TryGetProperty("Exception", out var exEl)
-                        && exEl.ValueKind != JsonValueKind.Null
-                        && exEl.ValueKind != JsonValueKind.Undefined)
-                    {
-                        try
-                        {
-                            if (exEl.ValueKind == JsonValueKind.String)
-                            {
-                                var json = exEl.GetString();
-                                if (json is not null)
-                                    ((FunctionResultContent)content).Exception =
-                                        JsonSerializer.Deserialize<Exception>(json, options);
-                            }
-                            else if (exEl.ValueKind == JsonValueKind.Object)
-                            {
-                                ((FunctionResultContent)content).Exception =
-                                    exEl.Deserialize<Exception>(options);
-                            }
-                        }
-                        catch { /* ignore deserialization errors for Exception */ }
-                    }
-                }
-            }
-            // 规则 2: FunctionCallContent — 有 Name + Arguments 字段
-            else if (obj.TryGetProperty("Name", out var nameEl) &&
-                     obj.TryGetProperty("Arguments", out var argsEl))
-            {
-                var name = nameEl.GetString();
-                var callId = obj.TryGetProperty("CallId", out var cidEl)
-                    ? cidEl.GetString()
-                    : null;
-
-                if (name is not null)
-                {
-                    Dictionary<string, object?>? args = null;
-                    if (argsEl.ValueKind == JsonValueKind.String)
-                    {
-                        // 旧格式：WriteString + Serialize 导致双重序列化为 JSON 字符串
-                        // 提取字符串后再反序列化为 Dictionary
-                        var json = argsEl.GetString();
-                        if (json is not null)
-                            args = JsonSerializer.Deserialize<Dictionary<string, object?>>(json, options);
-                    }
-                    else if (argsEl.ValueKind == JsonValueKind.Object)
-                    {
-                        // 新格式：WritePropertyName + Serialize(writer) 写入原生 JSON 对象
-                        args = JsonSerializer.Deserialize<Dictionary<string, object?>>(
-                            argsEl.GetRawText(), options);
-                    }
-
-                    content = new FunctionCallContent(callId ?? "", name, args);
-                }
-            }
-            // 规则 3: TextContent — 兜底
-            else
-            {
-                var text = obj.TryGetProperty("Text", out var textEl)
-                    ? textEl.GetString()
-                    : "";
-                content = new TextContent(text ?? "");
-            }
-
-            if (content is not null)
-                result.Add(content);
-        }
-
-        return result;
+        public string Id { get; set; } = string.Empty;
+        public string Type { get; set; } = "function";
+        public ToolCallFunctionJson? Function { get; set; } = null!;
     }
 
-    public override void Write(
-        Utf8JsonWriter writer,
-        List<AIContent> value,
-        JsonSerializerOptions options)
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarAnalyzer.CSharp", "S3459", Justification = "JSON deserialization target")]
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarAnalyzer.CSharp", "S1144", Justification = "JSON deserialization target")]
+    private sealed class ToolCallFunctionJson
     {
-        writer.WriteStartArray();
-
-        foreach (var content in value)
-        {
-            writer.WriteStartObject();
-
-            switch (content)
-            {
-                case FunctionCallContent fcc:
-                    writer.WriteString("Name", fcc.Name);
-                    if (fcc.Arguments is not null)
-                    {
-                        writer.WritePropertyName("Arguments");
-                        JsonSerializer.Serialize(writer, fcc.Arguments, options);
-                    }
-                    else
-                        writer.WriteNull("Arguments");
-                    writer.WriteString("CallId", fcc.CallId);
-                    break;
-
-                case FunctionResultContent frc:
-                    writer.WriteString("CallId", frc.CallId);
-                    if (frc.Result is not null)
-                    {
-                        writer.WritePropertyName("Result");
-                        JsonSerializer.Serialize(writer, frc.Result, options);
-                    }
-                    else
-                        writer.WriteNull("Result");
-                    if (frc.Exception is not null)
-                    {
-                        writer.WritePropertyName("Exception");
-                        JsonSerializer.Serialize(writer, frc.Exception, options);
-                    }
-                    break;
-
-                case TextContent tc:
-                    writer.WriteString("Text", tc.Text);
-                    break;
-
-                default:
-                    // 未知子类型：按原始 AIContent 序列化
-                    JsonSerializer.Serialize(writer, content, options);
-                    break;
-            }
-
-            writer.WriteEndObject();
-        }
-
-        writer.WriteEndArray();
+        public string Name { get; set; } = string.Empty;
+        public string? Arguments { get; set; }
     }
 }

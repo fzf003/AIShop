@@ -11,6 +11,7 @@ public sealed class AppDbContext : DbContext
     public DbSet<User> Users => Set<User>();
     public DbSet<Session> Sessions => Set<Session>();
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
+    public DbSet<ChatMessageRecord> ChatMessageRecords => Set<ChatMessageRecord>();
     public DbSet<Cart> Carts => Set<Cart>();
     public DbSet<CartItem> CartItems => Set<CartItem>();
     public DbSet<ChatMessageRecord> ChatMessageRecords => Set<ChatMessageRecord>();
@@ -36,6 +37,24 @@ public sealed class AppDbContext : DbContext
             e.Property(m => m.Content).HasColumnType("TEXT");
             e.Property(m => m.ContentsJson).HasColumnType("TEXT");
             e.Property(m => m.Id).ValueGeneratedOnAdd();
+        });
+
+        modelBuilder.Entity<ChatMessageRecord>(e =>
+        {
+            e.ToTable("chat_messages");
+            e.HasKey(r => r.Id);
+            e.Property(r => r.Id).ValueGeneratedOnAdd();
+            e.Property(r => r.SessionId).HasColumnName("session_id");
+            e.Property(r => r.Role).HasColumnName("role").HasColumnType("TEXT");
+            e.Property(r => r.Content).HasColumnName("content").HasColumnType("TEXT");
+            e.Property(r => r.ToolCalls).HasColumnName("tool_calls").HasColumnType("TEXT");
+            e.Property(r => r.ToolCallId).HasColumnName("tool_call_id").HasColumnType("TEXT");
+            e.Property(r => r.ToolName).HasColumnName("tool_name").HasColumnType("TEXT");
+            e.Property(r => r.Reasoning).HasColumnName("reasoning").HasColumnType("TEXT");
+            e.Property(r => r.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("datetime('now')");
+            e.Property(r => r.IsCompacted).HasColumnName("is_compacted").HasDefaultValue(false);
+            e.HasIndex("SessionId", "IsCompacted", "Id").HasDatabaseName("idx_cm_session_active");
+            e.HasIndex("SessionId", "Id").HasDatabaseName("idx_cm_session_id");
         });
 
         modelBuilder.Entity<Cart>(e =>
