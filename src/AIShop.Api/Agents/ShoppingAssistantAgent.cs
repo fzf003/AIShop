@@ -95,6 +95,9 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         _isOpenAI = isOpenAI;
         var instructions = BuildInstructions(catalog);
 
+        // 包裹 SanitizingChatClient 进行发前清洗
+        chatClient = new SanitizingChatClient(chatClient);
+
         var tools = new List<AITool>();
 
         tools.Add(AIFunctionFactory.Create(
