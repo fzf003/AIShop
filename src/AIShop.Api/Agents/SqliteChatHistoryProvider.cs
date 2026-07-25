@@ -86,19 +86,7 @@ public sealed class SqliteChatHistoryProvider(
                 // tool 消息：重建为 FunctionResultContent
                 if (!string.IsNullOrEmpty(row.Content))
                 {
-<<<<<<< HEAD
-                    msg.Contents = JsonSerializer.Deserialize<List<AIContent>>(
-                        row.ContentsJson, JsonOptions) ?? [];
-                }
-                catch (JsonException ex)
-                {
-                    Logger.Warning(ex, "ContentsJson 反序列化失败, 降级为纯文本");
-                    msg.Contents = !string.IsNullOrEmpty(row.Content)
-                        ? [new TextContent(StripAgentReplyJson(row.Content))]
-                        : [];
-=======
                     contents.Add(new FunctionResultContent(row.ToolCallId ?? "", row.Content));
->>>>>>> fb6af5f (feat(sqlitechat): T2 - SqliteChatHistoryProvider 重写 Store/Provide 适配 chat_messages 表)
                 }
             }
             else
@@ -149,37 +137,6 @@ public sealed class SqliteChatHistoryProvider(
             var hasNonEmptyText = contents.OfType<TextContent>().Any(t => !string.IsNullOrEmpty(t.Text));
             var hasToolCalls = contents.OfType<FunctionCallContent>().Any();
 
-<<<<<<< HEAD
-        // 【核心策略】保留完整对话上下文，仅移除成对缺失的 Tool 消息
-        // Tool 消息只有在最近出现了 Assistant{tool_calls} 时才保留，
-        // 否则视为 orphaned（跨模型切换时旧的 tool_call_id 不匹配），丢弃以避免 API 400。
-        // 其他所有消息（User、Assistant 文本含 FCC、Tool 文本）均保留。
-        var filtered = new List<AgentChatMessage>(result.Count);
-        bool hasPendingToolCalls = false;
-        foreach (var m in result)
-        {
-            if (m.Role == ChatRole.Tool)
-            {
-                if (!hasPendingToolCalls)
-                    continue; // orphaned tool → 跳过
-                filtered.Add(m);
-                hasPendingToolCalls = false;
-                continue;
-            }
-
-            if (m.Role == ChatRole.Assistant && m.Contents.OfType<FunctionCallContent>().Any())
-            {
-                hasPendingToolCalls = true;
-            }
-            else
-            {
-                hasPendingToolCalls = false;
-            }
-
-            filtered.Add(m);
-        }
-        result = filtered;
-=======
             // 过滤纯 FCC 无有效文本的 assistant 消息（只调工具不说话的中间轮次）
             if (role == ChatRole.Assistant && hasToolCalls && !hasNonEmptyText)
             {
@@ -189,7 +146,6 @@ public sealed class SqliteChatHistoryProvider(
 
             result.Add(new AgentChatMessage(role, contents));
         }
->>>>>>> fb6af5f (feat(sqlitechat): T2 - SqliteChatHistoryProvider 重写 Store/Provide 适配 chat_messages 表)
 
         Logger.Debug("ProvideChatHistory 返回: Count={Count} Roles=[{Roles}]",
             result.Count,
@@ -223,26 +179,7 @@ public sealed class SqliteChatHistoryProvider(
         // 下次 Provide 就凑不出完整的消息配对，导致 400。
         foreach (var msg in allMessages)
         {
-<<<<<<< HEAD
-            // assistant 消息：只保留最后一段非空 TextContent 作为回复
-            // 丢弃内部思考过程（chain-of-thought），避免思考和错误推理累积到下一轮
-            if (msg.Role == ChatRole.Assistant && msg.Contents.Count > 1)
-            {
-                var lastRelevant = msg.Contents
-                    .OfType<TextContent>()
-                    .LastOrDefault(t => !string.IsNullOrWhiteSpace(t.Text));
-
-                msg.Contents.Clear();
-                if (lastRelevant is not null)
-                    msg.Contents.Add(lastRelevant);
-            }
-
-            var contentsJson = msg.Contents.Count > 0
-                ? JsonSerializer.Serialize(msg.Contents, JsonOptions)
-                : null;
-=======
             var role = msg.Role.ToString() ?? "user";
->>>>>>> fb6af5f (feat(sqlitechat): T2 - SqliteChatHistoryProvider 重写 Store/Provide 适配 chat_messages 表)
 
             // 提取纯文本内容
             var rawText = string.Join(Environment.NewLine,

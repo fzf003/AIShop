@@ -105,21 +105,8 @@ public static class ChatEndpoints
                 agentSw.ElapsedMilliseconds, sid);
 
             // 2. Save user message + assistant response to SQLite
-            chatRepo.Add(new Core.Entities.ChatMessage
-            {
-                SessionId = sid,
-                Role = "user",
-                Content = req.Message ?? ""
-            });
-            chatRepo.Add(new Core.Entities.ChatMessage
-            {
-                SessionId = sid,
-                Role = "assistant",
-                Content = result.Reply ?? ""
-            });
-            
-                await chatRepo.SaveChangesAsync(ct);
-            
+            // 由 Agent 的 SqliteChatHistoryProvider.StoreChatHistoryAsync 自动处理，端点不再重复写入
+
 
             // 2.1 Cache agent result for /recommendations to avoid duplicate LLM call
             var chatHash = GetMessageHash(req.Message ?? "");
@@ -244,7 +231,7 @@ public static class ChatEndpoints
             var agentSw = new Stopwatch();
             if (cache.TryGetValue(agentResultCacheKey, out var cachedAgentTuple) && cachedAgentTuple is not null)
             {
-                var tuple = ((AgentChatResult Result, AgentSession? Session))cachedAgentTuple!;
+                var tuple = ((AgentChatResult Result, AgentSession? Session))cachedAgentTuple;
                 agentResult = tuple.Result;
                 agentSession = tuple.Session;
                 logger.Information("[Diagnose] /recommendations AgentCacheHit=true SessionId={SessionId}", sid);
