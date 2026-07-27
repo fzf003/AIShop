@@ -1,12 +1,13 @@
-using Serilog;
-using Microsoft.Extensions.AI;
-using System.ClientModel;
-using System.ClientModel.Primitives;
-using System.Collections.Concurrent;
 using AIShop.Core.Interfaces;
 using AIShop.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.AI;
 using OpenAI;
+using Serilog;
+using System.ClientModel;
+using System.ClientModel.Primitives;
+using System.Collections.Concurrent;
+using System.Net.Sockets;
 
 namespace AIShop.Api.Agents;
 
@@ -99,18 +100,25 @@ public class ModelRouter
     /// <exception cref="KeyNotFoundException">模型未注册时抛出。</exception>
     public virtual IShoppingAssistantAgent GetAgent(string modelName)
     {
-        if (!_modelConfigs.ContainsKey(modelName))
+        var containsKey = _modelConfigs.ContainsKey(modelName);
+        Logger.Information("GetAgent: modelName={ModelName} ContainsKey={ContainsKey} ConfigKeys=[{Keys}]",
+            modelName, containsKey, string.Join(",", _modelConfigs.Keys));
+
+        if (!containsKey)
             throw new KeyNotFoundException($"模型 '{modelName}' 未注册");
 
         return _agents.GetOrAdd(modelName, key => new Lazy<ShoppingAssistantAgent>(() =>
         {
             var cfg = _modelConfigs[key];
+            Logger.Information("GetAgent.Lazy: 开始创建 model={ModelName} endpoint={Endpoint}", key, cfg.Endpoint);
             var chatClient = CreateChatClient(cfg);
             var dbFactory = _sp.GetRequiredService<IDbContextFactory<AppDbContext>>();
             var catalog = _sp.GetRequiredService<IProductCatalogService>();
             var cartTools = _sp.GetRequiredService<CartToolProvider>();
             var isOpenAI = ShoppingAssistantAgent.IsOpenAIModel(cfg.Model);
-            return new ShoppingAssistantAgent(chatClient, dbFactory, catalog, cartTools, isOpenAI);
+            var agent = new ShoppingAssistantAgent(chatClient, dbFactory, catalog, cartTools, isOpenAI);
+            Logger.Information("GetAgent.Lazy: 创建成功 model={ModelName}", key);
+            return agent;
         })).Value;
     }
 
@@ -120,13 +128,45 @@ public class ModelRouter
     private static IChatClient CreateChatClient(ModelConfig cfg)
     {
         var handler = new HttpClientHandler { UseProxy = false, Proxy = null };
-        var httpClient = new HttpClient(new DebugHandler(handler)) { Timeout = TimeSpan.FromSeconds(120) };
-        var clientOptions = new OpenAIClientOptions
+
+        // 统一路径：所有模型经 DeepSeekDelegatingChatClient 清洗 + 分流
+        var isDeepSeek = cfg.Name.Contains("DeepSeek", StringComparison.OrdinalIgnoreCase);
+
+        // DeepSeek 需绕过 MEAI 序列化，自建 HTTP Client
+        HttpClient? httpClient = null;
+        IChatClient chatClient;
+
+        if (isDeepSeek)
         {
-            Endpoint = new Uri(cfg.Endpoint),
-            Transport = new HttpClientPipelineTransport(httpClient),
-        };
-        var client = new OpenAIClient(new ApiKeyCredential(cfg.Key), clientOptions);
-        return client.GetChatClient(cfg.Model).AsIChatClient();
+           var  deepSeekHttpClient = new HttpClient(new DebugHandler(handler)) { Timeout = TimeSpan.FromSeconds(120) };
+            deepSeekHttpClient.BaseAddress = new Uri(cfg.Endpoint + "/chat/completions");
+            deepSeekHttpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {cfg.Key}");
+
+            httpClient = deepSeekHttpClient;
+            // DeepSeek 不走 inner，DelegatingChatClient 需要一个空壳
+            chatClient = new DeepSeekChatClient(deepSeekHttpClient, cfg.Model);
+        }
+        else
+        {
+            var dehttpClient = new HttpClient(new DebugHandler(handler)) { Timeout = TimeSpan.FromSeconds(120) };
+            var clientOptions = new OpenAIClientOptions
+            {
+                Endpoint = new Uri(cfg.Endpoint),
+                Transport = new HttpClientPipelineTransport(dehttpClient),
+            };
+            var client = new OpenAIClient(new ApiKeyCredential(cfg.Key), clientOptions);
+            chatClient = client.GetChatClient(cfg.Model).AsIChatClient();
+
+            // Qwen 补上修复层
+            if (!ShoppingAssistantAgent.IsOpenAIModel(cfg.Model))
+                chatClient = new QwenToolCallFixClient(chatClient);
+        }
+ 
+        return chatClient.AsBuilder()
+            .Use(client => new DeepSeekDelegatingChatClient(client, httpClient, cfg.Model))
+            .Build();
     }
+
+ 
+    
 }

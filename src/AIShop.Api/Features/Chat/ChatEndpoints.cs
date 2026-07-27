@@ -72,6 +72,10 @@ public static class ChatEndpoints
             var endpointSw = Stopwatch.StartNew();
             var logger = Log.ForContext("SourceContext", "Diagnose");
 
+            // 验证必填参数
+            if (string.IsNullOrWhiteSpace(req.Username))
+                return Results.BadRequest(new { detail = "用户名不能为空" });
+
             var user = await users.GetByUsernameAsync(req.Username, ct);
             if (user is null)
                 return Results.Unauthorized();
@@ -87,10 +91,11 @@ public static class ChatEndpoints
             {
                 var modelId = req.Model ?? router.ActiveModel;
                 var agent = router.GetAgent(modelId);
-                (result, session) = await agent.RunChatAsync(sid, req.Message, req.Username, ct);
+                (result, session) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, ct);
             }
-            catch (KeyNotFoundException)
+            catch (KeyNotFoundException knf)
             {
+                logger.Error(knf, "[Diagnose] KeyNotFoundException in /chat: modelId={ModelId}", req.Model ?? router.ActiveModel);
                 return Results.BadRequest(new { detail = "不支持的模型" });
             }
             catch (Exception ex)

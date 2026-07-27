@@ -88,7 +88,7 @@ public sealed class SanitizingChatClientTests
         var catalog = Substitute.For<IProductCatalogService>();
         catalog.KeywordMap.Returns(new Dictionary<string, string[]>());
 
-        var agent = new ShoppingAssistantAgent(inner, dbFactory, catalog, cartTools, "gpt-4");
+        var agent = new ShoppingAssistantAgent(inner, dbFactory, catalog, cartTools, true);
 
         Assert.NotNull(agent);
     }

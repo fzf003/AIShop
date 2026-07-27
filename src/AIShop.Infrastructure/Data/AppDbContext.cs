@@ -14,7 +14,6 @@ public sealed class AppDbContext : DbContext
     public DbSet<ChatMessageRecord> ChatMessageRecords => Set<ChatMessageRecord>();
     public DbSet<Cart> Carts => Set<Cart>();
     public DbSet<CartItem> CartItems => Set<CartItem>();
-    public DbSet<ChatMessageRecord> ChatMessageRecords => Set<ChatMessageRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

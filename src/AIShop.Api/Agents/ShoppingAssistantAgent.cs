@@ -25,18 +25,14 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 
     private static string BuildInstructions(IProductCatalogService catalog)
     {
-        // 所有模型统一用 Text + Instructions 内嵌 JSON Schema
+        // 所有模型统一用 Text + Instructions 内嵌 JSON 示例
         // 测试报告证明这是唯一 4 模型（OpenAI/DeepSeek/Qwen/MiMo）100% 兼容的路径
-        var outputSchemaJson = JsonSerializer.Serialize(new
+        // 注意：用示例格式而非 Schema 定义，避免 Qwen 复制 Schema 定义到输出中
+        var outputExampleJson = JsonSerializer.Serialize(new
         {
-            type = "object",
-            properties = new
-            {
-                Reply = new { type = "string", description = "你的实际回复内容，禁止使用 Markdown，移除多余 Emoji" },
-                Keywords = new { type = "array", description = "提取的标签，如[\"咖啡机\",\"家电\"]；无匹配关键词时返回 []" },
-                Preferences = new { type = "array", description = "用户偏好，如[\"高性价比\",\"便携\"]；无偏好时返回 []" }
-            },
-            required = new[] { "Reply", "Keywords", "Preferences" }
+            Reply = "你的实际回复内容，禁止使用 Markdown，移除多余 Emoji",
+            Keywords = new[] { "关键词1", "关键词2" },
+            Preferences = new[] { "偏好1" }
         },
         new JsonSerializerOptions { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
 
@@ -46,13 +42,13 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             "风格:模仿一些拟人风格，比如：客官请稍等奴家这就为您找合适的产品",
             "用户名自动注入，不用传 username。",
             "",
-          /*  "可用工具：",
+            "可用工具：",
             "- search_product(keyword): 搜索商品",
             "- add_to_cart(productId, quantity): **追加**商品到购物车（在原数量上加）",
             "- update_cart_quantity(productId, quantity): **设置**精确数量（用户说只要X个时调用）",
             "- get_cart_summary(): 查看购物车",
             "- remove_from_cart(itemId): 从购物车移除商品",
-          */
+          "",
             "",
             "规则：",
             "- 用户说搜索/想要 → 直接 search_product，不要先说话",
@@ -75,7 +71,8 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         lines.Add("   不要包含任何 Markdown 标记或额外的解释文本。");
         lines.Add("");
         lines.Add("【JSON 输出格式要求】");
-        lines.Add($"{outputSchemaJson}");
+        lines.Add($"回复必须使用以下 JSON 格式（工具调用时除外）：");
+        lines.Add($"{outputExampleJson}");
 
         lines.Add("");
         lines.Add("【商品关键词表（用于推荐栏）】");
@@ -95,8 +92,6 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         _isOpenAI = isOpenAI;
         var instructions = BuildInstructions(catalog);
 
-        // 包裹 SanitizingChatClient 进行发前清洗
-        chatClient = new SanitizingChatClient(chatClient);
 
         var tools = new List<AITool>();
 

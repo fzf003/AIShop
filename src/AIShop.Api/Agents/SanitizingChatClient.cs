@@ -20,6 +20,10 @@ public sealed class SanitizingChatClient(IChatClient inner) : IChatClient
     {
         var list = messages.ToList();
 
+        // 注意：不在这里剥离 TextReasoningContent。
+        // DeepSeekChatClient 需要 TextReasoningContent 来映射 reasoning_content 请求字段。
+        // 非 DeepSeek 模型（通过 OpenAIClient/AsIChatClient）本身不识别此类型，传递无影响。
+
         list = Step1_RemoveEmptyToolCalls(list);
         list = Step2_FillMissingToolResults(list);
         list = Step3_MergeConsecutiveSameRole(list);
@@ -81,25 +85,37 @@ public sealed class SanitizingChatClient(IChatClient inner) : IChatClient
                     // Add the assistant message itself
                     result.Add(msg);
 
-                    // 收集后续紧随的 tool 消息
-                    var toolMessages = new List<ChatMessage>();
+                    // 收集后续紧随的 tool 消息（含空壳消息）
+                    var rawToolMessages = new List<ChatMessage>();
                     int j = i + 1;
                     while (j < messages.Count && messages[j].Role == ChatRole.Tool)
                     {
-                        toolMessages.Add(messages[j]);
+                        rawToolMessages.Add(messages[j]);
                         j++;
                     }
 
-                    // 添加已有的 tool 消息
+                    // 过滤掉无 FunctionResultContent 的孤儿 tool 消息（来自旧版历史记录，无 CallId）
+                    // 这些空壳消息会导致 DeepSeek 报 "missing field tool_call_id"
+                    var toolMessages = rawToolMessages
+                        .Where(m => m.Contents.OfType<FunctionResultContent>().Any())
+                        .ToList();
+
+                    // 按 CallId 匹配：找出已有的 tool 结果对应的 CallId 集合
+                    var existingCallIds = toolMessages
+                        .SelectMany(m => m.Contents.OfType<FunctionResultContent>())
+                        .Select(frc => frc.CallId)
+                        .ToHashSet();
+
+                    // 添加已有的 tool 消息（保留顺序）
                     result.AddRange(toolMessages);
 
-                    // FICC 迭代产生的 tool 消息可能少于 FCC 数量，追加兜底
-                    for (int k = toolMessages.Count; k < fccList.Count; k++)
+                    // 对没有对应 tool 结果的 FCC，追加兜底
+                    foreach (var fcc in fccList.Where(f => !existingCallIds.Contains(f.CallId)))
                     {
                         result.Add(new ChatMessage
                         {
                             Role = ChatRole.Tool,
-                            Contents = [new FunctionResultContent(fccList[k].CallId, "[工具调用结果丢失]")]
+                            Contents = [new FunctionResultContent(fcc.CallId, "[工具调用结果丢失]")]
                         });
                     }
 

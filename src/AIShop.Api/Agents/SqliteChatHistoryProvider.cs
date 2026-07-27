@@ -131,18 +131,21 @@ public sealed class SqliteChatHistoryProvider(
                     }
                 }
 
-                // reasoning 不重建为 TextReasoningContent —— 仅调试用
+                // 重建 TextReasoningContent（供 DeepSeekChatClient 映射为 reasoning_content）
+                if (role == ChatRole.Assistant && !string.IsNullOrEmpty(row.Reasoning))
+                {
+                    contents.Add(new TextReasoningContent(row.Reasoning));
+                }
             }
 
-            var hasNonEmptyText = contents.OfType<TextContent>().Any(t => !string.IsNullOrEmpty(t.Text));
-            var hasToolCalls = contents.OfType<FunctionCallContent>().Any();
-
-            // 过滤纯 FCC 无有效文本的 assistant 消息（只调工具不说话的中间轮次）
-            if (role == ChatRole.Assistant && hasToolCalls && !hasNonEmptyText)
-            {
-                Logger.Debug("跳过纯 FCC 无文本的 assistant 消息 RowId={RowId}", row.Id);
+            // 过滤完全空的 assistant 消息（无任何内容）
+            // (NOSONAR: single-statement if with continue is intentional)
+            if (role == ChatRole.Assistant && contents.Count == 0)
                 continue;
-            }
+
+            // 过滤无 FunctionResultContent 的孤儿 tool 消息（CallId 可能为空或不对齐）
+            if (role == ChatRole.Tool && contents.Count == 0)
+                continue;
 
             result.Add(new AgentChatMessage(role, contents));
         }
@@ -182,18 +185,50 @@ public sealed class SqliteChatHistoryProvider(
             var role = msg.Role.ToString() ?? "user";
 
             // 提取纯文本内容
-            var rawText = string.Join(Environment.NewLine,
-                msg.Contents.OfType<TextContent>().Select(t => t.Text));
-
-            // 对 assistant 回复：如果 TextContent 是 {"Reply":"...",...}，提取 Reply 字段
-            // 避免 JSON 元数据（Keywords/Preferences）泄漏到对话历史
-            var textContent = msg.Role == ChatRole.Assistant
-                ? StripAgentReplyJson(rawText)
-                : rawText;
+            var textContents = msg.Contents.OfType<TextContent>()
+                .Select(t => t.Text);
+            var rawText = string.Join(Environment.NewLine, textContents);
 
             string? toolCalls = null;
             string? toolCallId = null;
             string? reasoning = null;
+
+            // 提取 TextReasoningContent
+            if (msg.Role == ChatRole.Assistant)
+            {
+                reasoning = string.Join(Environment.NewLine,
+                    msg.Contents.OfType<TextReasoningContent>().Select(r => r.Text));
+                if (string.IsNullOrEmpty(reasoning))
+                    reasoning = null;
+            }
+
+            // 清理 <think> 标签（部分模型在 TextContent 中返回思维链）
+            // <think> 本质是思维链，应存入 reasoning 列而不是 content 列
+            if (!string.IsNullOrEmpty(rawText))
+            {
+                var thinkStart = rawText.IndexOf("<think>");
+                var thinkEnd = rawText.IndexOf("</think>");
+                if (thinkStart >= 0 && thinkEnd > thinkStart)
+                {
+                    var thinkContent = rawText[(thinkStart + 7)..thinkEnd];
+                    if (string.IsNullOrEmpty(reasoning))
+                        reasoning = thinkContent.Trim();
+                    rawText = (rawText[..thinkStart] + rawText[(thinkEnd + 8)..]).Trim();
+                }
+                else if (thinkStart >= 0)
+                {
+                    // 只有 <think> 没有 </think>（截断），内容移到 reasoning
+                    var thinkContent = rawText[(thinkStart + 7)..];
+                    if (string.IsNullOrEmpty(reasoning))
+                        reasoning = thinkContent.Trim();
+                    rawText = "";
+                }
+            }
+
+            // 对 assistant 回复：如果 TextContent 是 {"Reply":"...",...}，提取 Reply 字段
+            var textContent = msg.Role == ChatRole.Assistant
+                ? StripAgentReplyJson(rawText)
+                : rawText;
 
             if (msg.Role == ChatRole.Assistant)
             {
@@ -217,11 +252,11 @@ public sealed class SqliteChatHistoryProvider(
                     toolCalls = JsonSerializer.Serialize(serializedCalls, JsonOptions);
                 }
 
-                // 提取 TextReasoningContent
-                reasoning = string.Join(Environment.NewLine,
+                // 提取 TextReasoningContent（仅当尚未通过第一次提取或 <think> 设置时才赋值）
+                var secondReasoning = string.Join(Environment.NewLine,
                     msg.Contents.OfType<TextReasoningContent>().Select(r => r.Text));
-                if (string.IsNullOrEmpty(reasoning))
-                    reasoning = null;
+                if (!string.IsNullOrEmpty(secondReasoning))
+                    reasoning = secondReasoning;
             }
             else if (msg.Role == ChatRole.Tool)
             {
@@ -231,8 +266,8 @@ public sealed class SqliteChatHistoryProvider(
                 {
                     toolCallId = frc.CallId;
                     // 如果 TextContent 为空，从 FRC.Result 提取文本
-                    if (string.IsNullOrEmpty(textContent) && frc.Result is string resultStr)
-                        textContent = resultStr;
+                    if (string.IsNullOrEmpty(textContent) && frc.Result is not null)
+                        textContent = frc.Result?.ToString() ?? "";
                 }
             }
 
@@ -248,23 +283,73 @@ public sealed class SqliteChatHistoryProvider(
             });
         }
 
-        // 步骤 2：裁剪旧消息，控制存储大小
-        // 只保留该 session 最新的 MaxStoredMessages 条，超出部分物理删除。
-        // 使用 Skip + 批量删除，避免一次加载全量到内存。
-        var toDelete = await db.ChatMessageRecords
-            .Where(m => m.SessionId == sessionId)
-            .OrderByDescending(m => m.Id)
-            .Skip(MaxStoredMessages)
-            .ToListAsync(cancellationToken);
+        // 先提交新消息，确保它们有 Id 且对后续查询可见
+        await db.SaveChangesAsync(cancellationToken);
 
-        if (toDelete.Count > 0)
+        // 步骤 2：裁剪旧消息，控制存储大小
+        // 只保留该 session 最新的 MaxStoredMessages 条，超出部分标记为已压缩。
+        // 非物理删除，保留原始数据——历史可追溯、可查询。
+        var unCompressedCount = await db.ChatMessageRecords
+            .Where(m => m.SessionId == sessionId && !m.IsCompacted)
+            .CountAsync(cancellationToken);
+
+        var toCompressCount = unCompressedCount - MaxStoredMessages;
+        if (toCompressCount <= 0)
         {
-            Logger.Debug("裁剪旧消息 Session={SessionId} Count={DeleteCount}",
-                sessionId, toDelete.Count);
-            db.ChatMessageRecords.RemoveRange(toDelete);
+            Logger.Debug("裁剪旧消息 Session={SessionId} 无需裁剪 Count={Count}",
+                sessionId, unCompressedCount);
+            return;
         }
 
-        await db.SaveChangesAsync(cancellationToken);
+        // 找出要压缩的 Id：保留最新的 MaxStoredMessages 条，其余压缩。
+        // 降序排列，跳过前 MaxStoredMessages 条（最新的），取剩下的压缩。
+        var compressIds = await db.ChatMessageRecords
+            .Where(m => m.SessionId == sessionId && !m.IsCompacted)
+            .OrderByDescending(m => m.Id)
+            .Select(m => m.Id)
+            .Skip(MaxStoredMessages)
+            .Take(toCompressCount)
+            .ToHashSetAsync(cancellationToken);
+
+        // 关键：确保不切断 assistant(FCC) → tool 的配对。
+        // compressIds 是降序排序后跳过50条的结果，即要压缩的最旧N条。
+        // 取压缩集中最小的 id（即保留区之后的第一条被压缩消息）。
+        var firstCompressId = compressIds.OrderBy(id => id).FirstOrDefault();
+        if (firstCompressId > 0)
+        {
+            var firstCompress = await db.ChatMessageRecords.FindAsync(firstCompressId, cancellationToken);
+            if (firstCompress is not null)
+            {
+                // 检查前一条是否是对应此 tool 的 assistant(FCC)
+                if (firstCompress.Role == "tool")
+                {
+                    var prevMsg = await db.ChatMessageRecords
+                        .Where(m => m.SessionId == sessionId && m.Id == firstCompressId - 1 && !m.IsCompacted
+                            && m.Role == "assistant" && m.ToolCalls != null && m.ToolCalls != "")
+                        .FirstOrDefaultAsync(cancellationToken);
+                    if (prevMsg is not null)
+                        compressIds.Remove(prevMsg.Id);
+                }
+                // 检查第一条被压缩的是 assistant(FCC)，则也要压缩紧跟的 tool
+                else if (firstCompress.Role == "assistant" && !string.IsNullOrEmpty(firstCompress.ToolCalls))
+                {
+                    var nextMsg = await db.ChatMessageRecords
+                        .Where(m => m.SessionId == sessionId && m.Id == firstCompressId + 1 && m.Role == "tool")
+                        .FirstOrDefaultAsync(cancellationToken);
+                    if (nextMsg is not null)
+                        compressIds.Add(nextMsg.Id);
+                }
+            }
+        }
+
+        // 执行压缩
+        await db.ChatMessageRecords
+            .Where(m => compressIds.Contains(m.Id))
+            .ExecuteUpdateAsync(s => s.SetProperty(m => m.IsCompacted, true), cancellationToken);
+
+        Logger.Information("裁剪旧消息 Session={SessionId} Count={DeleteCount}",
+            sessionId, compressIds.Count);
+
 
         sw.Stop();
         Logger.Debug("StoreChatHistory: Session={SessionId} Count={Count} Elapsed={ElapsedMs}ms",
@@ -288,14 +373,21 @@ public sealed class SqliteChatHistoryProvider(
         if (string.IsNullOrEmpty(raw))
             return raw;
 
-        var trimmed = raw.Trim();
-        if (!trimmed.StartsWith('{'))
+        // 查找文本中第一个 { 开始的位置（兼容自然语言 + JSON 混合输出）
+        var jsonStart = raw.IndexOf('{');
+        if (jsonStart < 0)
             return raw;
 
+        var jsonEnd = raw.LastIndexOf('}');
+        if (jsonEnd <= jsonStart)
+            return raw;
+
+        var jsonCandidate = raw[jsonStart..(jsonEnd + 1)];
         try
         {
-            using var doc = JsonDocument.Parse(trimmed);
-            if (doc.RootElement.TryGetProperty("Reply", out var reply) && reply.ValueKind == JsonValueKind.String)
+            using var doc = JsonDocument.Parse(jsonCandidate);
+            if ((doc.RootElement.TryGetProperty("Reply", out var reply) ||
+                 doc.RootElement.TryGetProperty("reply", out reply)) && reply.ValueKind == JsonValueKind.String)
                 return reply.GetString() ?? raw;
         }
         catch (JsonException)
