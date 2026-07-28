@@ -13,7 +13,7 @@ namespace AIShop.Api.Features.Chat;
 public sealed record AgentChatResult(
     string Reply, string[] Keywords, string[]? Preferences);
 
-public sealed record ChatRequest(string Username, string Message);
+public sealed record ChatRequest(string Username, string Message, string? Model = null);
 public sealed record ChatReply(
     string Response,
     List<ProductDto>? RecommendedProducts,
@@ -65,12 +65,16 @@ public static class ChatEndpoints
             ISessionRepository sessions,
             IChatMessageRepository chatRepo,
             IProductCatalogService catalog,
-            IShoppingAssistantAgent shoppingAgent,
+            ModelRouter router,
             IMemoryCache cache,
             CancellationToken ct) =>
         {
             var endpointSw = Stopwatch.StartNew();
             var logger = Log.ForContext("SourceContext", "Diagnose");
+
+            // 验证必填参数
+            if (string.IsNullOrWhiteSpace(req.Username))
+                return Results.BadRequest(new { detail = "用户名不能为空" });
 
             var user = await users.GetByUsernameAsync(req.Username, ct);
             if (user is null)
@@ -79,13 +83,20 @@ public static class ChatEndpoints
             var sessionId = await sessions.GetOrCreateSessionIdAsync(user.Id, ct);
             var sid = Guid.Parse(sessionId);
 
-            // 1. Get response from agent (history loaded from SQLite by provider)
+            // 1. Get agent and response (history loaded from SQLite by provider)
             var agentSw = Stopwatch.StartNew();
             AgentChatResult result;
             AgentSession? session = null;
             try
             {
-                (result, session) = await shoppingAgent.RunChatAsync(sid, req.Message, req.Username, ct);
+                var modelId = req.Model ?? router.ActiveModel;
+                var agent = router.GetAgent(modelId);
+                (result, session) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, ct);
+            }
+            catch (KeyNotFoundException knf)
+            {
+                logger.Error(knf, "[Diagnose] KeyNotFoundException in /chat: modelId={ModelId}", req.Model ?? router.ActiveModel);
+                return Results.BadRequest(new { detail = "不支持的模型" });
             }
             catch (Exception ex)
             {
@@ -99,21 +110,8 @@ public static class ChatEndpoints
                 agentSw.ElapsedMilliseconds, sid);
 
             // 2. Save user message + assistant response to SQLite
-            chatRepo.Add(new Core.Entities.ChatMessage
-            {
-                SessionId = sid,
-                Role = "user",
-                Content = req.Message ?? ""
-            });
-            chatRepo.Add(new Core.Entities.ChatMessage
-            {
-                SessionId = sid,
-                Role = "assistant",
-                Content = result.Reply ?? ""
-            });
-            
-                await chatRepo.SaveChangesAsync(ct);
-            
+            // 由 Agent 的 SqliteChatHistoryProvider.StoreChatHistoryAsync 自动处理，端点不再重复写入
+
 
             // 2.1 Cache agent result for /recommendations to avoid duplicate LLM call
             var chatHash = GetMessageHash(req.Message ?? "");
@@ -196,7 +194,7 @@ public static class ChatEndpoints
             ISessionRepository sessions,
             IChatMessageRepository chatRepo,
             IProductCatalogService catalog,
-            IShoppingAssistantAgent shoppingAgent,
+            ModelRouter router,
             IMemoryCache cache,
             CancellationToken ct) =>
         {
@@ -209,6 +207,9 @@ public static class ChatEndpoints
 
             var sessionId = await sessions.GetOrCreateSessionIdAsync(user.Id, ct);
             var sid = Guid.Parse(sessionId);
+
+            // Use default agent for recommendations
+            var defaultAgent = router.GetDefaultAgent();
 
             // Load last user message and ask Agent for keyword matching
             var lastUserMessage = await chatRepo.GetLastUserMessageAsync(sid, ct);
@@ -235,7 +236,7 @@ public static class ChatEndpoints
             var agentSw = new Stopwatch();
             if (cache.TryGetValue(agentResultCacheKey, out var cachedAgentTuple) && cachedAgentTuple is not null)
             {
-                var tuple = ((AgentChatResult Result, AgentSession? Session))cachedAgentTuple!;
+                var tuple = ((AgentChatResult Result, AgentSession? Session))cachedAgentTuple;
                 agentResult = tuple.Result;
                 agentSession = tuple.Session;
                 logger.Information("[Diagnose] /recommendations AgentCacheHit=true SessionId={SessionId}", sid);
@@ -246,7 +247,7 @@ public static class ChatEndpoints
                 agentSw.Start();
                 try
                 {
-                    (agentResult, agentSession) = await shoppingAgent.RunChatAsync(sid, lastUserMessage.Content, req.Username, ct);
+                    (agentResult, agentSession) = await defaultAgent.RunChatAsync(sid, lastUserMessage.Content, req.Username, ct);
                 }
                 catch (Exception ex)
                 {
@@ -319,6 +320,9 @@ public static class ChatEndpoints
 
             return Results.Ok(response);
         });
+
+        api.MapGet("/models", (ModelRouter router) =>
+            Results.Ok(router.GetAvailableModels()));
 
         api.MapGet("/products", (IProductRepository products) =>
             Results.Ok(new { products = products.GetAll() }));

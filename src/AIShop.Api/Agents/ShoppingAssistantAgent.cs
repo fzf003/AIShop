@@ -18,31 +18,28 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     private readonly bool _isOpenAI;
     private static readonly Serilog.ILogger Logger = Log.ForContext<ShoppingAssistantAgent>();
 
-    private static bool IsOpenAIModel(string model) =>
+    internal static bool IsOpenAIModel(string model) =>
         model.StartsWith("gpt-", StringComparison.OrdinalIgnoreCase) ||
         model.StartsWith("o1-", StringComparison.OrdinalIgnoreCase) ||
         model.StartsWith("o3-", StringComparison.OrdinalIgnoreCase);
 
     private static string BuildInstructions(IProductCatalogService catalog)
     {
-        // 所有模型统一用 Text + Instructions 内嵌 JSON Schema
+        // 所有模型统一用 Text + Instructions 内嵌 JSON 示例
         // 测试报告证明这是唯一 4 模型（OpenAI/DeepSeek/Qwen/MiMo）100% 兼容的路径
-        var outputSchemaJson = JsonSerializer.Serialize(new
+        // 注意：用示例格式而非 Schema 定义，避免 Qwen 复制 Schema 定义到输出中
+        var outputExampleJson = JsonSerializer.Serialize(new
         {
-            type = "object",
-            properties = new
-            {
-                Reply = new { type = "string", description = "你的实际回复内容，禁止使用 Markdown，移除多余 Emoji" },
-                Keywords = new { type = "array", description = "提取的标签，如[\"咖啡机\",\"家电\"]；无匹配关键词时返回 []" },
-                Preferences = new { type = "array", description = "用户偏好，如[\"高性价比\",\"便携\"]；无偏好时返回 []" }
-            },
-            required = new[] { "Reply", "Keywords", "Preferences" }
+            Reply = "你的实际回复内容，禁止使用 Markdown，移除多余 Emoji",
+            Keywords = new[] { "关键词1", "关键词2" },
+            Preferences = new[] { "偏好1" }
         },
         new JsonSerializerOptions { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
 
         var lines = new List<string>
         {
             "你是购物助手。中文回复，简洁，直接干活。",
+            "风格:模仿一些拟人风格，比如：客官请稍等奴家这就为您找合适的产品",
             "用户名自动注入，不用传 username。",
             "",
             "可用工具：",
@@ -51,13 +48,14 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             "- update_cart_quantity(productId, quantity): **设置**精确数量（用户说只要X个时调用）",
             "- get_cart_summary(): 查看购物车",
             "- remove_from_cart(itemId): 从购物车移除商品",
+          "",
             "",
             "规则：",
-            "- 用户说搜索/想要 → 直接 search_product，不说话先",
+            "- 用户说搜索/想要 → 直接 search_product，不要先说话",
             "- 用户说加购物车/买个 → 直接 add_to_cart(productId, quantity)，不问确认",
             "- 用户说只要X个/改为X个 → 直接 update_cart_quantity，不问确认",
             "- **已执行过的工具调用不要重复执行**（已加购的商品不要再次加购）",
-            "- 执行完回复一句话，不要啰嗦，不加emoji，不重复清单",
+            "- 每次执行完工具后都必须回复一句话，不要沉默",
         };
 
         // 【回复规范】适用于所有模型
@@ -73,7 +71,8 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         lines.Add("   不要包含任何 Markdown 标记或额外的解释文本。");
         lines.Add("");
         lines.Add("【JSON 输出格式要求】");
-        lines.Add($"{outputSchemaJson}");
+        lines.Add($"回复必须使用以下 JSON 格式（工具调用时除外）：");
+        lines.Add($"{outputExampleJson}");
 
         lines.Add("");
         lines.Add("【商品关键词表（用于推荐栏）】");
@@ -88,10 +87,11 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     }
 
     public ShoppingAssistantAgent(IChatClient chatClient, IDbContextFactory<AppDbContext> dbFactory,
-        IProductCatalogService catalog, CartToolProvider cartTools, string model)
+        IProductCatalogService catalog, CartToolProvider cartTools, bool isOpenAI)
     {
-        _isOpenAI = IsOpenAIModel(model);
+        _isOpenAI = isOpenAI;
         var instructions = BuildInstructions(catalog);
+
 
         var tools = new List<AITool>();
 
@@ -130,10 +130,10 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             Description = "智能购物助手",
             HarnessInstructions = instructions,
             ChatOptions = chartOptions,
-            //ChatHistoryProvider = new SqliteChatHistoryProvider(dbFactory),
+            ChatHistoryProvider = new SqliteChatHistoryProvider(dbFactory),
 
             DisableCompaction = true,
-             MaximumIterationsPerRequest=3,// 限制每轮最大工具调用次数
+            MaximumIterationsPerRequest = 3,
               
 
             DisableToolAutoApproval = false,//DisableToolAutoApproval = false（即默认启用）。设 true 的话，所有工具都不走审批——包括那些本应审批的
@@ -200,6 +200,20 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
                 sw.ElapsedMilliseconds, sessionId);
 
             rawText = response.Text?.Trim();
+
+            // 兜底：模型（如 Qwen）在 FICC 循环后只调用工具未输出文本
+            if (string.IsNullOrEmpty(rawText))
+            {
+                var toolResults = response.Messages
+                    .Where(m => m.Role == ChatRole.Tool)
+                    .SelectMany(m => m.Contents.OfType<TextContent>())
+                    .Select(tc => tc.Text)
+                    .Where(t => !string.IsNullOrWhiteSpace(t))
+                    .ToList();
+
+                if (toolResults.Count > 0)
+                    rawText = toolResults[^1];
+            }
 
             if (!string.IsNullOrEmpty(rawText))
             {

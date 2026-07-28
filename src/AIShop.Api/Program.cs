@@ -9,9 +9,9 @@ using AIShop.Api.Middleware;
 using Microsoft.EntityFrameworkCore;
 using System.ClientModel;
 using System.ClientModel.Primitives;
-using Serilog;
-using OpenAI;
 using Microsoft.Extensions.AI;
+using OpenAI;
+using Serilog;
 using Scalar.AspNetCore;
 using AIShop.Api.Features.Mcp;
 using AIShop.ServiceDefaults;
@@ -39,38 +39,8 @@ try
     builder.Services.AddSwaggerGen();
     builder.Services.AddInfrastructure();
 
-    // Register OpenAI IChatClient
-    var openaiConfig = builder.Configuration.GetSection("OpenAI");
-    var endpoint = openaiConfig["Endpoint"]!;
-    var apiKey = openaiConfig["Key"]!;
-    var model = openaiConfig["Model"]!;
-
-    builder.Services.AddSingleton<IChatClient>(_ =>
-    {
-        // 统一路径：所有模型走同一管道
-        // ToolMessageFilterChatClient 已删除（CleanOrphanedToolCalls 在 Provider 中兜底）
-        // ResponseFormat 在 ShoppingAssistantAgent 中统一不加（keywords 由服务端提取）
-        var handler = new HttpClientHandler { UseProxy = false, Proxy = null };
-        var httpClient = new HttpClient(new DebugHandler(handler)) { Timeout = TimeSpan.FromSeconds(60*2) };
-        var clientOptions = new OpenAIClientOptions
-        {
-            Endpoint = new Uri(endpoint),
-            Transport = new HttpClientPipelineTransport(httpClient),
-        };
-        var client = new OpenAIClient(new ApiKeyCredential(apiKey), clientOptions);
-        return client.GetChatClient(model).AsIChatClient();
-    });
-
     // Register Agent definitions (Api/Agents/)
     builder.Services.AddScoped<SqliteChatHistoryProvider>();
-    builder.Services.AddSingleton<IShoppingAssistantAgent>(sp =>
-    {
-        var chatClient = sp.GetRequiredService<IChatClient>();
-        var dbFactory = sp.GetRequiredService<IDbContextFactory<AppDbContext>>();
-        var catalog = sp.GetRequiredService<IProductCatalogService>();
-        var cartTools = sp.GetRequiredService<CartToolProvider>();
-        return new ShoppingAssistantAgent(chatClient, dbFactory, catalog, cartTools, model);
-    });
     builder.Services.AddSingleton<CartToolProvider>();
     builder.Services.AddSingleton<ModelRouter>();
 
@@ -131,32 +101,7 @@ try
 
     app.MapGet("/", () => Results.Ok(new { Status = "AIShop API is running" }));
 
-    // Auto-open browser in development
-    if (app.Environment.IsDevelopment())
-    {
-#pragma warning disable S1075 // URI should not be hardcoded
-        var baseUrl = app.Urls.FirstOrDefault() ?? "http://localhost:5206";
-#pragma warning restore S1075
-        var url = baseUrl + "/index.html";
-        _ = Task.Run(async () =>
-        {
-            await Task.Delay(1500);
-            try
-            {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = url,
-                    UseShellExecute = true
-                });
-            }
-#pragma warning disable S2486, S108 // Ignore if browser not available
-            catch (Exception ex)
-#pragma warning restore S2486, S108
-            {
-                Log.Warning(ex, "Unable to auto-open browser");
-            }
-        });
-    }
+    // Auto-open browser in development（已注释，避免每次启动弹新标签 --fzf-0）
 
     await app.RunAsync();
 }
