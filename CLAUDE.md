@@ -101,3 +101,6 @@ curl -X POST http://localhost:5206/api/chat -H "Content-Type: application/json" 
 2. 显示当前 OpenSpec 变更（`cat openspec/.current-change`）
 3. 显示未完成的工单（`grep -E '\[ \]' openspec/changes/*/tasks.md | head -10`）
 ```
+
+## 原则
+  - 没有在得到明确指令前，不要擅自修改代码

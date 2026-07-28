@@ -2,11 +2,14 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using AIShop.Api.Agents;
 using AIShop.Api.Features.Chat;
+using AIShop.Core.Interfaces;
+using AIShop.Infrastructure.Data;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Agents.AI;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using NSubstitute;
+using Meai = Microsoft.Extensions.AI;
 
 namespace AIShop.Api.Tests;
 
@@ -16,30 +19,59 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
 
     public ChatEndpointsTests(WebApplicationFactory<Program> factory)
     {
-        _factory = factory.WithWebHostBuilder(builder =>
+        WebApplicationFactory<Program>? newFactory = null;
+
+        newFactory = factory.WithWebHostBuilder(builder =>
         {
             builder.ConfigureServices(services =>
             {
+                ReplaceWithIsolatedDb(services, Guid.NewGuid().ToString("N"));
                 services.RemoveAll<ModelRouter>();
 
+                // Mock IChatClient returns JSON text — the real ShoppingAssistantAgent
+                // pipeline (DeepSeekDelegatingChatClient → HarnessAgent →
+                // SqliteChatHistoryProvider) runs fully, so history is persisted.
+                var mockClient = Substitute.For<Meai.IChatClient>();
+                const string jsonReply = "{\"Reply\":\"模拟回复\",\"Keywords\":[\"跑步\"],\"Preferences\":[]}";
+                mockClient.GetResponseAsync(
+                        Arg.Any<IEnumerable<Meai.ChatMessage>>(),
+                        Arg.Any<Meai.ChatOptions?>(),
+                        Arg.Any<CancellationToken>())
+                    .Returns(new Meai.ChatResponse(
+                        new Meai.ChatMessage(Meai.ChatRole.Assistant, jsonReply)));
+
+                var pipeline = new DeepSeekDelegatingChatClient(mockClient, null, "qwen");
+                services.AddSingleton<Meai.IChatClient>(pipeline);
+
+                // Store reference to the factory so mock router lambdas can
+                // resolve services at request time (not during ConfigureServices).
+                var capturedFactory = newFactory!;
+
                 var mockRouter = Substitute.For<ModelRouter>();
-                var mockAgent = Substitute.For<IShoppingAssistantAgent>();
-                var fakeResult = new AgentChatResult("模拟回复", ["跑步"], null);
-                var fakeSession = new TestSession();
-                fakeSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
-
-                mockAgent.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
-                    .Returns((fakeResult, fakeSession));
-
                 mockRouter.ActiveModel.Returns("qwen");
                 mockRouter.GetAgent(Arg.Any<string>()).Returns(callInfo =>
                 {
                     var modelName = callInfo.Arg<string>();
                     if (modelName == "nonexistent")
                         throw new KeyNotFoundException("model not found");
-                    return mockAgent;
+
+                    // Agent created at request time from the fully-built SP —
+                    // avoids Serilog "already frozen" from BuildServiceProvider().
+                    var sp = capturedFactory.Services;
+                    return new ShoppingAssistantAgent(
+                        sp.GetRequiredService<Meai.IChatClient>(),
+                        sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        sp.GetRequiredService<IProductCatalogService>(),
+                        sp.GetRequiredService<CartToolProvider>(),
+                        isOpenAI: false);
                 });
-                mockRouter.GetDefaultAgent().Returns(mockAgent);
+                mockRouter.GetDefaultAgent().Returns(
+                    _ => new ShoppingAssistantAgent(
+                        capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
+                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        capturedFactory.Services.GetRequiredService<CartToolProvider>(),
+                        isOpenAI: false));
                 mockRouter.GetAvailableModels().Returns([
                     new ModelInfo("qwen", "Qwen 3.7", true),
                     new ModelInfo("gpt-4.1", "GPT 4.1", false),
@@ -49,16 +81,28 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                 services.AddSingleton(mockRouter);
             });
         });
+
+        _factory = newFactory;
+    }
+
+    /// <summary>Isolate the DB per test class instance to avoid cross-test pollution.</summary>
+    private static void ReplaceWithIsolatedDb(IServiceCollection services, string suffix)
+    {
+        services.RemoveAll<IDbContextFactory<AppDbContext>>();
+        services.RemoveAll<DbContextOptions<AppDbContext>>();
+        services.RemoveAll<AppDbContext>();
+
+        var connStr = $"Data Source=test_{suffix}.db";
+        services.AddDbContextFactory<AppDbContext>(options => options.UseSqlite(connStr));
+        services.AddScoped<AppDbContext>(sp =>
+            sp.GetRequiredService<IDbContextFactory<AppDbContext>>().CreateDbContext());
     }
 
     [Fact]
     public async Task Login_WithExistingUser_ReturnsOk()
     {
-        var client = _factory.CreateClient();
-
-        var response = await client.PostAsJsonAsync("/api/login",
-            new LoginRequest("marla"));
-
+        using var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/login", new LoginRequest("marla"));
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<LoginResponse>();
         Assert.NotNull(result);
@@ -69,35 +113,30 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     [Fact]
     public async Task Login_WithNonExistentUser_ReturnsNotFound()
     {
-        var client = _factory.CreateClient();
-
-        var response = await client.PostAsJsonAsync("/api/login",
-            new LoginRequest("nonexistent"));
-
+        using var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/login", new LoginRequest("nonexistent"));
         Assert.Equal(404, (int)response.StatusCode);
     }
 
     [Fact]
     public async Task Chat_WithValidUser_ReturnsReply()
     {
-        var client = _factory.CreateClient();
-
-        var response = await client.PostAsJsonAsync("/api/chat",
-            new ChatRequest("marla", "Hello"));
-
+        using var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "Hello"));
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<ChatReply>();
         Assert.NotNull(result);
-        Assert.Equal("模拟回复", result!.Response);
+        Assert.Contains("模拟回复", result!.Response);
     }
 
     [Fact]
     public async Task Chat_MessageGetsSavedToDb()
     {
-        var client = _factory.CreateClient();
+        using var client = _factory.CreateClient();
         await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "测试保存"));
 
-        var login = await client.PostAsJsonAsync("/api/login", new LoginRequest("marla"));
+        using var loginClient = _factory.CreateClient();
+        var login = await loginClient.PostAsJsonAsync("/api/login", new LoginRequest("marla"));
         var profile = await login.Content.ReadFromJsonAsync<LoginResponse>();
         Assert.NotNull(profile);
         Assert.Contains(profile!.History, m => m.Content == "测试保存" && m.Role == "user");
@@ -106,11 +145,8 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     [Fact]
     public async Task Chat_WithValidKeywords_HasRecommendation()
     {
-        var client = _factory.CreateClient();
-
-        var response = await client.PostAsJsonAsync("/api/chat",
-            new ChatRequest("marla", "推荐跑步鞋"));
-
+        using var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐跑步鞋"));
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<ChatReply>();
         Assert.NotNull(result);
@@ -121,8 +157,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     [Fact]
     public async Task GetProducts_ReturnsAll()
     {
-        var client = _factory.CreateClient();
-
+        using var client = _factory.CreateClient();
         var response = await client.GetAsync("/api/products");
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<ProductsResponse>();
@@ -133,12 +168,11 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     [Fact]
     public async Task Recommendations_ReturnsResults()
     {
-        var client = _factory.CreateClient();
+        using var client = _factory.CreateClient();
         await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐跑步"));
 
         var response = await client.PostAsJsonAsync("/api/recommendations",
             new RecommendationRequest("marla", "keymatch"));
-
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<RecommendationResponse>();
         Assert.NotNull(result);
@@ -149,10 +183,11 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     [Fact]
     public async Task Login_ReturnsSessionWithExistingHistory()
     {
-        var client = _factory.CreateClient();
+        using var client = _factory.CreateClient();
         await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "第一条"));
 
-        var login = await client.PostAsJsonAsync("/api/login", new LoginRequest("marla"));
+        using var loginClient = _factory.CreateClient();
+        var login = await loginClient.PostAsJsonAsync("/api/login", new LoginRequest("marla"));
         var profile = await login.Content.ReadFromJsonAsync<LoginResponse>();
         Assert.NotNull(profile);
         var history = profile!.History;
@@ -163,11 +198,12 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     [Fact]
     public async Task Agent_ShouldPreserveLast3Turns()
     {
-        var client = _factory.CreateClient();
+        using var client = _factory.CreateClient();
         for (int i = 1; i <= 4; i++)
             await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", $"消息{i}"));
 
-        var login = await client.PostAsJsonAsync("/api/login", new LoginRequest("marla"));
+        using var loginClient = _factory.CreateClient();
+        var login = await loginClient.PostAsJsonAsync("/api/login", new LoginRequest("marla"));
         var profile = await login.Content.ReadFromJsonAsync<LoginResponse>();
         Assert.NotNull(profile);
         var userMsgs = profile!.History.Where(m => m.Role == "user").ToList();
@@ -180,25 +216,46 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     public async Task Recommendations_SecondRequest_ReturnsCachedResult()
     {
         var callCount = 0;
-        var factory = _factory.WithWebHostBuilder(builder =>
+        WebApplicationFactory<Program>? f = null;
+        f = _factory.WithWebHostBuilder(builder =>
         {
             builder.ConfigureServices(services =>
             {
+                ReplaceWithIsolatedDb(services, Guid.NewGuid().ToString("N"));
                 services.RemoveAll<ModelRouter>();
+
+                var mockClient = Substitute.For<Meai.IChatClient>();
+                const string json = "{\"Reply\":\"模拟推荐\",\"Keywords\":[\"运动\"],\"Preferences\":[]}";
+                mockClient.GetResponseAsync(
+                        Arg.Any<IEnumerable<Meai.ChatMessage>>(),
+                        Arg.Any<Meai.ChatOptions?>(),
+                        Arg.Any<CancellationToken>())
+                    .Returns(_ => { callCount++; return new Meai.ChatResponse(new Meai.ChatMessage(Meai.ChatRole.Assistant, json)); });
+
+                var pipeline = new DeepSeekDelegatingChatClient(mockClient, null, "qwen");
+                services.AddSingleton<Meai.IChatClient>(pipeline);
+
+                var capturedFactory = f!;
                 var mockRouter = Substitute.For<ModelRouter>();
-                var mock = Substitute.For<IShoppingAssistantAgent>();
-                var fakeResult = new AgentChatResult("模拟推荐", ["运动"], null);
-                var fakeSession = new TestSession();
-                fakeSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
-                mock.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
-                    .Returns(_ => { callCount++; return (fakeResult, fakeSession); });
-                mockRouter.GetAgent(Arg.Any<string>()).Returns(mock);
-                mockRouter.GetDefaultAgent().Returns(mock);
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(
+                    _ => new ShoppingAssistantAgent(
+                        capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
+                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        capturedFactory.Services.GetRequiredService<CartToolProvider>(),
+                        isOpenAI: false));
+                mockRouter.GetDefaultAgent().Returns(
+                    _ => new ShoppingAssistantAgent(
+                        capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
+                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        capturedFactory.Services.GetRequiredService<CartToolProvider>(),
+                        isOpenAI: false));
                 mockRouter.ActiveModel.Returns("qwen");
                 services.AddSingleton(mockRouter);
             });
         });
-        var client = factory.CreateClient();
+        using var client = f.CreateClient();
         await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐运动"));
         var resp1 = await client.PostAsJsonAsync("/api/recommendations",
             new RecommendationRequest("marla", "keymatch"));
@@ -217,25 +274,46 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     public async Task Recommendations_NewMessage_InvalidatesCache()
     {
         var callCount = 0;
-        var factory = _factory.WithWebHostBuilder(builder =>
+        WebApplicationFactory<Program>? f = null;
+        f = _factory.WithWebHostBuilder(builder =>
         {
             builder.ConfigureServices(services =>
             {
+                ReplaceWithIsolatedDb(services, Guid.NewGuid().ToString("N"));
                 services.RemoveAll<ModelRouter>();
+
+                var mockClient = Substitute.For<Meai.IChatClient>();
+                const string json = "{\"Reply\":\"推荐\",\"Keywords\":[\"运动\"],\"Preferences\":[]}";
+                mockClient.GetResponseAsync(
+                        Arg.Any<IEnumerable<Meai.ChatMessage>>(),
+                        Arg.Any<Meai.ChatOptions?>(),
+                        Arg.Any<CancellationToken>())
+                    .Returns(_ => { callCount++; return new Meai.ChatResponse(new Meai.ChatMessage(Meai.ChatRole.Assistant, json)); });
+
+                var pipeline = new DeepSeekDelegatingChatClient(mockClient, null, "qwen");
+                services.AddSingleton<Meai.IChatClient>(pipeline);
+
+                var capturedFactory = f!;
                 var mockRouter = Substitute.For<ModelRouter>();
-                var mock = Substitute.For<IShoppingAssistantAgent>();
-                var fakeResult = new AgentChatResult("推荐", ["运动"], null);
-                var fakeSession = new TestSession();
-                fakeSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
-                mock.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
-                    .Returns(_ => { callCount++; return (fakeResult, fakeSession); });
-                mockRouter.GetAgent(Arg.Any<string>()).Returns(mock);
-                mockRouter.GetDefaultAgent().Returns(mock);
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(
+                    _ => new ShoppingAssistantAgent(
+                        capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
+                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        capturedFactory.Services.GetRequiredService<CartToolProvider>(),
+                        isOpenAI: false));
+                mockRouter.GetDefaultAgent().Returns(
+                    _ => new ShoppingAssistantAgent(
+                        capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
+                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        capturedFactory.Services.GetRequiredService<CartToolProvider>(),
+                        isOpenAI: false));
                 mockRouter.ActiveModel.Returns("qwen");
                 services.AddSingleton(mockRouter);
             });
         });
-        var client = factory.CreateClient();
+        using var client = f.CreateClient();
         await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐运动鞋"));
         await client.PostAsJsonAsync("/api/recommendations",
             new RecommendationRequest("marla", "keymatch"));
@@ -243,8 +321,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐耳机"));
         await client.PostAsJsonAsync("/api/recommendations",
             new RecommendationRequest("marla", "keymatch"));
-        Assert.True(callCount > firstCalls,
-            "新消息应使缓存失效，导致 Agent 重新被调用");
+        Assert.True(callCount > firstCalls, "新消息应使缓存失效，导致 Agent 重新被调用");
     }
 
     // ============ Multi-Model Tests ============
@@ -252,25 +329,17 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     [Fact]
     public async Task GetModels_ReturnsModelInfoWithCorrectFields()
     {
-        var client = _factory.CreateClient();
+        using var client = _factory.CreateClient();
         var response = await client.GetAsync("/api/models");
-
-        // 验证响应 200
         response.EnsureSuccessStatusCode();
-
-        // 验证可反序列化为 List<ModelInfo>
         var models = await response.Content.ReadFromJsonAsync<List<ModelInfo>>();
         Assert.NotNull(models);
         Assert.NotEmpty(models);
-
-        // 验证每个元素有 id/name/isDefault 字段
         foreach (var model in models!)
         {
             Assert.False(string.IsNullOrWhiteSpace(model.Id), "Id 不应为空");
             Assert.False(string.IsNullOrWhiteSpace(model.Name), "Name 不应为空");
         }
-
-        // 验证 JSON 不包含 Key/Endpoint 等敏感字段
         var json = await response.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(json);
         foreach (var element in doc.RootElement.EnumerateArray())
@@ -280,8 +349,6 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
             Assert.False(element.TryGetProperty("endpoint", out _), "应不包含 endpoint 字段");
             Assert.False(element.TryGetProperty("Endpoint", out _), "应不包含 Endpoint 字段");
         }
-
-        // 验证 isDefault: true 的模型与 ActiveModel 配置一致
         var defaultModels = models!.Where(m => m.IsDefault).ToList();
         Assert.Single(defaultModels);
         Assert.Equal("qwen", defaultModels[0].Id);
@@ -290,7 +357,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     [Fact]
     public async Task GetModels_ReturnsAvailableModels()
     {
-        var client = _factory.CreateClient();
+        using var client = _factory.CreateClient();
         var response = await client.GetAsync("/api/models");
         response.EnsureSuccessStatusCode();
         var models = await response.Content.ReadFromJsonAsync<List<ModelInfo>>();
@@ -301,12 +368,10 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     [Fact]
     public async Task Chat_WithNonExistentModel_ReturnsBadRequest()
     {
-        var client = _factory.CreateClient();
+        using var client = _factory.CreateClient();
         var response = await client.PostAsJsonAsync("/api/chat",
             new ChatRequest("marla", "Hello", "nonexistent"));
         Assert.Equal(400, (int)response.StatusCode);
-
-        // 验证错误信息包含"不支持的模型"
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("不支持的模型", body.GetProperty("detail").GetString());
     }
@@ -314,23 +379,19 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     [Fact]
     public async Task Login_ResponseContainsModels()
     {
-        var client = _factory.CreateClient();
+        using var client = _factory.CreateClient();
 
-        // Act: POST /api/login
-        var loginResponse = await client.PostAsJsonAsync("/api/login",
-            new LoginRequest("marla"));
+        var loginResponse = await client.PostAsJsonAsync("/api/login", new LoginRequest("marla"));
         var loginResult = await loginResponse.Content.ReadFromJsonAsync<LoginResponse>();
         Assert.NotNull(loginResult);
         Assert.NotNull(loginResult!.Models);
         Assert.NotEmpty(loginResult.Models);
 
-        // Act: GET /api/models
         var modelsResponse = await client.GetAsync("/api/models");
         modelsResponse.EnsureSuccessStatusCode();
         var modelsList = await modelsResponse.Content.ReadFromJsonAsync<List<ModelInfo>>();
         Assert.NotNull(modelsList);
 
-        // Assert: login response models match GET /api/models (count, id, name)
         Assert.Equal(modelsList!.Count, loginResult.Models.Count);
         foreach (var expected in modelsList)
         {
@@ -344,47 +405,58 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     public async Task Chat_WithoutModel_UsesDefaultModel()
     {
         string? usedModel = null;
-        var factory = _factory.WithWebHostBuilder(builder =>
+        WebApplicationFactory<Program>? f = null;
+        f = _factory.WithWebHostBuilder(builder =>
         {
             builder.ConfigureServices(services =>
             {
+                ReplaceWithIsolatedDb(services, Guid.NewGuid().ToString("N"));
                 services.RemoveAll<ModelRouter>();
 
+                var mockClient = Substitute.For<Meai.IChatClient>();
+                const string json = "{\"Reply\":\"默认模型回复\",\"Keywords\":[\"测试\"],\"Preferences\":[]}";
+                mockClient.GetResponseAsync(
+                        Arg.Any<IEnumerable<Meai.ChatMessage>>(),
+                        Arg.Any<Meai.ChatOptions?>(),
+                        Arg.Any<CancellationToken>())
+                    .Returns(new Meai.ChatResponse(new Meai.ChatMessage(Meai.ChatRole.Assistant, json)));
+
+                var pipeline = new DeepSeekDelegatingChatClient(mockClient, null, "qwen");
+                services.AddSingleton<Meai.IChatClient>(pipeline);
+
+                var capturedFactory = f!;
                 var mockRouter = Substitute.For<ModelRouter>();
-                var mockAgent = Substitute.For<IShoppingAssistantAgent>();
-                var fakeResult = new AgentChatResult("默认模型回复", ["测试"], null);
-                var fakeSession = new TestSession();
-                fakeSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
-
-                mockAgent.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
-                    .Returns((fakeResult, fakeSession));
-
                 mockRouter.GetAgent(Arg.Any<string>()).Returns(callInfo =>
                 {
                     usedModel = callInfo.Arg<string>();
-                    return mockAgent;
+                    return new ShoppingAssistantAgent(
+                        capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
+                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        capturedFactory.Services.GetRequiredService<CartToolProvider>(),
+                        isOpenAI: false);
                 });
-                mockRouter.GetDefaultAgent().Returns(mockAgent);
+                mockRouter.GetDefaultAgent().Returns(
+                    _ => new ShoppingAssistantAgent(
+                        capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
+                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        capturedFactory.Services.GetRequiredService<CartToolProvider>(),
+                        isOpenAI: false));
                 mockRouter.ActiveModel.Returns("qwen");
                 mockRouter.GetAvailableModels().Returns([
                     new ModelInfo("qwen", "Qwen 3.7", true),
                 ]);
-
                 services.AddSingleton(mockRouter);
             });
         });
-        var client = factory.CreateClient();
-
-        // Act: send chat request without model parameter
+        using var client = f.CreateClient();
         var response = await client.PostAsJsonAsync("/api/chat",
             new ChatRequest("marla", "测试默认模型路由"));
-
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<ChatReply>();
         Assert.NotNull(result);
-        Assert.Equal("默认模型回复", result!.Response);
-
-        // Assert: routed through ActiveModel = "qwen"
+        Assert.Contains("默认模型回复", result!.Response);
         Assert.Equal("qwen", usedModel);
     }
 
@@ -392,124 +464,152 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     public async Task Chat_WithModelParameter_RoutesToCorrectAgent()
     {
         string? usedModel = null;
-        var factory = _factory.WithWebHostBuilder(builder =>
+        WebApplicationFactory<Program>? f = null;
+        f = _factory.WithWebHostBuilder(builder =>
         {
             builder.ConfigureServices(services =>
             {
+                ReplaceWithIsolatedDb(services, Guid.NewGuid().ToString("N"));
                 services.RemoveAll<ModelRouter>();
 
+                var mockClient = Substitute.For<Meai.IChatClient>();
+                const string json = "{\"Reply\":\"GPT-4.1 推荐跑鞋\",\"Keywords\":[\"跑步\"],\"Preferences\":[]}";
+                mockClient.GetResponseAsync(
+                        Arg.Any<IEnumerable<Meai.ChatMessage>>(),
+                        Arg.Any<Meai.ChatOptions?>(),
+                        Arg.Any<CancellationToken>())
+                    .Returns(new Meai.ChatResponse(new Meai.ChatMessage(Meai.ChatRole.Assistant, json)));
+
+                var pipeline = new DeepSeekDelegatingChatClient(mockClient, null, "qwen");
+                services.AddSingleton<Meai.IChatClient>(pipeline);
+
+                var capturedFactory = f!;
                 var mockRouter = Substitute.For<ModelRouter>();
-                var mockAgent = Substitute.For<IShoppingAssistantAgent>();
-                var fakeResult = new AgentChatResult("GPT-4.1 推荐跑鞋", ["跑步"], null);
-                var fakeSession = new TestSession();
-                fakeSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
-
-                mockAgent.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
-                    .Returns((fakeResult, fakeSession));
-
                 mockRouter.GetAgent(Arg.Any<string>()).Returns(callInfo =>
                 {
                     usedModel = callInfo.Arg<string>();
-                    return mockAgent;
+                    return new ShoppingAssistantAgent(
+                        capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
+                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        capturedFactory.Services.GetRequiredService<CartToolProvider>(),
+                        isOpenAI: false);
                 });
-                mockRouter.GetDefaultAgent().Returns(mockAgent);
+                mockRouter.GetDefaultAgent().Returns(
+                    _ => new ShoppingAssistantAgent(
+                        capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
+                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        capturedFactory.Services.GetRequiredService<CartToolProvider>(),
+                        isOpenAI: false));
                 mockRouter.ActiveModel.Returns("qwen");
                 mockRouter.GetAvailableModels().Returns([
                     new ModelInfo("qwen", "Qwen 3.7", true),
                     new ModelInfo("gpt-4.1", "GPT 4.1", false),
                 ]);
-
                 services.AddSingleton(mockRouter);
             });
         });
-        var client = factory.CreateClient();
-
-        // Act: send chat request with model="gpt-4.1"
+        using var client = f.CreateClient();
         var response = await client.PostAsJsonAsync("/api/chat",
             new ChatRequest("marla", "推荐跑鞋", "gpt-4.1"));
-
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<ChatReply>();
         Assert.NotNull(result);
-        Assert.Equal("GPT-4.1 推荐跑鞋", result!.Response);
-
-        // Assert: routed to gpt-4.1 agent
+        Assert.Contains("GPT-4.1 推荐跑鞋", result!.Response);
         Assert.Equal("gpt-4.1", usedModel);
     }
 
     [Fact]
     public async Task History_IsPreserved_WhenSwitchingModels()
     {
-        // Arrange: create mock router with two separate agents
-        var qwenResult = new AgentChatResult("这是 Qwen 回复", ["测试"], null);
-        var gptResult = new AgentChatResult("这是 GPT 回复", ["测试"], null);
-        var qwenSession = new TestSession();
-        var gptSession = new TestSession();
-        qwenSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
-        gptSession.StateBag.SetValue("SessionId", Guid.NewGuid().ToString());
-
-
-        var mockQwenAgent = Substitute.For<IShoppingAssistantAgent>();
-        mockQwenAgent.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns((qwenResult, qwenSession));
-
-        var mockGptAgent = Substitute.For<IShoppingAssistantAgent>();
-        mockGptAgent.RunChatAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns((gptResult, gptSession));
-
-        var factory = _factory.WithWebHostBuilder(builder =>
+        WebApplicationFactory<Program>? f = null;
+        f = _factory.WithWebHostBuilder(builder =>
         {
             builder.ConfigureServices(services =>
             {
+                ReplaceWithIsolatedDb(services, Guid.NewGuid().ToString("N"));
                 services.RemoveAll<ModelRouter>();
 
+                // Qwen pipeline — mock IChatClient returning "这是 Qwen 回复"
+                var qwenClient = Substitute.For<Meai.IChatClient>();
+                const string qwenJson = "{\"Reply\":\"这是 Qwen 回复\",\"Keywords\":[\"测试\"],\"Preferences\":[]}";
+                qwenClient.GetResponseAsync(
+                        Arg.Any<IEnumerable<Meai.ChatMessage>>(),
+                        Arg.Any<Meai.ChatOptions?>(),
+                        Arg.Any<CancellationToken>())
+                    .Returns(new Meai.ChatResponse(new Meai.ChatMessage(Meai.ChatRole.Assistant, qwenJson)));
+                var qwenPipe = new DeepSeekDelegatingChatClient(qwenClient, null, "qwen");
+
+                // GPT pipeline — mock IChatClient returning "这是 GPT 回复"
+                var gptClient = Substitute.For<Meai.IChatClient>();
+                const string gptJson = "{\"Reply\":\"这是 GPT 回复\",\"Keywords\":[\"测试\"],\"Preferences\":[]}";
+                gptClient.GetResponseAsync(
+                        Arg.Any<IEnumerable<Meai.ChatMessage>>(),
+                        Arg.Any<Meai.ChatOptions?>(),
+                        Arg.Any<CancellationToken>())
+                    .Returns(new Meai.ChatResponse(new Meai.ChatMessage(Meai.ChatRole.Assistant, gptJson)));
+                var gptPipe = new DeepSeekDelegatingChatClient(gptClient, null, "gpt-4.1");
+
+                // Register both pipelines as keyed singletons
+                services.AddKeyedSingleton<Meai.IChatClient>("qwen", qwenPipe);
+                services.AddKeyedSingleton<Meai.IChatClient>("gpt-4.1", gptPipe);
+
+                var capturedFactory = f!;
                 var mockRouter = Substitute.For<ModelRouter>();
-                mockRouter.GetAgent("qwen").Returns(mockQwenAgent);
-                mockRouter.GetAgent("gpt-4.1").Returns(mockGptAgent);
-                mockRouter.GetDefaultAgent().Returns(mockQwenAgent);
+                mockRouter.GetAgent("qwen").Returns(
+                    _ => new ShoppingAssistantAgent(
+                        capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("qwen"),
+                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        capturedFactory.Services.GetRequiredService<CartToolProvider>(),
+                        isOpenAI: false));
+                mockRouter.GetAgent("gpt-4.1").Returns(
+                    _ => new ShoppingAssistantAgent(
+                        capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("gpt-4.1"),
+                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        capturedFactory.Services.GetRequiredService<CartToolProvider>(),
+                        isOpenAI: false));
+                mockRouter.GetDefaultAgent().Returns(
+                    _ => new ShoppingAssistantAgent(
+                        capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("qwen"),
+                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        capturedFactory.Services.GetRequiredService<CartToolProvider>(),
+                        isOpenAI: false));
                 mockRouter.ActiveModel.Returns("qwen");
                 mockRouter.GetAvailableModels().Returns([
                     new ModelInfo("qwen", "Qwen 3.7", true),
                     new ModelInfo("gpt-4.1", "GPT 4.1", false),
                 ]);
-
                 services.AddSingleton(mockRouter);
             });
         });
-        var client = factory.CreateClient();
+        using var client = f.CreateClient();
 
-        // Act 1: send chat with model="qwen"
         var resp1 = await client.PostAsJsonAsync("/api/chat",
             new ChatRequest("marla", "Qwen 帮我推荐跑鞋", "qwen"));
         resp1.EnsureSuccessStatusCode();
 
-        // Act 2: send chat with model="gpt-4.1" (same user → same sessionId)
         var resp2 = await client.PostAsJsonAsync("/api/chat",
             new ChatRequest("marla", "GPT 推荐耳机", "gpt-4.1"));
         resp2.EnsureSuccessStatusCode();
 
-        // Act 3: login to get full history
-        var loginResponse = await client.PostAsJsonAsync("/api/login",
-            new LoginRequest("marla"));
+        using var loginClient = f.CreateClient();
+        var loginResponse = await loginClient.PostAsJsonAsync("/api/login", new LoginRequest("marla"));
         loginResponse.EnsureSuccessStatusCode();
         var profile = await loginResponse.Content.ReadFromJsonAsync<LoginResponse>();
         Assert.NotNull(profile);
 
-        // Assert: history contains user messages from both conversations
         var userMsgs = profile!.History.Where(m => m.Role == "user").ToList();
         Assert.Contains(userMsgs, m => m.Content == "Qwen 帮我推荐跑鞋");
         Assert.Contains(userMsgs, m => m.Content == "GPT 推荐耳机");
 
-        // Assert: history contains assistant responses from both conversations
         var assistantMsgs = profile.History.Where(m => m.Role == "assistant").ToList();
         Assert.Contains(assistantMsgs, m => m.Content == "这是 Qwen 回复");
         Assert.Contains(assistantMsgs, m => m.Content == "这是 GPT 回复");
     }
 
     private sealed record ProductsResponse(ProductDto[] products);
-
-    private sealed class TestSession : AgentSession
-    {
-        public TestSession() : base(new AgentSessionStateBag()) { }
-    }
 }

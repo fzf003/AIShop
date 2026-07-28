@@ -182,11 +182,11 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
 
         using (var ctx = await _dbFactory.CreateDbContextAsync())
         {
-            // 55 种子 + 2 新增 = 57 → 物理删除 5，保留 52
-            var count = await ctx.ChatMessageRecords
-                .Where(m => m.SessionId == _sessionId)
+            // 55 种子 + 2 新增 = 57，标记压缩后 is_compacted=0 应为 50
+            var uncompacted = await ctx.ChatMessageRecords
+                .Where(m => m.SessionId == _sessionId && !m.IsCompacted)
                 .CountAsync();
-            Assert.Equal(52, count);
+            Assert.Equal(50, uncompacted);
         }
     }
 
@@ -199,12 +199,11 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
 
         using (var ctx = await _dbFactory.CreateDbContextAsync())
         {
-            // 60 种子 + 2 新增 = 62 → 物理删除 10，保留 52
-            // 新增的 2 条始终保留，种子部分保留最新 50 条，共 52
-            var count = await ctx.ChatMessageRecords
-                .Where(m => m.SessionId == _sessionId)
+            // 60 种子 + 2 新增 = 62，标记压缩后 is_compacted=0 应为 50
+            var uncompacted = await ctx.ChatMessageRecords
+                .Where(m => m.SessionId == _sessionId && !m.IsCompacted)
                 .CountAsync();
-            Assert.Equal(52, count);
+            Assert.Equal(50, uncompacted);
         }
     }
 
