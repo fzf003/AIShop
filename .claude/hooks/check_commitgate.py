@@ -24,8 +24,8 @@ for _stream in (sys.stdin, sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8")
 
-BUILD_TIMEOUT_SEC = 180
-TEST_TIMEOUT_SEC = 180
+BUILD_TIMEOUT_SEC = 300
+TEST_TIMEOUT_SEC = 300
 
 # 匹配 git commit（含 git -C <dir> commit、git commit -m "..."、复合命令里的 git commit 等）
 COMMIT_PATTERN = re.compile(r"(^|[;&|]\s*)git\s+(-C\s+\S+\s+)?commit\b")

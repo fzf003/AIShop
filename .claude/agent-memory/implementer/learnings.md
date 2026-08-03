@@ -15,6 +15,8 @@
 
 - Windows 环境下 dotnet build 可能因后台进程锁定 DLL 文件而失败（MSB3026），需先 taskkill 相关 dotnet 进程再重试
 - 关闭弹窗/重置状态的函数中，除了重置 JS 状态变量，还必须清空相关 DOM 元素的 innerHTML，否则下次打开时会出现残留内容
+- MAF 1.16.0 相比 1.13.0 的 HarnessAgentOptions API 破坏：移除了 `DisableFileAccess`（无替代）；`DisableNonApprovalRequiredFunctionBypassing` 改名为 `DisableApprovalNotRequiredFunctionBypassing`
+- PreToolUse commit gate hook（.claude/hooks/check_commitgate.py）在 commit 前强制跑 `dotnet build` + `dotnet test`（各 180s 超时），超时后 Python subprocess 不会杀子进程，会遗留持有 bin/obj 锁的孤儿 MSBuild 进程，使后续 build/test 越跑越慢甚至卡死；commit 被 BLOCK 后必须先清理孤儿 dotnet/MSBuild 进程再重试，热缓存建立后重试才可能通过
 
 ## 项目结构笔记
 
