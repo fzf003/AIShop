@@ -104,3 +104,4 @@ curl -X POST http://localhost:5206/api/chat -H "Content-Type: application/json" 
 
 ## 原则
   - 没有在得到明确指令前，不要擅自修改代码
+  - 删除文件时要明确文件，并询问是否可以删除，不能随意顺手删除，重要的文件删除之前先备份
