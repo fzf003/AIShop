@@ -139,11 +139,10 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             DisableToolAutoApproval = false,//DisableToolAutoApproval = false（即默认启用）。设 true 的话，所有工具都不走审批——包括那些本应审批的
             DisableWebSearch = true,
             DisableFileMemory = true,
-            DisableFileAccess = true,
             DisableTodoProvider = true,
             DisableAgentSkillsProvider = true,
             DisableAgentModeProvider = true,
-            DisableNonApprovalRequiredFunctionBypassing = false,
+            DisableApprovalNotRequiredFunctionBypassing = false,
      
             AIContextProviders = [new PreferenceMemoryProvider()]
         };
