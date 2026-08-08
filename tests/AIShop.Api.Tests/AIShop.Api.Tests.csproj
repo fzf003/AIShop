@@ -26,6 +26,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\AIShop.Api\AIShop.Api.csproj" />
+    <ProjectReference Include="..\..\src\AIShop.AgentTelemetry\AIShop.AgentTelemetry.csproj" />
   </ItemGroup>
 
 </Project>
