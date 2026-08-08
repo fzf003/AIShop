@@ -280,12 +280,12 @@ public sealed class AgentTelemetryTests : IDisposable
         };
 
         // Act：debug=true 配置出的 EnrichWith 回调，直接以 (Activity, 消息) 调用
+        //（ConfigureDebugTelemetry 只设回调、不注册 processor，可在 options 闭包内安全调用）
         var httpOptions = new HttpClientTraceInstrumentationOptions();
         AgentTelemetryHelper.ConfigureDebugTelemetry(
             Sdk.CreateTracerProviderBuilder(),
             debug: true,
-            httpOptions,
-            _tempDir);
+            httpOptions);
         httpOptions.EnrichWithHttpRequestMessage!(activity, request);
         httpOptions.EnrichWithHttpResponseMessage!(activity, response);
 
@@ -302,15 +302,14 @@ public sealed class AgentTelemetryTests : IDisposable
     [Fact]
     public void ShouldNotConfigureEnrichCallbacks_WhenDebugFalse()
     {
-        // debug=false（默认）：ConfigureDebugTelemetry 直接返回，不设置 EnrichWith 回调、不注册 processor。
+        // debug=false（默认）：ConfigureDebugTelemetry 直接返回，不设置 EnrichWith 回调。
         // 因方法体对 builder 零触碰，直接传 Sdk builder（不 Build）即可；httpOptions 作为回调持有点是断言对象
         var httpOptions = new HttpClientTraceInstrumentationOptions();
 
         AgentTelemetryHelper.ConfigureDebugTelemetry(
             Sdk.CreateTracerProviderBuilder(),
             debug: false,
-            httpOptions,
-            _tempDir);
+            httpOptions);
 
         Assert.Null(httpOptions.EnrichWithHttpRequestMessage);
         Assert.Null(httpOptions.EnrichWithHttpResponseMessage);
@@ -321,15 +320,14 @@ public sealed class AgentTelemetryTests : IDisposable
     public void ShouldNotCreateAnyFile_WhenDebugFalseAndSpanExported()
     {
         // debug=false 零配置路径：即便 TracerProvider 上存在其他 processor，
-        // ConfigureDebugTelemetry 也不注册 FileSpanExporter —— 配置目录不产生 traces_*.log 落盘
+        // AddFileSpanExporter 也不注册 FileSpanExporter —— 配置目录不产生 traces_*.log 落盘
         //（EnrichWith 为 null 是对「零配置」的决定性断言；本测试验证无本地日志副作用）
         var builder = Sdk.CreateTracerProviderBuilder()
             .AddSource("AIShop.AgentTelemetryTests")
             .AddProcessor(new NoopActivityProcessor());
-        AgentTelemetryHelper.ConfigureDebugTelemetry(
+        AgentTelemetryHelper.AddFileSpanExporter(
             builder,
             debug: false,
-            new HttpClientTraceInstrumentationOptions(),
             _tempDir);
 
         using var provider = builder.Build();

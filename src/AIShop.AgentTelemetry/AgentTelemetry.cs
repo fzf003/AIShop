@@ -45,29 +45,32 @@ public static class AgentTelemetry
     }
 
     /// <summary>
-    /// DebugTelemetry 扩展：按 <paramref name="debug"/> 开关配置 HTTP 层调试遥测。
+    /// DebugTelemetry 扩展：按 <paramref name="debug"/> 开关给 HTTP 层配置 EnrichWith 回调。
     /// <see langword="true"/> 时给 <see cref="HttpClientTraceInstrumentationOptions"/> 配置
     /// <see cref="HttpClientTraceInstrumentationOptions.EnrichWithHttpRequestMessage"/> /
     /// <see cref="HttpClientTraceInstrumentationOptions.EnrichWithHttpResponseMessage"/> 回调，
-    /// 抓 <c>System.Net.Http.HttpRequestOut</c> span 的请求/响应 headers 与 body，并注册
-    /// <see cref="SimpleActivityExportProcessor"/> + <see cref="FileSpanExporter"/> 写本地 <c>traces_*.log</c>。
+    /// 抓 <c>System.Net.Http.HttpRequestOut</c> span 的请求/响应 headers 与 body。
     /// body 含敏感信息（Authorization / API key），仅写本地文件，不进 OTLP / Aspire Dashboard。
-    /// <see langword="false"/>（默认）时直接返回：不设置任何回调、不注册 processor，无额外开销。
+    /// <see langword="false"/>（默认）时直接返回：不设置任何回调，无额外开销。
+    ///
+    /// 注意：本方法<b>只设置 EnrichWith 回调，不注册导出 processor</b>——它设计为在
+    /// <c>AddHttpClientInstrumentation</c> 的 options 配置闭包内调用，该闭包在 TracerProvider
+    /// 构造期间执行，此时调用 <c>builder.AddProcessor</c> 会抛
+    /// <see cref="NotSupportedException"/>（"Builder cannot be configured during TracerProvider construction"）。
+    /// processor 注册须经 <see cref="AddFileSpanExporter"/> 在 DI 服务注册层（<c>ConfigureOpenTelemetryTracerProvider</c>）完成。
     /// </summary>
-    /// <param name="builder"><c>WithTracing</c> 的 <c>tracing</c>（<see cref="TracerProviderBuilder"/>），用于注册导出 processor。</param>
+    /// <param name="builder"><c>WithTracing</c> 的 <c>tracing</c>（<see cref="TracerProviderBuilder"/>），仅链式透传。</param>
     /// <param name="debug">调试开关；<see langword="false"/> 时零配置返回。</param>
     /// <param name="httpOptions"><c>AddHttpClientInstrumentation</c> 的 options，用于配置 EnrichWith 回调。</param>
-    /// <param name="directory">本地日志目录；<see langword="null"/> 时用 <see cref="AppContext.BaseDirectory"/>。</param>
     /// <returns>原 <paramref name="builder"/>，便于链式调用。</returns>
     public static TracerProviderBuilder ConfigureDebugTelemetry(
         this TracerProviderBuilder builder,
         bool debug,
-        HttpClientTraceInstrumentationOptions httpOptions,
-        string? directory = null)
+        HttpClientTraceInstrumentationOptions httpOptions)
     {
         if (!debug)
         {
-            return builder;   // Debug 关闭：零配置，不设置 EnrichWith 回调、不注册 FileSpanExporter，无额外 body 读取开销
+            return builder;   // Debug 关闭：零配置，不设置 EnrichWith 回调，无额外 body 读取开销
         }
 
         httpOptions.EnrichWithHttpRequestMessage = (activity, request) =>
@@ -89,6 +92,36 @@ public static class AgentTelemetry
                 activity.SetTag("http.response.content.body", response.Content.ReadAsStringAsync().GetAwaiter().GetResult());
             }
         };
+
+        return builder;
+    }
+
+    /// <summary>
+    /// DebugTelemetry 扩展：按 <paramref name="debug"/> 开关注册本地文件导出 processor。
+    /// <see langword="true"/> 时在 <paramref name="builder"/> 上注册
+    /// <see cref="SimpleActivityExportProcessor"/> + <see cref="FileSpanExporter"/>，把抓到的
+    /// <c>System.Net.Http.HttpRequestOut</c> span（含请求/响应 body）追加写本地 <c>traces_*.log</c>。
+    /// body 含敏感信息（Authorization / API key），仅写本地文件，不进 OTLP / Aspire Dashboard。
+    /// <see langword="false"/>（默认）时直接返回：不注册 processor，无额外开销。
+    ///
+    /// 注意：本方法必须在 <b>DI 服务注册层</b>调用（如 ServiceDefaults 的
+    /// <c>builder.Services.ConfigureOpenTelemetryTracerProvider(t => AgentTelemetry.AddFileSpanExporter(t, debug, dir))</c>），
+    /// 不能放进 <c>AddHttpClientInstrumentation</c> 的 options 闭包（provider 构造期间禁止二次配置，见
+    /// <see cref="ConfigureDebugTelemetry"/>）。
+    /// </summary>
+    /// <param name="builder">TracerProvider builder（DI 服务注册层的 deferred builder 或 <c>Sdk.CreateTracerProviderBuilder</c>）。</param>
+    /// <param name="debug">调试开关；<see langword="false"/> 时零配置返回。</param>
+    /// <param name="directory">本地日志目录；<see langword="null"/> 时用 <see cref="AppContext.BaseDirectory"/>。</param>
+    /// <returns>原 <paramref name="builder"/>，便于链式调用。</returns>
+    public static TracerProviderBuilder AddFileSpanExporter(
+        this TracerProviderBuilder builder,
+        bool debug,
+        string? directory = null)
+    {
+        if (!debug)
+        {
+            return builder;   // Debug 关闭：不注册 FileSpanExporter，无额外开销
+        }
 
         builder.AddProcessor(new SimpleActivityExportProcessor(new FileSpanExporter(directory)));
 
