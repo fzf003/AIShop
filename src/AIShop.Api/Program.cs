@@ -15,6 +15,8 @@ using Serilog;
 using Scalar.AspNetCore;
 using AIShop.Api.Features.Mcp;
 using AIShop.ServiceDefaults;
+using AIShop.AgentTelemetry;
+using Microsoft.Extensions.Options;
 
 Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()
@@ -43,6 +45,12 @@ try
     builder.Services.AddScoped<SqliteChatHistoryProvider>();
     builder.Services.AddSingleton<CartToolProvider>();
     builder.Services.AddSingleton<ModelRouter>();
+
+    // Agent 遥测：绑定 "AgentTelemetry" 配置节，注册 AgentTelemetryOptions 单例
+    // （默认 "Level": "Metadata" 生产安全；排查时改 MetadataAndContent 即可见请求/回复内容，无需重编译）
+    var agentTelemetrySection = builder.Configuration.GetSection("AgentTelemetry");
+    builder.Services.Configure<AgentTelemetryOptions>(agentTelemetrySection);
+    builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<AgentTelemetryOptions>>().Value);
 
     // Add global exception handler
     builder.Services.AddExceptionHandler<GlobalExceptionHandler>();

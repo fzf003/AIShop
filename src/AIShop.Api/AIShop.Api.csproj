@@ -4,6 +4,7 @@
     <ProjectReference Include="..\AIShop.Core\AIShop.Core.csproj" />
     <ProjectReference Include="..\AIShop.Infrastructure\AIShop.Infrastructure.csproj" />
     <ProjectReference Include="..\AIShop.ServiceDefaults\AIShop.ServiceDefaults.csproj" />
+    <ProjectReference Include="..\AIShop.AgentTelemetry\AIShop.AgentTelemetry.csproj" />
   </ItemGroup>
 
   <ItemGroup>
