@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using AIShop.AgentTelemetry;
 using AIShop.Api.Agents;
 using AIShop.Api.Features.Chat;
 using AIShop.Core.Interfaces;
@@ -63,7 +64,8 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                         sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
                         sp.GetRequiredService<IProductCatalogService>(),
                         sp.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false);
+                        isOpenAI: false,
+                        sp.GetRequiredService<AgentTelemetryOptions>());
                 });
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
@@ -71,7 +73,8 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
                         capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false));
+                        isOpenAI: false,
+                        capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.GetAvailableModels().Returns([
                     new ModelInfo("qwen", "Qwen 3.7", true),
                     new ModelInfo("gpt-4.1", "GPT 4.1", false),
@@ -243,14 +246,16 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
                         capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false));
+                        isOpenAI: false,
+                        capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
                         capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false));
+                        isOpenAI: false,
+                        capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.ActiveModel.Returns("qwen");
                 services.AddSingleton(mockRouter);
             });
@@ -301,14 +306,16 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
                         capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false));
+                        isOpenAI: false,
+                        capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
                         capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false));
+                        isOpenAI: false,
+                        capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.ActiveModel.Returns("qwen");
                 services.AddSingleton(mockRouter);
             });
@@ -434,7 +441,8 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
                         capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false);
+                        isOpenAI: false,
+                        capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>());
                 });
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
@@ -442,7 +450,8 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
                         capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false));
+                        isOpenAI: false,
+                        capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.ActiveModel.Returns("qwen");
                 mockRouter.GetAvailableModels().Returns([
                     new ModelInfo("qwen", "Qwen 3.7", true),
@@ -493,7 +502,8 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
                         capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false);
+                        isOpenAI: false,
+                        capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>());
                 });
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
@@ -501,7 +511,8 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
                         capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false));
+                        isOpenAI: false,
+                        capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.ActiveModel.Returns("qwen");
                 mockRouter.GetAvailableModels().Returns([
                     new ModelInfo("qwen", "Qwen 3.7", true),
@@ -563,21 +574,24 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
                         capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false));
+                        isOpenAI: false,
+                        capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.GetAgent("gpt-4.1").Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("gpt-4.1"),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
                         capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false));
+                        isOpenAI: false,
+                        capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("qwen"),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
                         capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false));
+                        isOpenAI: false,
+                        capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.ActiveModel.Returns("qwen");
                 mockRouter.GetAvailableModels().Returns([
                     new ModelInfo("qwen", "Qwen 3.7", true),

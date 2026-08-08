@@ -1,3 +1,4 @@
+using AIShop.AgentTelemetry;
 using AIShop.Core.Interfaces;
 using AIShop.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
@@ -116,7 +117,8 @@ public class ModelRouter
             var catalog = _sp.GetRequiredService<IProductCatalogService>();
             var cartTools = _sp.GetRequiredService<CartToolProvider>();
             var isOpenAI = ShoppingAssistantAgent.IsOpenAIModel(cfg.Model);
-            var agent = new ShoppingAssistantAgent(chatClient, dbFactory, catalog, cartTools, isOpenAI);
+            var telemetryOptions = _sp.GetRequiredService<AgentTelemetryOptions>();
+            var agent = new ShoppingAssistantAgent(chatClient, dbFactory, catalog, cartTools, isOpenAI, telemetryOptions);
             Logger.Information("GetAgent.Lazy: 创建成功 model={ModelName}", key);
             return agent;
         })).Value;

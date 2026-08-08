@@ -1,4 +1,5 @@
 #pragma warning disable MAAI001
+using AIShop.AgentTelemetry;
 using AIShop.Api.Features.Chat;
 using AIShop.Core.Interfaces;
 using AIShop.Infrastructure.Data;
@@ -14,7 +15,7 @@ namespace AIShop.Api.Agents;
 
 public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 {
-    private readonly HarnessAgent _agent;
+    private readonly AIAgent _agent;
     private readonly bool _isOpenAI;
     private static readonly Serilog.ILogger Logger = Log.ForContext<ShoppingAssistantAgent>();
 
@@ -87,7 +88,8 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     }
 
     public ShoppingAssistantAgent(IChatClient chatClient, IDbContextFactory<AppDbContext> dbFactory,
-        IProductCatalogService catalog, CartToolProvider cartTools, bool isOpenAI)
+        IProductCatalogService catalog, CartToolProvider cartTools, bool isOpenAI,
+        AgentTelemetryOptions telemetryOptions)
     {
         _isOpenAI = isOpenAI;
         var instructions = BuildInstructions(catalog);
@@ -148,6 +150,17 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         };
 
         _agent = new HarnessAgent(chatClient, options);
+
+        // 创建 HarnessAgent 后立即以 AgentTelemetryOptions（SourceName + Level）包装：
+        // 复用官方 AgentTelemetry 模式开启 MAF 内建 OpenTelemetryAgent 的内容采集
+        // （默认 Metadata 仅采集元数据，生产安全；改 MetadataAndContent 即可在 Aspire 看到请求/回复内容）
+        // 注：Instrument 返回 OpenTelemetryAgent（继承自 AIAgent，与 HarnessAgent 无继承关系），
+        //     故 _agent 字段类型为 AIAgent，不能强转回 HarnessAgent；
+        //     命名空间 AIShop.AgentTelemetry 与本类同名，用完整限定名调用静态类 AgentTelemetry.Instrument。
+        _agent = AIShop.AgentTelemetry.AgentTelemetry.Instrument(
+            _agent,
+            telemetryOptions.SourceName,
+            telemetryOptions.Level);
     }
 
     /// <summary>

@@ -1,4 +1,5 @@
 using System.Reflection;
+using AIShop.AgentTelemetry;
 using AIShop.Api.Agents;
 using AIShop.Api.Features.Chat;
 using AIShop.Core.Interfaces;
@@ -88,7 +89,8 @@ public sealed class SanitizingChatClientTests
         var catalog = Substitute.For<IProductCatalogService>();
         catalog.KeywordMap.Returns(new Dictionary<string, string[]>());
 
-        var agent = new ShoppingAssistantAgent(inner, dbFactory, catalog, cartTools, true);
+        var agent = new ShoppingAssistantAgent(inner, dbFactory, catalog, cartTools, true,
+            new AgentTelemetryOptions { Level = AgentTelemetryLevel.Metadata });
 
         Assert.NotNull(agent);
     }
