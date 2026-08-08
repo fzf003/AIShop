@@ -8,6 +8,12 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using NSubstitute;
+using System.Reflection;
+using AIShop.Api.Agents;
+using AIShop.Core.Interfaces;
+using AIShop.Infrastructure.Data;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
 
 namespace AIShop.Api.Tests;
 
@@ -184,5 +190,128 @@ public sealed class AgentTelemetryTests
         using var sp = services.BuildServiceProvider();
 
         return sp.GetRequiredService<IOptions<AgentTelemetryOptions>>().Value;
+    }
+
+    // =========================================================
+    // T13 — ShoppingAssistantAgent 接入 Instrument + RunChatAsync 行为不变
+    // 对应 spec「ShoppingAssistantAgent 接入 Instrument」。
+    // 直接构造 ShoppingAssistantAgent（NSubstitute mock 全部依赖），
+    // 反射断言私有 _agent 字段已被 Instrument 包装为 OpenTelemetryAgent，
+    // 且 IShoppingAssistantAgent.RunChatAsync 行为与包装前一致。
+    // =========================================================
+
+    [Fact]
+    public async Task ShouldWrapInternalAgentWithOpenTelemetry_WhenConstructedWithMetadata()
+    {
+        using var fixture = new ShoppingAssistantAgentFixture();
+
+        var agent = fixture.CreateAgent(AgentTelemetryLevel.Metadata);
+
+        // 构造即被 AgentTelemetry.Instrument 包装：私有 _agent 字段类型名含 OpenTelemetryAgent
+        var internalAgent = agent.GetType().GetField("_agent", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?.GetValue(agent);
+        Assert.NotNull(internalAgent);
+        Assert.Contains("OpenTelemetryAgent", internalAgent.GetType().Name);
+
+        // 行为不变：mock IChatClient 返回固定 JSON 回复，RunChatAsync 原样返回
+        var sessionId = Guid.NewGuid();
+        CartToolProvider.SetCurrentUser("t13-user");
+        var (result, _) = await agent.RunChatAsync(sessionId, "帮我推荐跑鞋", "t13-user");
+
+        Assert.NotNull(result);
+        Assert.Equal("模拟推荐", result.Reply);
+        Assert.Equal("跑步", Assert.Single(result.Keywords));
+    }
+
+    [Fact]
+    public async Task ShouldReturnSameReply_WhenConstructedWithMetadataAndContent()
+    {
+        using var fixture = new ShoppingAssistantAgentFixture();
+
+        // MetadataAndContent 级别：Instrument 同样包装 _agent 为 OpenTelemetryAgent
+        var agent = fixture.CreateAgent(AgentTelemetryLevel.MetadataAndContent);
+
+        var internalAgent = agent.GetType().GetField("_agent", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?.GetValue(agent);
+        Assert.NotNull(internalAgent);
+        Assert.Contains("OpenTelemetryAgent", internalAgent.GetType().Name);
+
+        var sessionId = Guid.NewGuid();
+        CartToolProvider.SetCurrentUser("t13-user");
+        var (result, _) = await agent.RunChatAsync(sessionId, "查看购物车", "t13-user");
+
+        Assert.NotNull(result);
+        Assert.Equal("模拟推荐", result.Reply);
+    }
+
+    /// <summary>
+    /// 直接构造 ShoppingAssistantAgent 的最小夹具：
+    /// mock IChatClient（返回固定 JSON 回复）、SQLite 内存库（EnsureCreated）、
+    /// mock IDbContextFactory / IProductCatalogService / CartToolProvider。
+    /// </summary>
+    private sealed class ShoppingAssistantAgentFixture : IDisposable
+    {
+        private readonly SqliteConnection _connection;
+        private readonly IDbContextFactory<AppDbContext> _dbFactory;
+        private readonly IChatClient _chatClient;
+        private readonly IProductCatalogService _catalog;
+        private readonly CartToolProvider _cartTools;
+        private readonly IServiceScopeFactory _scopeFactory;
+
+        public ShoppingAssistantAgentFixture()
+        {
+            _connection = new SqliteConnection("DataSource=:memory:");
+            _connection.Open();
+
+            var options = new DbContextOptionsBuilder<AppDbContext>()
+                .UseSqlite(_connection)
+                .Options;
+
+            using (var seed = new AppDbContext(options))
+            {
+                seed.Database.EnsureCreated();
+            }
+
+            _dbFactory = Substitute.For<IDbContextFactory<AppDbContext>>();
+            _dbFactory.CreateDbContextAsync(Arg.Any<CancellationToken>()).Returns(_ =>
+            {
+                var ctx = new AppDbContext(options);
+                ctx.Database.EnsureCreated();
+                return ctx;
+            });
+            _dbFactory.CreateDbContext().Returns(_ =>
+            {
+                var ctx = new AppDbContext(options);
+                ctx.Database.EnsureCreated();
+                return ctx;
+            });
+
+            _chatClient = Substitute.For<IChatClient>();
+            _chatClient.GetResponseAsync(
+                    Arg.Any<IEnumerable<ChatMessage>>(), Arg.Any<ChatOptions?>(), Arg.Any<CancellationToken>())
+                .Returns(new ChatResponse(new ChatMessage(ChatRole.Assistant,
+                    "{\"Reply\":\"模拟推荐\",\"Keywords\":[\"跑步\"],\"Preferences\":[]}")));
+            _chatClient.GetStreamingResponseAsync(
+                    Arg.Any<IEnumerable<ChatMessage>>(), Arg.Any<ChatOptions?>(), Arg.Any<CancellationToken>())
+                .Returns(AsyncEnumerable.Empty<ChatResponseUpdate>());
+
+            _catalog = Substitute.For<IProductCatalogService>();
+            _catalog.KeywordMap.Returns(new Dictionary<string, string[]>());
+
+            var serviceCollection = new ServiceCollection();
+            serviceCollection.AddDbContextFactory<AppDbContext>(o => o.UseSqlite(_connection));
+            _scopeFactory = serviceCollection.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
+            _cartTools = new CartToolProvider(_scopeFactory);
+        }
+
+        public ShoppingAssistantAgent CreateAgent(AgentTelemetryLevel level)
+            => new(_chatClient, _dbFactory, _catalog, _cartTools, isOpenAI: false,
+                new AgentTelemetryOptions { Level = level });
+
+        public void Dispose()
+        {
+            _connection.Close();
+            _connection.Dispose();
+        }
     }
 }

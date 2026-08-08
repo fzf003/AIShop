@@ -1,11 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using AIShop.AgentTelemetry;
 using AIShop.Api.Agents;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Agents.AI;
 using NSubstitute;
 
 namespace AIShop.Api.Tests;
@@ -158,4 +161,64 @@ public sealed class ModelRouterTests
         Assert.Throws<InvalidOperationException>(() =>
             factory.Services.GetRequiredService<ModelRouter>());
     }
+
+    // =========================================================
+    // T13 — ShoppingAssistantAgent 接入 Instrument + ModelRouter 注入链路
+    // 对应 spec「ModelRouter 注入遥测选项」+「配置节驱动采集级别」。
+    // 用 WebApplicationFactory<Program> 走真实 DI 注册（T5 已绑定 "AgentTelemetry" 配置节），
+    // 验证：默认配置（appsettings AgentTelemetry:Level=Metadata）下 GetDefaultAgent()
+    // 返回的 agent 反射 _agent 含 OpenTelemetryAgent；WithWebHostBuilder 覆盖为
+    // MetadataAndContent 后 EnableSensitiveData==true（仅改配置生效，无需重编译）。
+    // =========================================================
+
+    [Fact]
+    public void DefaultAgent_WithDefaultConfig_InternalAgentIsOpenTelemetryWrapped()
+    {
+        // 默认 appsettings.json：AgentTelemetry:Level=Metadata（生产安全默认）
+        using var factory = new WebApplicationFactory<Program>();
+
+        var router = factory.Services.GetRequiredService<ModelRouter>();
+        var agent = router.GetDefaultAgent();
+
+        // 反射断言私有 _agent 字段已被 AgentTelemetry.Instrument 包装
+        Assert.Contains("OpenTelemetryAgent", GetInternalAgentTypeName(agent));
+    }
+
+    [Fact]
+    public void DefaultAgent_WithMetadataAndContentConfig_HasSensitiveDataEnabled()
+    {
+        // 覆盖 AgentTelemetry:Level=MetadataAndContent：无需重编译，仅改配置即生效
+        using var factory = new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder =>
+            {
+                builder.ConfigureAppConfiguration((context, config) =>
+                {
+                    config.AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        ["AgentTelemetry:Level"] = "MetadataAndContent",
+                    });
+                });
+            });
+
+        var router = factory.Services.GetRequiredService<ModelRouter>();
+        var agent = router.GetDefaultAgent();
+
+        // Instrument 包装后返回的正是 OpenTelemetryAgent：EnableSensitiveData 应为 true
+        var internalAgent = GetInternalAgent(agent);
+        Assert.IsType<OpenTelemetryAgent>(internalAgent);
+        Assert.True(((OpenTelemetryAgent)internalAgent).EnableSensitiveData);
+    }
+
+    /// <summary>反射读取 ShoppingAssistantAgent 私有 _agent 字段。</summary>
+    private static object GetInternalAgent(IShoppingAssistantAgent agent)
+    {
+        var field = typeof(ShoppingAssistantAgent).GetField("_agent", BindingFlags.Instance | BindingFlags.NonPublic);
+        var value = field?.GetValue(agent);
+        Assert.NotNull(value);
+        return value!;
+    }
+
+    /// <summary>反射读取私有 _agent 字段的类型名。</summary>
+    private static string GetInternalAgentTypeName(IShoppingAssistantAgent agent)
+        => GetInternalAgent(agent).GetType().Name;
 }
