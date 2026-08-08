@@ -74,6 +74,49 @@ public sealed class AgentTelemetryTests
     }
 
     // =========================================================
+    // T10 — EnableSensitiveData 与采集级别联动 + Options 默认值
+    // 对应 spec「EnableSensitiveData 与采集级别联动」+「默认采集级别为 Metadata」。
+    // 决策点：EnableSensitiveData 是 OpenTelemetryAgent 的公开属性（反射确认 getter/setter 均 public），
+    // 且 UseOpenTelemetry().Build() 直接返回 OpenTelemetryAgent 实例，故断言精确类型后读公开属性，
+    // 比反射遍历包装器私有字段对象图更稳健（不依赖 MAF 内部字段名），
+    // 仅在属性非公开 / 类型被二次包装时才需要退化到反射遍历。
+    // =========================================================
+
+    [Fact]
+    public void ShouldSetEnableSensitiveDataFalse_WhenLevelIsMetadata()
+    {
+        var agent = CreateMinimalHarnessAgent();
+
+        var wrapped = AgentTelemetryHelper.Instrument(agent, "Test.Source", AgentTelemetryLevel.Metadata);
+
+        // Metadata 级别生产安全：只采集元数据，不采集消息内容 / 工具参数 / 工具结果
+        var otelAgent = Assert.IsType<OpenTelemetryAgent>(wrapped);
+        Assert.False(otelAgent.EnableSensitiveData);
+    }
+
+    [Fact]
+    public void ShouldSetEnableSensitiveDataTrue_WhenLevelIsMetadataAndContent()
+    {
+        var agent = CreateMinimalHarnessAgent();
+
+        var wrapped = AgentTelemetryHelper.Instrument(agent, "Test.Source", AgentTelemetryLevel.MetadataAndContent);
+
+        // MetadataAndContent 级别调试用：额外采集消息内容 / 工具参数 / 工具结果
+        var otelAgent = Assert.IsType<OpenTelemetryAgent>(wrapped);
+        Assert.True(otelAgent.EnableSensitiveData);
+    }
+
+    [Fact]
+    public void ShouldDefaultToMetadataLevelAndNullSourceName_WhenNoConfiguration()
+    {
+        // new AgentTelemetryOptions() 默认 Level==Metadata（生产安全）、SourceName==null（用框架默认）
+        var options = new AgentTelemetryOptions();
+
+        Assert.Equal(AgentTelemetryLevel.Metadata, options.Level);
+        Assert.Null(options.SourceName);
+    }
+
+    // =========================================================
     // T11 — AgentTelemetryOptions 配置绑定
     // 对应 spec「配置节驱动采集级别」/「默认采集级别为 Metadata」，
     // 与 Program.cs 同一绑定路径：Configure<AgentTelemetryOptions>(section) + IOptions.Value。
