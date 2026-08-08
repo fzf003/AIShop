@@ -1,5 +1,7 @@
+using AIShop.AgentTelemetry;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -47,8 +49,14 @@ public static class Extensions
             })
             .WithTracing(tracing =>
             {
+                // DebugTelemetry 扩展：按 AgentTelemetry:Debug 配置启用 HTTP 请求/响应 body 本地日志抓取。
+                // 不依赖 AgentTelemetryOptions POCO（避免与 Api 侧 DI 注册耦合）；null/false 时 ConfigureDebugTelemetry
+                // 直接返回，保持标准 AddHttpClientInstrumentation() 行为，不配 EnrichWith、不注册 FileSpanExporter，零额外开销。
+                var httpDebug = builder.Configuration.GetValue<bool?>("AgentTelemetry:Debug") ?? false;
+
                 tracing.AddAspNetCoreInstrumentation()
-                    .AddHttpClientInstrumentation()
+                    .AddHttpClientInstrumentation(http =>
+                        tracing.ConfigureDebugTelemetry(httpDebug, http))
                     .AddSource(builder.Environment.ApplicationName)
                     .AddSource("Experimental.Microsoft.Agents.AI");
             });
