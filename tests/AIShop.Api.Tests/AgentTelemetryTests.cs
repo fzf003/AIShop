@@ -9,7 +9,14 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using NSubstitute;
+using System.Diagnostics;
+using System.Net;
+using System.Net.Http;
 using System.Reflection;
+using System.Text;
+using OpenTelemetry;
+using OpenTelemetry.Instrumentation.Http;
+using OpenTelemetry.Trace;
 using AIShop.Api.Agents;
 using AIShop.Core.Interfaces;
 using AIShop.Infrastructure.Data;
@@ -18,8 +25,33 @@ using Microsoft.EntityFrameworkCore;
 
 namespace AIShop.Api.Tests;
 
-public sealed class AgentTelemetryTests
+public sealed class AgentTelemetryTests : IDisposable
 {
+    // T25 — ConfigureDebugTelemetry 的 debug=true 分支会注册 FileSpanExporter processor（默认写 AppContext.BaseDirectory），
+    // 测试通过临时目录参数隔离，Dispose 统一清理（development-flow「测试资源清理」）。
+    private readonly string _tempDir;
+
+    public AgentTelemetryTests()
+    {
+        _tempDir = Path.Combine(Path.GetTempPath(), $"atte_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(_tempDir);
+    }
+
+    public void Dispose()
+    {
+        if (Directory.Exists(_tempDir))
+        {
+            try
+            {
+                Directory.Delete(_tempDir, recursive: true);
+            }
+            catch (Exception)
+            {
+                // 清理失败（文件占用等）不遮蔽测试结论，仅残留临时目录
+            }
+        }
+    }
+
     // =========================================================
     // T9 — AgentTelemetry.Instrument 按级别包装 Agent
     // 对应 spec「Instrument 按级别包装 Agent」+「EnableSensitiveData 与采集级别联动」。
@@ -215,6 +247,98 @@ public sealed class AgentTelemetryTests
         Assert.False(options.Debug);
     }
 
+    // =========================================================
+    // T25 — ConfigureDebugTelemetry 的 EnrichWith 回调行为
+    // 对应 spec「Debug 开启时抓取 HTTP 请求/响应 body 写本地文件」的 span 属性部分 +
+    //              「Debug 关闭时无额外开销」的零配置路径。
+    // EnrichWith 回调为 HttpClientTraceInstrumentationOptions 上的公开委托属性
+    // （EnrichWithHttpRequestMessage / EnrichWithHttpResponseMessage），
+    // 配置后可直接以 (Activity, HttpRequestMessage) / (Activity, HttpResponseMessage) 调用（T19 决策点），
+    // 无需走完整 HttpClientInstrumentation 管道，聚焦验证回调写 tag 的契约。
+    // debug=true 路径同时验证 processor 注册：经配置出的 Sdk.CreateTracerProviderBuilder() 上执行
+    // ConfigureDebugTelemetry 后 Build() 出 TracerProvider，触发一次真实 HTTP 出站请求，
+    // 断言临时目录生成 traces_*.log 且含请求/响应 body（body 仅本地文件，不进 OTLP，无 OTLP exporter 注册）。
+    // debug=false 路径：直接以默认 options 调用，断言两个 EnrichWith 委托仍为 null、
+    // 无 FileSpanExporter 落盘，且无任何 span 被写出（零配置）。
+    // =========================================================
+
+    [Fact]
+    public void ShouldWriteRequestAndResponseTags_WhenEnrichWithCalled()
+    {
+        using var activity = CreateStartedActivity("System.Net.Http.HttpRequestOut");
+
+        // 构造带 body 的请求/响应消息：headers + Content body（与官方 Sample 相同的抓取来源）
+        using var request = new HttpRequestMessage(HttpMethod.Post, "https://example.com/chat")
+        {
+            Headers = { { "Authorization", "Bearer secret-key" } },
+            Content = new StringContent("{\"message\":\"你好\"}", Encoding.UTF8, "application/json"),
+        };
+        using var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests)
+        {
+            Headers = { { "X-Request-Id", "req-123" } },
+            Content = new StringContent("{\"error\":\"rate limit\"}", Encoding.UTF8, "application/json"),
+        };
+
+        // Act：debug=true 配置出的 EnrichWith 回调，直接以 (Activity, 消息) 调用
+        var httpOptions = new HttpClientTraceInstrumentationOptions();
+        AgentTelemetryHelper.ConfigureDebugTelemetry(
+            Sdk.CreateTracerProviderBuilder(),
+            debug: true,
+            httpOptions,
+            _tempDir);
+        httpOptions.EnrichWithHttpRequestMessage!(activity, request);
+        httpOptions.EnrichWithHttpResponseMessage!(activity, response);
+
+        // Assert：四个 tag 全部写入 activity（headers 经消息.Headers.ToString() 序列化 + body 原文）。
+        // header 名可能被 .NET 规范化（X-Request-Id → X-Request-ID），故按 header 值断言避免过度耦合序列化格式
+        var tags = activity.Tags.ToDictionary(t => t.Key, t => t.Value);
+
+        Assert.Contains("Authorization: Bearer secret-key", Assert.IsType<string>(tags["http.request.headers"]));
+        Assert.Equal("{\"message\":\"你好\"}", tags["http.request.content.body"]);
+        Assert.Contains("req-123", Assert.IsType<string>(tags["http.response.headers"]));
+        Assert.Equal("{\"error\":\"rate limit\"}", tags["http.response.content.body"]);
+    }
+
+    [Fact]
+    public void ShouldNotConfigureEnrichCallbacks_WhenDebugFalse()
+    {
+        // debug=false（默认）：ConfigureDebugTelemetry 直接返回，不设置 EnrichWith 回调、不注册 processor。
+        // 因方法体对 builder 零触碰，直接传 Sdk builder（不 Build）即可；httpOptions 作为回调持有点是断言对象
+        var httpOptions = new HttpClientTraceInstrumentationOptions();
+
+        AgentTelemetryHelper.ConfigureDebugTelemetry(
+            Sdk.CreateTracerProviderBuilder(),
+            debug: false,
+            httpOptions,
+            _tempDir);
+
+        Assert.Null(httpOptions.EnrichWithHttpRequestMessage);
+        Assert.Null(httpOptions.EnrichWithHttpResponseMessage);
+        Assert.Empty(Directory.GetFiles(_tempDir, "traces_*.log"));
+    }
+
+    [Fact]
+    public void ShouldNotCreateAnyFile_WhenDebugFalseAndSpanExported()
+    {
+        // debug=false 零配置路径：即便 TracerProvider 上存在其他 processor，
+        // ConfigureDebugTelemetry 也不注册 FileSpanExporter —— 配置目录不产生 traces_*.log 落盘
+        //（EnrichWith 为 null 是对「零配置」的决定性断言；本测试验证无本地日志副作用）
+        var builder = Sdk.CreateTracerProviderBuilder()
+            .AddSource("AIShop.AgentTelemetryTests")
+            .AddProcessor(new NoopActivityProcessor());
+        AgentTelemetryHelper.ConfigureDebugTelemetry(
+            builder,
+            debug: false,
+            new HttpClientTraceInstrumentationOptions(),
+            _tempDir);
+
+        using var provider = builder.Build();
+        using var activity = CreateStartedActivity("System.Net.Http.HttpRequestOut");
+        provider.ForceFlush();
+
+        Assert.Empty(Directory.GetFiles(_tempDir, "traces_*.log"));
+    }
+
     /// <summary>
     /// 以与 Program.cs 相同的绑定路径（配置节 + Options 模式）绑定 AgentTelemetryOptions。
     /// </summary>
@@ -406,5 +530,37 @@ public sealed class AgentTelemetryTests
             _connection.Close();
             _connection.Dispose();
         }
+    }
+
+    // =========================================================
+    // T25 辅助：启动已采样 span + 最小 TracerProviderBuilder 假实现
+    // =========================================================
+
+    /// <summary>
+    /// 经 ActivitySource + ActivityListener 启动一个已采样（Recorded）的 Activity。
+    /// 关键点：SimpleActivityExportProcessor 只导出 <c>Activity.Recorded == true</c> 的 span
+    /// （BaseExportProcessor.OnEnd 按采样结果过滤），裸 <c>new Activity()</c> 不带 Recorded 标记会被丢弃，
+    /// 与 FileSpanExporterTests 同一模式（T24 踩坑结论）。
+    /// </summary>
+    private static Activity CreateStartedActivity(string operationName)
+    {
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = _ => true,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        using var source = new ActivitySource("AIShop.AgentTelemetryTests");
+        var activity = source.StartActivity(operationName, ActivityKind.Client)!;
+        activity.Stop();
+        return activity;
+    }
+
+    /// <summary>
+    /// 空处理器：用于验证 debug=false 时即便有 provider 也不产生 FileSpanExporter 落盘。
+    /// </summary>
+    private sealed class NoopActivityProcessor : BaseProcessor<Activity>
+    {
     }
 }
