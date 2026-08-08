@@ -176,6 +176,45 @@ public sealed class AgentTelemetryTests
         Assert.Throws<InvalidOperationException>(() => _ = options.Value);
     }
 
+    // =========================================================
+    // T23 — AgentTelemetryOptions.Debug 默认值与配置绑定
+    // 对应 spec「Debug 开关默认关闭」的默认值部分 +「Debug 开启时...」的配置读取。
+    // 与 T11 同一绑定路径（AddInMemoryCollection + Configure 绑定 + IOptions.Value）。
+    // =========================================================
+
+    [Fact]
+    public void ShouldDefaultToFalse_WhenDebugNotConfigured()
+    {
+        // new AgentTelemetryOptions() 默认 Debug == false（生产安全：不抓 HTTP body）
+        var options = new AgentTelemetryOptions();
+
+        Assert.False(options.Debug);
+    }
+
+    [Fact]
+    public void ShouldBindTrue_WhenDebugConfiguredAsTrue()
+    {
+        // AddInMemoryCollection 注入 AgentTelemetry:Debug=true，经 ConfigurationBinder 绑定后 Debug == true
+        var options = BindOptions(new Dictionary<string, string?>
+        {
+            ["AgentTelemetry:Debug"] = "true",
+        });
+
+        Assert.True(options.Debug);
+    }
+
+    [Fact]
+    public void ShouldBindFalse_WhenDebugConfiguredAsFalse()
+    {
+        // 显式配置 AgentTelemetry:Debug=false 绑定后 Debug == false（Debug 关闭无额外开销）
+        var options = BindOptions(new Dictionary<string, string?>
+        {
+            ["AgentTelemetry:Debug"] = "false",
+        });
+
+        Assert.False(options.Debug);
+    }
+
     /// <summary>
     /// 以与 Program.cs 相同的绑定路径（配置节 + Options 模式）绑定 AgentTelemetryOptions。
     /// </summary>
