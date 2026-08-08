@@ -27,6 +27,9 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\AIShop.Api\AIShop.Api.csproj" />
     <ProjectReference Include="..\..\src\AIShop.AgentTelemetry\AIShop.AgentTelemetry.csproj" />
+    <!-- T26: ServiceDefaults 集成测试。无环：ServiceDefaults 不引用 AIShop.Api（依赖方向 Core ← Infrastructure ← Api），
+         测试工程作为消费者直接引用 ServiceDefaults 验证其按 AgentTelemetry:Debug 配置启停 Debug body 抓取 -->
+    <ProjectReference Include="..\..\src\AIShop.ServiceDefaults\AIShop.ServiceDefaults.csproj" />
   </ItemGroup>
 
 </Project>

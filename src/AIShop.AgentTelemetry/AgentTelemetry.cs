@@ -127,4 +127,32 @@ public static class AgentTelemetry
 
         return builder;
     }
+
+    /// <summary>
+    /// DebugTelemetry 扩展：按 <paramref name="debug"/> 开关注册 body 脱敏 processor。
+    /// <see langword="true"/> 时注册 <see cref="BodyRedactionProcessor"/>，在 OTLP 导出前移除
+    /// <c>System.Net.Http.HttpRequestOut</c> span 上 Debug 抓取的请求/响应 body 与 headers tag
+    /// （含 Authorization / API key），保证 body 只写本地 <c>traces_*.log</c>、不进 OTLP / Aspire Dashboard。
+    /// <see langword="false"/>（默认）时直接返回：不注册 processor，无额外开销。
+    ///
+    /// 注意：本方法必须在 <see cref="AddFileSpanExporter"/> <b>之后</b>、OTLP exporter <b>之前</b>调用
+    /// （同一 DI 服务注册层 <c>ConfigureOpenTelemetryTracerProvider</c> 内链式追加），
+    /// 确保先本地落盘再脱敏（详见 <see cref="BodyRedactionProcessor"/>）。
+    /// </summary>
+    /// <param name="builder">TracerProvider builder（DI 服务注册层）。</param>
+    /// <param name="debug">调试开关；<see langword="false"/> 时零配置返回。</param>
+    /// <returns>原 <paramref name="builder"/>，便于链式调用。</returns>
+    public static TracerProviderBuilder AddBodyRedactionProcessor(
+        this TracerProviderBuilder builder,
+        bool debug)
+    {
+        if (!debug)
+        {
+            return builder;   // Debug 关闭：body tag 未设置，无需脱敏
+        }
+
+        builder.AddProcessor(new BodyRedactionProcessor());
+
+        return builder;
+    }
 }

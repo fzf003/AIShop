@@ -40,6 +40,12 @@ public static class Extensions
             logging.IncludeScopes = true;
         });
 
+        // DebugTelemetry 开关：AgentTelemetry:Debug 配置（null/false 默认关闭）。
+        // 刻意【惰性】读取：在 WithTracing / ConfigureOpenTelemetryTracerProvider 闭包内（provider 构建期）
+        // 才从 builder.Configuration 取值，确保运行时配置覆盖（如 WebApplicationFactory 的
+        // WithWebHostBuilder 覆盖 / 测试用 InMemory 配置）能生效——即「排查时改配置、无需重编译」。
+        // 若在此方法体（AddServiceDefaults 调用期）提前 GetValue 一次，会读到覆盖前的旧值，
+        // 导致配置切换（Debug=false→true）不生效。
         builder.Services.AddOpenTelemetry()
             .WithMetrics(metrics =>
             {
@@ -64,11 +70,20 @@ public static class Extensions
                     .AddSource("Experimental.Microsoft.Agents.AI");
             });
 
-        // DebugTelemetry 扩展：在 DI 服务注册层注册 FileSpanExporter processor（写本地 traces_*.log）。
+        // DebugTelemetry 扩展：在 DI 服务注册层注册 FileSpanExporter processor（写本地 traces_*.log）
+        // 与 BodyRedactionProcessor（OTLP 导出前移除 body/headers tag，保证 body 不进 OTLP / Aspire Dashboard）。
+        // 顺序要求：FileSpanExporter 先（本地落盘 body），BodyRedactionProcessor 后（脱敏），
+        // 再经下方 AddOpenTelemetryExporters 注册的 OTLP exporter 拿到的已是脱敏 span。
         // 不能在 AddHttpClientInstrumentation 的 options 闭包内注册（provider 构造期间禁止二次配置）。
         // body 含敏感信息（Authorization / API key），仅写本地文件，不进 OTLP / Aspire Dashboard。
         builder.Services.ConfigureOpenTelemetryTracerProvider(tracing =>
-            tracing.AddFileSpanExporter(builder.Configuration.GetValue<bool?>("AgentTelemetry:Debug") ?? false));
+        {
+            // 惰性读取（provider 构建期才取值），与 WithTracing 闭包读到同一开关值，保证配置切换生效
+            var httpDebug = builder.Configuration.GetValue<bool?>("AgentTelemetry:Debug") ?? false;
+
+            tracing.AddFileSpanExporter(httpDebug)
+                .AddBodyRedactionProcessor(httpDebug);
+        });
 
         builder.AddOpenTelemetryExporters();
 
