@@ -338,6 +338,41 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task Provide_RebuildsMultiFrcToolMessageFromToolCallsJson()
+    {
+        // seed 多 FRC tool 行：ToolCalls 列存 JSON 数组 [{id, result}, ...]，ToolCallId 置空
+        var toolCallsJson = JsonSerializer.Serialize(new[]
+        {
+            new { id = "call_a", result = "结果A" },
+            new { id = "call_b", result = "结果B" },
+        }, JsonOptions);
+
+        using (var seed = _dbFactory.CreateDbContext())
+        {
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                Role = "tool",
+                Content = "",
+                ToolCalls = toolCallsJson,
+                ToolCallId = null,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var result = await InvokeProvideAsync();
+
+        var toolMsg = Assert.Single(result, m => m.Role == ChatRole.Tool);
+        var frcs = toolMsg.Contents.OfType<FunctionResultContent>().ToList();
+        // Contents 数量与 JSON 数组元素数量一致（2 个 FRC，不丢）
+        Assert.Equal(2, frcs.Count);
+        Assert.Equal("call_a", frcs[0].CallId);
+        Assert.Equal("结果A", frcs[0].Result);
+        Assert.Equal("call_b", frcs[1].CallId);
+        Assert.Equal("结果B", frcs[1].Result);
+    }
+
+    [Fact]
     public async Task Provide_FiltersCompactedMessages()
     {
         using (var seed = _dbFactory.CreateDbContext())
