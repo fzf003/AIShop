@@ -373,6 +373,53 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task Provide_RebuildsLegacyToolMessageWithToolCallIdAndContent()
+    {
+        // 旧格式兼容：ToolCalls 列空 + Content + ToolCallId（存量单 FRC 格式），零迁移读取路径
+        using (var seed = _dbFactory.CreateDbContext())
+        {
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                Role = "tool",
+                Content = "旧结果",
+                ToolCallId = "call_1",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var result = await InvokeProvideAsync();
+
+        var toolMsg = Assert.Single(result, m => m.Role == ChatRole.Tool);
+        var frc = Assert.Single(toolMsg.Contents.OfType<FunctionResultContent>());
+        Assert.Equal("call_1", frc.CallId);
+        Assert.Equal("旧结果", frc.Result);
+    }
+
+    [Fact]
+    public async Task Provide_ToolCallsJsonDeserializationFailure_LogsWarningAndSkipsOrphanTool()
+    {
+        // 反序列化失败：ToolCalls 列非法 JSON → catch 记 Warning 不抛异常，contents 空 → 孤儿 tool 消息被过滤、不进入返回列表
+        using (var seed = _dbFactory.CreateDbContext())
+        {
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                Role = "tool",
+                Content = "",
+                ToolCalls = "not-json",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var result = await InvokeProvideAsync();
+
+        // 不抛异常（走 catch → Warning 日志），孤儿 tool 消息被过滤
+        Assert.DoesNotContain(result, m => m.Role == ChatRole.Tool);
+        Assert.Empty(result);
+    }
+
+    [Fact]
     public async Task Provide_FiltersCompactedMessages()
     {
         using (var seed = _dbFactory.CreateDbContext())
