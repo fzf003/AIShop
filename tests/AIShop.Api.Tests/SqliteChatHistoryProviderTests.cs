@@ -539,6 +539,42 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
         await StoreAndLoad("你好！有什么可以帮您的？");
     }
 
+    [Fact]
+    public async Task StoreAndProvide_MultiFrcRoundTrip_PreservesAllToolResults()
+    {
+        // 多 FRC round-trip 全链路：Store 存 assistant(FCC 配对) + tool(2 FRC)
+        // → tool 行单行 JSON 数组存 ToolCalls 列 → Provide 读回 2 个 FRC，CallId/Result 与存入时一一对应、不丢
+        var asstMsg = new AgentChatMessage(ChatRole.Assistant, "搜索中");
+        asstMsg.Contents.Add(new FunctionCallContent("call_a", "search_product",
+            new Dictionary<string, object?> { ["q"] = "手机" }));
+        asstMsg.Contents.Add(new FunctionCallContent("call_b", "get_price",
+            new Dictionary<string, object?> { ["id"] = 1 }));
+
+        var toolMsg = new AgentChatMessage { Role = ChatRole.Tool };
+        toolMsg.Contents.Add(new FunctionResultContent("call_a", "结果A"));
+        toolMsg.Contents.Add(new FunctionResultContent("call_b", "结果B"));
+
+        await InvokeStoreAsync(responseMessages: [asstMsg, toolMsg]);
+
+        var result = await InvokeProvideAsync();
+
+        // assistant(FCC) 配对读回：2 个 FunctionCallContent 均保留
+        var asstOut = Assert.Single(result, m => m.Role == ChatRole.Assistant);
+        var fccs = asstOut.Contents.OfType<FunctionCallContent>().ToList();
+        Assert.Equal(2, fccs.Count);
+        Assert.Equal("call_a", fccs[0].CallId);
+        Assert.Equal("call_b", fccs[1].CallId);
+
+        // tool 消息读回 2 个 FunctionResultContent，CallId/Result 与存入时一致（存一行 → 读回多 FRC）
+        var toolOut = Assert.Single(result, m => m.Role == ChatRole.Tool);
+        var frcs = toolOut.Contents.OfType<FunctionResultContent>().ToList();
+        Assert.Equal(2, frcs.Count);
+        Assert.Equal("call_a", frcs[0].CallId);
+        Assert.Equal("结果A", frcs[0].Result);
+        Assert.Equal("call_b", frcs[1].CallId);
+        Assert.Equal("结果B", frcs[1].Result);
+    }
+
     private void SeedMessages(int count, string[]? roles = null, string[]? contents = null)
     {
         using var ctx = _dbFactory.CreateDbContext();
