@@ -125,6 +125,26 @@ public sealed class DeepSeekDelegatingChatClient : DelegatingChatClient
                 ["content"] = string.IsNullOrEmpty(text) ? null : text,
             };
 
+            // tool 消息：每个 FRC 生成一条独立 API tool 消息（tool_call_id 与 assistant tool_calls 一一对应），
+            // 修复 deepseek 并行工具结果丢失（多 FRC 只发第一条 → 400）；单 FRC 行为不变。
+            if (msg.Role == ChatRole.Tool)
+            {
+                var frcs = msg.Contents.OfType<FunctionResultContent>().ToList();
+                if (frcs.Count > 0)
+                {
+                    foreach (var frc in frcs)
+                    {
+                        apiMessages.Add(new Dictionary<string, object?>
+                        {
+                            ["role"] = "tool",
+                            ["tool_call_id"] = frc.CallId,
+                            ["content"] = frc.Result?.ToString() ?? "",
+                        });
+                    }
+                    continue;
+                }
+            }
+
             var fccs = msg.Contents.OfType<FunctionCallContent>().ToList();
             if (fccs.Count > 0)
             {
@@ -139,13 +159,6 @@ public sealed class DeepSeekDelegatingChatClient : DelegatingChatClient
                             ? JsonSerializer.Serialize(fcc.Arguments, JsonOptions) : "{}"
                     }
                 }).ToList();
-            }
-
-            var frc = msg.Contents.OfType<FunctionResultContent>().FirstOrDefault();
-            if (frc is not null)
-            {
-                apiMsg["tool_call_id"] = frc.CallId;
-                apiMsg["content"] = frc.Result?.ToString() ?? "";
             }
 
             if (!apiMsg.ContainsKey("content") || apiMsg["content"] is null)
