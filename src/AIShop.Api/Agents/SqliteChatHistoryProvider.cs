@@ -83,9 +83,27 @@ public sealed class SqliteChatHistoryProvider(
 
             if (role == ChatRole.Tool)
             {
-                // tool 消息：重建为 FunctionResultContent
-                if (!string.IsNullOrEmpty(row.Content))
+                // tool 消息：优先读 ToolCalls 列（多 FRC JSON [{id, result}, ...]）
+                if (!string.IsNullOrEmpty(row.ToolCalls))
                 {
+                    try
+                    {
+                        var results = JsonSerializer.Deserialize<List<ToolResultJson>>(row.ToolCalls, JsonOptions);
+                        if (results is not null)
+                        {
+                            foreach (var r in results)
+                                contents.Add(new FunctionResultContent(r.Id, r.Result));
+                        }
+                    }
+                    catch (JsonException ex)
+                    {
+                        Logger.Warning(ex, "tool 结果反序列化失败 Session={SessionId} RowId={RowId}",
+                            sessionId, row.Id);
+                    }
+                }
+                else if (!string.IsNullOrEmpty(row.Content))
+                {
+                    // 单 FRC 旧格式（ToolCallId + Content），兼容存量数据
                     contents.Add(new FunctionResultContent(row.ToolCallId ?? "", row.Content));
                 }
             }
@@ -427,5 +445,16 @@ public sealed class SqliteChatHistoryProvider(
     {
         public string Name { get; set; } = string.Empty;
         public string? Arguments { get; set; }
+    }
+
+    /// <summary>
+    /// tool 结果 JSON 反序列化用模型（ToolCalls 列，[{id, result}, ...]）。
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarAnalyzer.CSharp", "S3459", Justification = "JSON deserialization target")]
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarAnalyzer.CSharp", "S1144", Justification = "JSON deserialization target")]
+    private sealed class ToolResultJson
+    {
+        public string Id { get; set; } = string.Empty;
+        public string Result { get; set; } = string.Empty;
     }
 }
