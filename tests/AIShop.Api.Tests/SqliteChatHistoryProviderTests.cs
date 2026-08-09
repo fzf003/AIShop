@@ -259,6 +259,79 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task Store_MultiFrcToolPair_CompressedTogetherWithAssistantFcc()
+    {
+        // seed 49 条：id1 = assistant(FCC)（ToolCalls 非空）、id2 = 多 FRC tool 行（ToolCalls 为 JSON 数组）、id3-49 = 普通 user/assistant
+        var fccJson = JsonSerializer.Serialize(new[]
+        {
+            new { id = "call_1", type = "function", function = new { name = "search_product", arguments = "{}" } }
+        }, JsonOptions);
+
+        var toolResultsJson = JsonSerializer.Serialize(new[]
+        {
+            new { id = "call_a", result = "结果A" },
+            new { id = "call_b", result = "结果B" },
+        }, JsonOptions);
+
+        using (var seed = _dbFactory.CreateDbContext())
+        {
+            // id1：assistant(FCC)，与紧随的多 FRC tool 行配对
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                Role = "assistant",
+                Content = "",
+                ToolCalls = fccJson,
+            });
+            // id2：多 FRC tool 行——ToolCalls 列存 JSON 数组、ToolCallId 置空、单行不拆行
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                Role = "tool",
+                Content = "",
+                ToolCalls = toolResultsJson,
+                ToolCallId = null,
+            });
+            // id3-49：47 条普通消息
+            for (int i = 3; i <= 49; i++)
+            {
+                seed.ChatMessageRecords.Add(new ChatMessageRecord
+                {
+                    SessionId = _sessionId,
+                    Role = i % 2 == 0 ? "assistant" : "user",
+                    Content = $"消息{i}",
+                });
+            }
+            await seed.SaveChangesAsync();
+        }
+
+        // Store 默认再增 user + assistant → 51 条，toCompressCount = 51 - 50 = 1（只触发 1 条压缩，命中配对保护）
+        await InvokeStoreAsync();
+
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var rows = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId)
+            .OrderBy(m => m.Id)
+            .ToListAsync();
+
+        // id1（assistant FCC）与 id2（多 FRC tool 行）同生共死：同被压缩，
+        // 不出现 "assistant kept + tool 被裁" 的孤儿配对
+        var row1 = rows[0];
+        Assert.Equal("assistant", row1.Role);
+        Assert.True(row1.IsCompacted);
+        Assert.False(string.IsNullOrEmpty(row1.ToolCalls));
+
+        var row2 = rows[1];
+        Assert.Equal("tool", row2.Role);
+        Assert.True(row2.IsCompacted);
+        Assert.Equal("call_a", JsonDocument.Parse(row2.ToolCalls!).RootElement[0].GetProperty("id").GetString());
+
+        // 多 FRC tool 只占 1 行参与计数：51 总行 - 2 压缩 = 49 未压缩
+        var uncompacted = rows.Count(r => !r.IsCompacted);
+        Assert.Equal(49, uncompacted);
+    }
+
+    [Fact]
     public async Task Provide_RebuildsUserMessageAsTextContent()
     {
         SeedMessages(1, roles: ["user"], contents: ["你好"]);
