@@ -260,14 +260,25 @@ public sealed class SqliteChatHistoryProvider(
             }
             else if (msg.Role == ChatRole.Tool)
             {
-                // 提取 FunctionResultContent 的 CallId 和结果文本
-                var frc = msg.Contents.OfType<FunctionResultContent>().FirstOrDefault();
-                if (frc is not null)
+                // 按 FRC 数量分流：单 FRC 保持旧格式（ToolCallId + Content），多 FRC 序列化为 JSON 数组存 ToolCalls 列
+                var frcs = msg.Contents.OfType<FunctionResultContent>().ToList();
+                if (frcs.Count == 1)
                 {
+                    // 单 FRC：保持旧格式（ToolCallId + Content），兼容存量数据
+                    var frc = frcs[0];
                     toolCallId = frc.CallId;
                     // 如果 TextContent 为空，从 FRC.Result 提取文本
                     if (string.IsNullOrEmpty(textContent) && frc.Result is not null)
                         textContent = frc.Result?.ToString() ?? "";
+                }
+                else if (frcs.Count > 1)
+                {
+                    // 多 FRC：序列化成 JSON 数组存入 ToolCalls 列（[{id, result}, ...]），ToolCallId 置空
+                    var results = frcs
+                        .Select(frc => new { id = frc.CallId, result = frc.Result?.ToString() ?? "" })
+                        .ToList();
+                    toolCalls = JsonSerializer.Serialize(results, JsonOptions);
+                    toolCallId = null;
                 }
             }
 
