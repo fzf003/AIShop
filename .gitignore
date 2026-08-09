@@ -29,6 +29,8 @@ Directory.Build.props
 .claude/worktree/
 .claude/workflows/
 .codex/
+.claude/skills/matt-workflow/
+.claude/skills/matt-pocock-flow/
 
 
 tools/
