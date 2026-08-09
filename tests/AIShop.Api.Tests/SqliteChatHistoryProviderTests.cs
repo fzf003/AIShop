@@ -189,6 +189,26 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task Store_ToolMessageSingleFrc_KeepsLegacyFormat()
+    {
+        var toolMsg = new AgentChatMessage { Role = ChatRole.Tool };
+        toolMsg.Contents.Add(new FunctionResultContent("call_1", "结果1"));
+
+        await InvokeStoreAsync(responseMessages: [toolMsg]);
+
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var row = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId && m.Role == "tool")
+            .FirstOrDefaultAsync();
+
+        // 单 FRC 保持旧格式（ToolCallId + Content，ToolCalls 列空），兼容存量数据
+        Assert.NotNull(row);
+        Assert.Equal("call_1", row.ToolCallId);
+        Assert.Equal("结果1", row.Content);
+        Assert.Null(row.ToolCalls);
+    }
+
+    [Fact]
     public async Task Store_AppendsThenTrimsToStoredLimit()
     {
         SeedMessages(15);
