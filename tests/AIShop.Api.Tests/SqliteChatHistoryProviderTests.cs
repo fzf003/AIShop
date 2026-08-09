@@ -158,6 +158,37 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task Store_ToolMessageWithMultipleFrcs_WritesJsonArraySingleRow()
+    {
+        var toolMsg = new AgentChatMessage { Role = ChatRole.Tool };
+        toolMsg.Contents.Add(new FunctionResultContent("call_a", "结果A"));
+        toolMsg.Contents.Add(new FunctionResultContent("call_b", "结果B"));
+
+        await InvokeStoreAsync(responseMessages: [toolMsg]);
+
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var rows = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId && m.Role == "tool")
+            .ToListAsync();
+
+        // 恰好 1 行（不按 FRC 数拆行）
+        var row = Assert.Single(rows);
+        // ToolCallId 置空
+        Assert.Null(row.ToolCallId);
+        // ToolCalls 列为 JSON 数组（[{id, result}, ...]），单行存储不拆行
+        Assert.False(string.IsNullOrEmpty(row.ToolCalls));
+
+        using var doc = JsonDocument.Parse(row.ToolCalls);
+        var arr = doc.RootElement;
+        Assert.Equal(JsonValueKind.Array, arr.ValueKind);
+        Assert.Equal(2, arr.GetArrayLength());
+        Assert.Equal("call_a", arr[0].GetProperty("id").GetString());
+        Assert.Equal("结果A", arr[0].GetProperty("result").GetString());
+        Assert.Equal("call_b", arr[1].GetProperty("id").GetString());
+        Assert.Equal("结果B", arr[1].GetProperty("result").GetString());
+    }
+
+    [Fact]
     public async Task Store_AppendsThenTrimsToStoredLimit()
     {
         SeedMessages(15);
