@@ -73,23 +73,23 @@ public static class AgentTelemetry
             return builder;   // Debug 关闭：零配置，不设置 EnrichWith 回调，无额外 body 读取开销
         }
 
-        httpOptions.EnrichWithHttpRequestMessage = (activity, request) =>
+        httpOptions.EnrichWithHttpRequestMessage = async (activity, request) =>
         {
             activity.SetTag("http.request.headers", request.Headers.ToString());
             if (request.Content is not null)
             {
                 activity.SetTag("http.request.content.headers", request.Content.Headers.ToString());
-                activity.SetTag("http.request.content.body", request.Content.ReadAsStringAsync().GetAwaiter().GetResult());
+                activity.SetTag("http.request.content.body", await request.Content.ReadAsStringAsync());
             }
         };
 
-        httpOptions.EnrichWithHttpResponseMessage = (activity, response) =>
+        httpOptions.EnrichWithHttpResponseMessage = async (activity, response) =>
         {
             activity.SetTag("http.response.headers", response.Headers.ToString());
             if (response.Content is not null)
             {
                 activity.SetTag("http.response.content.headers", response.Content.Headers.ToString());
-                activity.SetTag("http.response.content.body", response.Content.ReadAsStringAsync().GetAwaiter().GetResult());
+                activity.SetTag("http.response.content.body", await response.Content.ReadAsStringAsync());
             }
         };
 
