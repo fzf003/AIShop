@@ -99,6 +99,16 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         services.AddDbContextFactory<AppDbContext>(options => options.UseSqlite(connStr));
         services.AddScoped<AppDbContext>(sp =>
             sp.GetRequiredService<IDbContextFactory<AppDbContext>>().CreateDbContext());
+
+        // 播种 18 商品：隔离库是全新空库，ProductRepository 改查库后 /products 从空表返回 0，
+        // 必须在此建表 + 播入 ProductSeedData，否则 GetProducts_ReturnsAll 期望 18 实际 0。
+        // 用独立 DbContextOptions 直接构造上下文播种（与 ProductRepositoryTests 同一模式），
+        // 避免在 ConfigureServices 阶段 BuildServiceProvider() 触发 Serilog "already frozen"。
+        using var seedCtx = new AppDbContext(
+            new DbContextOptionsBuilder<AppDbContext>().UseSqlite(connStr).Options);
+        seedCtx.Database.EnsureCreated();
+        seedCtx.Products.AddRange(ProductSeedData.Products);
+        seedCtx.SaveChanges();
     }
 
     [Fact]
