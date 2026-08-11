@@ -14,6 +14,8 @@ public sealed class AppDbContext : DbContext
     public DbSet<ChatMessageRecord> ChatMessageRecords => Set<ChatMessageRecord>();
     public DbSet<Cart> Carts => Set<Cart>();
     public DbSet<CartItem> CartItems => Set<CartItem>();
+    public DbSet<Product> Products => Set<Product>();
+    public DbSet<UserPreferences> UserPreferences => Set<UserPreferences>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -93,6 +95,20 @@ public sealed class AppDbContext : DbContext
                 "idx_cm_session_active");
             e.HasIndex(m => new { m.SessionId, m.Id },
                 "idx_cm_session_id");
+        });
+
+        modelBuilder.Entity<Product>(e =>
+        {
+            e.HasKey(p => p.Id);
+            // 种子显式写入 Id 1..18，禁止数据库自增生成，保证与购物车/工具引用的 productId 一致
+            e.Property(p => p.Id).ValueGeneratedNever();
+            // Tags 为 string[]，依赖 EF 原始集合默认 JSON 列（SQLite 存 TEXT），无需显式配置
+        });
+
+        modelBuilder.Entity<UserPreferences>(e =>
+        {
+            e.HasKey(u => u.UserId);
+            e.Property(u => u.KeywordsJson).HasColumnType("TEXT");
         });
     }
 }
