@@ -18,7 +18,7 @@ using OpenTelemetry;
 using OpenTelemetry.Instrumentation.Http;
 using OpenTelemetry.Trace;
 using AIShop.Api.Agents;
-using AIShop.Core.Interfaces;
+using AIShop.Core.StaticData;
 using AIShop.Infrastructure.Data;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -462,14 +462,13 @@ public sealed class AgentTelemetryTests : IDisposable
     /// <summary>
     /// 直接构造 ShoppingAssistantAgent 的最小夹具：
     /// mock IChatClient（返回固定 JSON 回复）、SQLite 内存库（EnsureCreated）、
-    /// mock IDbContextFactory / IProductCatalogService / CartToolProvider。
+    /// mock IDbContextFactory / CartToolProvider，keywordMap 传 Core 静态常量。
     /// </summary>
     private sealed class ShoppingAssistantAgentFixture : IDisposable
     {
         private readonly SqliteConnection _connection;
         private readonly IDbContextFactory<AppDbContext> _dbFactory;
         private readonly IChatClient _chatClient;
-        private readonly IProductCatalogService _catalog;
         private readonly CartToolProvider _cartTools;
         private readonly IServiceScopeFactory _scopeFactory;
 
@@ -510,9 +509,6 @@ public sealed class AgentTelemetryTests : IDisposable
                     Arg.Any<IEnumerable<ChatMessage>>(), Arg.Any<ChatOptions?>(), Arg.Any<CancellationToken>())
                 .Returns(AsyncEnumerable.Empty<ChatResponseUpdate>());
 
-            _catalog = Substitute.For<IProductCatalogService>();
-            _catalog.KeywordMap.Returns(new Dictionary<string, string[]>());
-
             var serviceCollection = new ServiceCollection();
             serviceCollection.AddDbContextFactory<AppDbContext>(o => o.UseSqlite(_connection));
             _scopeFactory = serviceCollection.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
@@ -520,7 +516,7 @@ public sealed class AgentTelemetryTests : IDisposable
         }
 
         public ShoppingAssistantAgent CreateAgent(AgentTelemetryLevel level)
-            => new(_chatClient, _dbFactory, _catalog, _cartTools, isOpenAI: false,
+            => new(_chatClient, _dbFactory, ProductKeywordMap.Entries, _cartTools, isOpenAI: false,
                 new AgentTelemetryOptions { Level = level });
 
         public void Dispose()

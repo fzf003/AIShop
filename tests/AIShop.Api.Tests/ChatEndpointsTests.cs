@@ -3,7 +3,7 @@ using System.Text.Json;
 using AIShop.AgentTelemetry;
 using AIShop.Api.Agents;
 using AIShop.Api.Features.Chat;
-using AIShop.Core.Interfaces;
+using AIShop.Core.StaticData;
 using AIShop.Infrastructure.Data;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
@@ -62,7 +62,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     return new ShoppingAssistantAgent(
                         sp.GetRequiredService<Meai.IChatClient>(),
                         sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        sp.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         sp.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         sp.GetRequiredService<AgentTelemetryOptions>());
@@ -71,7 +71,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -244,7 +244,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -252,7 +252,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -304,7 +304,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -312,7 +312,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -439,7 +439,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     return new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>());
@@ -448,7 +448,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -500,7 +500,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     return new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>());
@@ -509,7 +509,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -572,7 +572,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("qwen"),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -580,7 +580,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("gpt-4.1"),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -588,7 +588,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("qwen"),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
