@@ -27,13 +27,3 @@ public sealed class ChatMessage
     public DateTime Timestamp { get; init; } = DateTime.UtcNow;
     public long SequentialNumber { get; set; }
 }
-
-public sealed class Product
-{
-    public int Id { get; init; }
-    public string Name { get; init; } = string.Empty;
-    public string Category { get; init; } = string.Empty;
-    public string[] Tags { get; init; } = [];
-    public decimal Price { get; init; }
-    public string Emoji { get; init; } = string.Empty;
-}
