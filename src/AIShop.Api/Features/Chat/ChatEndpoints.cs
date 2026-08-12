@@ -91,7 +91,7 @@ public static class ChatEndpoints
             {
                 var modelId = req.Model ?? router.ActiveModel;
                 var agent = router.GetAgent(modelId);
-                (result, session) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, ct);
+                (result, session) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, ct: ct);
             }
             catch (KeyNotFoundException knf)
             {
@@ -247,7 +247,7 @@ public static class ChatEndpoints
                 agentSw.Start();
                 try
                 {
-                    (agentResult, agentSession) = await defaultAgent.RunChatAsync(sid, lastUserMessage.Content, req.Username, ct);
+                    (agentResult, agentSession) = await defaultAgent.RunChatAsync(sid, lastUserMessage.Content, req.Username, ct: ct);
                 }
                 catch (Exception ex)
                 {

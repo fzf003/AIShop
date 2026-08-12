@@ -175,13 +175,19 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     /// - 非 OpenAI（千问/DeepSeek/MiMo）：纯 Text 路径
     /// </summary>
     public async Task<(AgentChatResult Result, AgentSession Session)> RunChatAsync(
-        Guid sessionId, string userMessage, string username, CancellationToken ct = default)
+        Guid sessionId, string userMessage, string username,
+        string? preferences = null, CancellationToken ct = default)
     {
         CartToolProvider.SetCurrentUser(username);
 
         var sw = Stopwatch.StartNew();
         var session = await _agent.CreateSessionAsync(ct);
         session.StateBag.SetValue("SessionId", sessionId.ToString());
+
+        // 会话重建回填：从数据库加载的历史偏好经端点传入，写入 StateBag，
+        // PreferenceMemoryProvider 在本次运行即可读取并注入 LLM 上下文。
+        if (!string.IsNullOrWhiteSpace(preferences))
+            session.StateBag.SetValue("Preferences", preferences);
 
         AgentChatResult? result = null;
         string? rawText = null;
