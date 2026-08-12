@@ -263,11 +263,11 @@ public sealed class AgentTelemetryTests : IDisposable
     // =========================================================
 
     [Fact]
-    public void ShouldWriteRequestAndResponseTags_WhenEnrichWithCalled()
+    public void ShouldWriteRequestHeaderAndBodyTags_ButNotResponseBody_WhenEnrichWithCalled()
     {
         using var activity = CreateStartedActivity("System.Net.Http.HttpRequestOut");
 
-        // 构造带 body 的请求/响应消息：headers + Content body（与官方 Sample 相同的抓取来源）
+        // 构造带 body 的请求/响应消息：headers + Content body（模拟真实 LLM 请求/响应）
         using var request = new HttpRequestMessage(HttpMethod.Post, "https://example.com/chat")
         {
             Headers = { { "Authorization", "Bearer secret-key" } },
@@ -289,14 +289,17 @@ public sealed class AgentTelemetryTests : IDisposable
         httpOptions.EnrichWithHttpRequestMessage!(activity, request);
         httpOptions.EnrichWithHttpResponseMessage!(activity, response);
 
-        // Assert：四个 tag 全部写入 activity（headers 经消息.Headers.ToString() 序列化 + body 原文）。
-        // header 名可能被 .NET 规范化（X-Request-Id → X-Request-ID），故按 header 值断言避免过度耦合序列化格式
+        // Assert：抓 request headers + request body；【不抓 response body】。
+        // request body 是内存 content（StringContent）可重读，抓取安全；
+        // response body 是网络流——EnrichWith* 回调是 void 委托，async lambda 为 fire-and-forget 并发执行，
+        // 抓 response body 会与 DeepSeek 直连路径（DeepSeekDirectCallAsync 解析读取）并发读同一响应流，抛
+        // System.InvalidOperationException: "The stream was already consumed"。回复内容由 MAF MetadataAndContent 采集进 Aspire。
         var tags = activity.Tags.ToDictionary(t => t.Key, t => t.Value);
 
         Assert.Contains("Authorization: Bearer secret-key", Assert.IsType<string>(tags["http.request.headers"]));
         Assert.Equal("{\"message\":\"你好\"}", tags["http.request.content.body"]);
         Assert.Contains("req-123", Assert.IsType<string>(tags["http.response.headers"]));
-        Assert.Equal("{\"error\":\"rate limit\"}", tags["http.response.content.body"]);
+        Assert.DoesNotContain("http.response.content.body", tags.Keys);
     }
 
     [Fact]
@@ -408,51 +411,51 @@ public sealed class AgentTelemetryTests : IDisposable
 
     // =========================================================
     // T14 — AgentTelemetryOptions DI 注册与默认级别（集成）
-    // 对应 spec「配置节注册到 DI」+「默认采集级别为 Metadata」+「配置节驱动采集级别」。
+    // 对应 spec「配置节注册到 DI」+「默认采集级别为 MetadataAndContent」+「配置节驱动采集级别」。
     // 用 WebApplicationFactory<Program> 走 Program.cs 真实 DI 注册（Configure 绑定配置节 + AddSingleton），
     // 直接从容器解析 AgentTelemetryOptions 单例，验证：
-    //   1) 默认配置（appsettings AgentTelemetry:Level=Metadata）下可解析且 Level==Metadata；
+    //   1) 默认配置（appsettings AgentTelemetry:Level=MetadataAndContent）下可解析且 Level==MetadataAndContent；
     //   2) 同一容器解析两次返回同一实例（单例语义）；
-    //   3) WithWebHostBuilder 覆盖 Level=MetadataAndContent 后 Level==MetadataAndContent
-    //      （排查时仅改配置生效，无需重编译）。
+    //   3) WithWebHostBuilder 覆盖 Level=Metadata 后 Level==Metadata（配置覆盖生效，无需重编译）。
     // 注：单例语义验证在"覆盖"测试中进行，因为默认配置测试复用 WebApplicationFactory
     // 的 Provider 缓存，断言 ReferenceEquals 会跨测试共享实例，产生脆弱耦合。
     // =========================================================
 
     [Fact]
-    public void Options_WithDefaultConfig_IsResolvableAndLevelIsMetadata()
+    public void Options_WithDefaultConfig_IsResolvableAndLevelIsMetadataAndContent()
     {
-        // 默认 appsettings.json：AgentTelemetry:Level=Metadata（生产安全默认）
+        // 默认 appsettings.json：AgentTelemetry:Level=MetadataAndContent（配合 Debug=true 排查，LLM 内容进 Aspire）
         using var factory = new WebApplicationFactory<Program>();
 
         // 直接从容器解析：DI 注册（Configure 绑定配置节 + AddSingleton）必须可解析
         var options = factory.Services.GetRequiredService<AgentTelemetryOptions>();
 
-        // 默认 appsettings 生效：Level==Metadata、SourceName==null（用框架默认）
-        Assert.Equal(AgentTelemetryLevel.Metadata, options.Level);
+        // 默认 appsettings 生效：Level==MetadataAndContent、SourceName==null（用框架默认）
+        Assert.Equal(AgentTelemetryLevel.MetadataAndContent, options.Level);
         Assert.Null(options.SourceName);
     }
 
     [Fact]
-    public void Options_WithMetadataAndContentOverride_IsResolvableAndLevelIsMetadataAndContent()
+    public void Options_WithMetadataOverride_IsResolvableAndLevelIsMetadata()
     {
         using var factory = new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
             {
                 builder.ConfigureAppConfiguration((context, config) =>
                 {
-                    // 覆盖 AgentTelemetry:Level=MetadataAndContent：无需重编译，仅改配置即生效
+                    // 覆盖 AgentTelemetry:Level=Metadata：默认已是 MetadataAndContent，
+                    // 覆盖回 Metadata 验证「配置节驱动采集级别」生效，无需重编译。
                     config.AddInMemoryCollection(new Dictionary<string, string?>
                     {
-                        ["AgentTelemetry:Level"] = "MetadataAndContent",
+                        ["AgentTelemetry:Level"] = "Metadata",
                     });
                 });
             });
 
         var options = factory.Services.GetRequiredService<AgentTelemetryOptions>();
 
-        // 覆盖后 Level==MetadataAndContent（配置节驱动采集级别）
-        Assert.Equal(AgentTelemetryLevel.MetadataAndContent, options.Level);
+        // 覆盖后 Level==Metadata（配置节驱动采集级别）
+        Assert.Equal(AgentTelemetryLevel.Metadata, options.Level);
 
         // 单例语义：注册为 AddSingleton(sp => IOptions.Value)，同一容器解析两次返回同一实例
         var same = factory.Services.GetRequiredService<AgentTelemetryOptions>();
