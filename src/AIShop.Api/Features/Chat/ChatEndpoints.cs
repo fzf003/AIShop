@@ -68,6 +68,7 @@ public static class ChatEndpoints
             ModelRouter router,
             IMemoryCache cache,
             IPreferenceRepository prefRepo,
+            IPreferenceQueue queue,
             CancellationToken ct) =>
         {
             var endpointSw = Stopwatch.StartNew();
@@ -181,6 +182,17 @@ public static class ChatEndpoints
             }
 
             productSw.Stop();
+
+            // 偏好异步写入：端点只入队轻量 UserPreferenceUpdate（权重累加在
+            // PreferenceWriteHostedService worker 侧串行读-改-写完成），立即返回不等待落库；
+            // 队列满（容量 64 / DropOldest）丢弃时记录 Warning，保证丢弃可观测（P2-6）
+            if (result.Preferences is { Length: > 0 })
+            {
+                var update = new UserPreferenceUpdate(user.Id, result.Preferences);
+                if (!queue.TryEnqueue(update))
+                    Log.Warning("Preference queue full, update dropped for {UserId}", user.Id);
+            }
+
             endpointSw.Stop();
             logger.Information(
                 "[Diagnose] /chat 总耗时 Total={TotalMs}ms Agent={AgentMs}ms " +
