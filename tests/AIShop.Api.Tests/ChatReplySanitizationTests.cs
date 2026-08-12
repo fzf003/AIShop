@@ -23,10 +23,11 @@ namespace AIShop.Api.Tests;
 public sealed class ChatReplySanitizationTestsCollection;
 
 /// <summary>
-/// R4 — Reply 回复文本清洗：LLM 回复中的「#5」「商品ID: 4」「商品ID：7」等商品 ID 展示
+/// R4/R5 — Reply 回复文本清洗：LLM 回复中的「#5」「商品ID: 4」「商品ID：7」等商品 ID 展示
 /// 从对话历史中去除，不向用户暴露商品 ID；购物车功能不受影响（前端用
 /// RecommendedProducts/OtherProducts 的 ProductDto.Id 加购，不从 Reply 文本解析）。
 /// 清洗只作用于 ChatReply.Response 字符串，RecommendedProducts/OtherProducts 的 Id 不变。
+/// R5 收紧：#\d+ 只删商品 ID 1-18 范围内的（防误删「订单号 #123456」等非商品 ID 的 #数字）。
 /// </summary>
 [Collection(nameof(ChatReplySanitizationTests))]
 public sealed class ChatReplySanitizationTests : IDisposable
@@ -138,6 +139,43 @@ public sealed class ChatReplySanitizationTests : IDisposable
 
         Assert.Contains("# 意式浓缩咖啡机", reply!.Response);
         Assert.Contains("商品ID 未知", reply.Response);
+    }
+
+    /// <summary>
+    /// R5 /chat — 正则收紧：#\d+ 只删商品 ID 1-18 范围内的。
+    /// 非商品 ID 的 #数字保留（订单号 #123456、超出范围的 #20/#19）；
+    /// 范围内的 #5/#18 仍删除；商品ID: 4（前缀明确，保持任意数字）仍删除。
+    /// </summary>
+    [Fact]
+    public async Task PostChat_ReplyWithOutOfRangeHashIds_KeepsNonProductIds_StripsInRangeIds()
+    {
+        const string agentJson =
+            """{"Reply":"订单号 #123456 处理中，#20 号商品，#5 意式浓缩咖啡机 ¥349.99，商品ID: 4 无线降噪耳机，#18 户外帐篷，#19 待上架商品","Keywords":[],"Preferences":[]}""";
+        using var factory = BuildFactory(agentJson);
+        using var client = factory.CreateClient();
+
+        var response = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "你好"));
+        response.EnsureSuccessStatusCode();
+        var reply = await response.Content.ReadFromJsonAsync<ChatReply>();
+        Assert.NotNull(reply);
+
+        // 1) 非商品 ID 的 #数字保留：#123456（订单号）、#20/#19（超出 1-18 范围）
+        Assert.Contains("#123456", reply!.Response);
+        Assert.Contains("#20", reply.Response);
+        Assert.Contains("#19", reply.Response);
+        Assert.Contains("订单号", reply.Response);
+        Assert.Contains("处理中", reply.Response);
+
+        // 2) 范围内的 #数字仍删除：#5（1-18 内）、#18（上界 18 内）
+        Assert.DoesNotContain("#5", reply.Response);
+        Assert.DoesNotContain("#18", reply.Response);
+        Assert.Contains("意式浓缩咖啡机", reply.Response);
+        Assert.Contains("349.99", reply.Response);
+        Assert.Contains("户外帐篷", reply.Response);
+
+        // 3) 商品ID: 4（前缀明确）仍删除
+        Assert.DoesNotContain("商品ID", reply.Response);
+        Assert.Contains("无线降噪耳机", reply.Response);
     }
 
     /// <summary>

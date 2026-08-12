@@ -363,25 +363,42 @@ public static class ChatEndpoints
 
     private static ProductDto ToDto(Product p) => new(p.Id, p.Name, p.Category, p.Tags, p.Price, p.Emoji);
 
-    // 商品 ID 标记正则（R4）：预编译 + 显式 timeout（满足 S6444/S6354）。
+    // 商品 ID 标记正则（R4/R5）：预编译 + 显式 timeout（满足 S6444/S6354）。
     // 不使用裸 \d+（会误删价格/数量），只匹配带 # 前缀或 商品ID 前缀的 ID 形式。
+    // R5 收紧：#\d+ 原来会误删非商品 ID 的「#数字」（如「订单号 #123456」「参见 #3 条款」），
+    // 商品 ID 范围是 1-18（ProductSeedData.Products 的 Id 显式 1..18）。
+    // 因此 # 前缀改走「\d+ 提取 + int.TryParse 校验 1..18 才删」，范围变化时只需同步 Min/MaxProductId。
+    // 商品ID 前缀则保持任意数字——前缀本身即明确的产品 ID 标记（无歧义），收紧反而会回归 R4「隐藏商品 ID 展示」的诉求。
     private static readonly Regex HashIdPattern =
-        new(@"#\d+", RegexOptions.None, TimeSpan.FromSeconds(1));
+        new(@"#(?<id>\d+)", RegexOptions.None, TimeSpan.FromSeconds(1));
     private static readonly Regex ProductIdLabelPattern =
         new(@"商品ID[\s:：]*\d+", RegexOptions.None, TimeSpan.FromSeconds(1));
 
+    // 商品 ID 合法范围（R5）：与 ProductSeedData.Products 的 Id 1..18 一致；新增/删除商品导致范围变化时同步这里。
+    private const int MinProductId = 1;
+    private const int MaxProductId = 18;
+
     /// <summary>
-    /// 清洗 LLM 回复文本（R4）：去除「#5」「商品ID: 4」「商品ID：7」等商品 ID 展示，
+    /// 清洗 LLM 回复文本（R4/R5）：去除「#5」「商品ID: 4」「商品ID：7」等商品 ID 展示，
     /// 避免对话历史向用户暴露商品 ID。只清洗 Reply 字符串，绝不触碰
     /// RecommendedProducts/OtherProducts 的 ProductDto.Id——前端加购依赖的结构化数据，不从文本解析。
+    /// R5 收紧：# 前缀仅删 1-18 范围内的 ID（防误删「订单号 #123456」等非商品 ID 的 #数字）。
     /// </summary>
     private static string SanitizeReply(string? reply)
     {
         var text = reply ?? "";
-        text = HashIdPattern.Replace(text, "");         // 去 #4
+        // 去 #5（1-18 内商品 ID）；#123456/#20（非 1-18）保留不删
+        text = HashIdPattern.Replace(text, static match =>
+            IsProductId(match.Groups["id"].Value) ? "" : match.Value);
         text = ProductIdLabelPattern.Replace(text, ""); // 去 商品ID 4 / 商品ID：4
         return text.Trim();                             // 清残留空格/标点
     }
+
+    /// <summary>
+    /// 判断 # 后的数字是否为合法商品 ID（R5）：落在 1-18 范围内才删除。
+    /// </summary>
+    private static bool IsProductId(string idText) =>
+        int.TryParse(idText, out var id) && id is >= MinProductId and <= MaxProductId;
 
     /// <summary>
     /// 偏好关键词白名单过滤（P2-4）：偏好词来自 DB，可能含非法词/空白词。
