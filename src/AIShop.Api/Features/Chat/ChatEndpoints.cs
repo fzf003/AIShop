@@ -153,8 +153,10 @@ public static class ChatEndpoints
             ChatReply chatReply;
 
             // 推荐合并（design 4.3 / T17 RecommendationMerger）：当前消息关键词优先，
-            // 不足 3 个时用偏好权重 Top-N 补齐到 ≤5，按序数忽略大小写去重
-            var prefKeywords = RecommendationMerger.GetTopPreferenceKeywords(prefs?.KeywordsJson, 5);
+            // 不足 3 个时用偏好权重 Top-N 补齐到 ≤5，按序数忽略大小写去重。
+            // 偏好词来自 DB，先经白名单过滤（P2-4），避免非法/空白偏好词合并后
+            // SplitProducts 返回空推荐却仍标记 HasRecommendation=true。
+            var prefKeywords = FilterValidPreferenceKeywords(prefs?.KeywordsJson, catalog);
             var merged = RecommendationMerger.MergeKeywords(validKeywords, prefKeywords);
 
             if (merged.Length == 0)
@@ -185,12 +187,13 @@ public static class ChatEndpoints
 
             // 偏好异步写入：端点只入队轻量 UserPreferenceUpdate（权重累加在
             // PreferenceWriteHostedService worker 侧串行读-改-写完成），立即返回不等待落库；
-            // 队列满（容量 64 / DropOldest）丢弃时记录 Warning，保证丢弃可观测（P2-6）
+            // DropOldest 语义下 TryEnqueue 仅在 channel 标记完成后才返回 false，此处 Warning 作为
+            // channel 完成兜底；队列满挤掉最旧的观测日志已内聚到 PreferenceQueue.TryEnqueue（P2-3）
             if (result.Preferences is { Length: > 0 })
             {
                 var update = new UserPreferenceUpdate(user.Id, result.Preferences);
                 if (!queue.TryEnqueue(update))
-                    Log.Warning("Preference queue full, update dropped for {UserId}", user.Id);
+                    Log.Warning("Preference queue completed, update dropped for {UserId}", user.Id);
             }
 
             endpointSw.Stop();
@@ -297,8 +300,9 @@ public static class ChatEndpoints
             RecommendationResponse response;
 
             // 推荐合并（design 4.3 / T17 RecommendationMerger）：与 /chat 同一口径——
-            // 当前关键词（Agent Keywords 白名单过滤）优先，不足 3 个时用偏好权重 Top-N 补齐到 ≤5
-            var prefKeywords = RecommendationMerger.GetTopPreferenceKeywords(prefs?.KeywordsJson, 5);
+            // 当前关键词（Agent Keywords 白名单过滤）优先，不足 3 个时用偏好权重 Top-N 补齐到 ≤5。
+            // 偏好词同样先经白名单过滤（P2-4），避免非法/空白偏好词产生空推荐。
+            var prefKeywords = FilterValidPreferenceKeywords(prefs?.KeywordsJson, catalog);
             var merged = RecommendationMerger.MergeKeywords(validKeywords, prefKeywords);
 
             if (merged.Length > 0)
@@ -357,6 +361,21 @@ public static class ChatEndpoints
     }
 
     private static ProductDto ToDto(Product p) => new(p.Id, p.Name, p.Category, p.Tags, p.Price, p.Emoji);
+
+    /// <summary>
+    /// 偏好关键词白名单过滤（P2-4）：偏好词来自 DB，可能含非法词/空白词。
+    /// 仅保留非空白、且命中商品关键词白名单（KeywordMap）或任一商品 Tag 的词，
+    /// 避免非法偏好词合并后 SplitProducts 返回空推荐却仍标记 HasRecommendation=true（空推荐 UX 退化）。
+    /// </summary>
+    private static string[] FilterValidPreferenceKeywords(string? keywordsJson, IProductCatalogService catalog)
+    {
+        var productTags = catalog.All.SelectMany(p => p.Tags).ToHashSet(StringComparer.Ordinal);
+        return RecommendationMerger.GetTopPreferenceKeywords(keywordsJson, 5)
+            .Where(kw => !string.IsNullOrWhiteSpace(kw)
+                && (catalog.KeywordMap.ContainsKey(kw) || productTags.Contains(kw)))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
 
     private static string GetMessageHash(string message)
     {

@@ -3,6 +3,9 @@ using System.Reflection;
 using System.Threading.Channels;
 using AIShop.Core.Interfaces;
 using AIShop.Infrastructure.Services;
+using Serilog;
+using Serilog.Core;
+using Serilog.Events;
 
 namespace AIShop.Api.Tests;
 
@@ -75,5 +78,52 @@ public sealed class PreferenceQueueTests
         Assert.True(channel!.Writer.TryComplete());
 
         Assert.False(queue.TryEnqueue(Update(1)));
+    }
+
+    /// <summary>
+    /// P2-3 — 队列满（容量 64 / DropOldest）挤掉最旧时可观测：写满后再入队一条，
+    /// TryEnqueue 仍返回 true（DropOldest 挤出最旧后写入成功），但入队前记录
+    /// 「near full, dropping oldest」Warning，丢弃不再静默。
+    /// 通过临时替换 Serilog 全局 Logger 捕获日志事件（try/finally 恢复，不影响其他用例）。
+    /// </summary>
+    [Fact]
+    public void ShouldLogWarning_WhenQueueNearFullAndDroppingOldest()
+    {
+        var sink = new CollectingSink();
+        var original = Log.Logger;
+        Log.Logger = new LoggerConfiguration()
+            .MinimumLevel.Verbose()
+            .WriteTo.Sink(sink)
+            .CreateLogger();
+        try
+        {
+            var queue = PreferenceQueue.Create();
+            for (var i = 0; i < Capacity; i++)
+            {
+                Assert.True(queue.TryEnqueue(Update(i)));
+            }
+
+            // 写满后入队：DropOldest 挤出最旧并返回 true，同时记录挤旧 Warning
+            Assert.True(queue.TryEnqueue(Update(Capacity)));
+
+            var warning = Assert.Single(sink.Events, e =>
+                e.Level == LogEventLevel.Warning
+                && e.MessageTemplate.Text.Contains("dropping oldest"));
+            Assert.Contains("{UserId}", warning.MessageTemplate.Text);
+        }
+        finally
+        {
+            Log.Logger = original;
+        }
+    }
+
+    /// <summary>
+    /// 收集 Serilog 日志事件的内存 sink（仅测试用）。
+    /// </summary>
+    private sealed class CollectingSink : ILogEventSink
+    {
+        public List<LogEvent> Events { get; } = [];
+
+        public void Emit(LogEvent logEvent) => Events.Add(logEvent);
     }
 }
