@@ -179,8 +179,8 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     }
 
     /// <summary>
-    /// R6 纯偏好驱动 — 无偏好时 /recommendations 走 All.Take(6) 兜底：
-    /// BestMatch=null、Message=暂无特定推荐、Other 内容恒为 Id 1..6（shuffle 只变顺序不变内容）。
+    /// R7 — 无对话历史且无偏好时，/recommendations 走 All.Take(6) 精选兜底：
+    /// BestMatch=null、Message=为您精选商品（非「暂无特定推荐」）、Other 内容恒为 Id 1..6（固定顺序，无 shuffle）。
     /// </summary>
     [Fact]
     public async Task ShouldReturnFallback_WhenNoPreference()
@@ -191,11 +191,11 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<RecommendationResponse>();
         Assert.NotNull(result);
-        Assert.Null(result!.BestMatch);                              // 无偏好 → 无最佳匹配
-        Assert.Equal("暂无特定推荐 — 浏览精选商品", result.Message);
+        Assert.Null(result!.BestMatch);                              // 无对话历史 + 无偏好 → 无最佳匹配
+        Assert.Equal("为您精选商品", result.Message);
         Assert.Equal(6, result.Other.Count);
         Assert.Equal([1, 2, 3, 4, 5, 6],
-            result.Other.Select(p => p.Id).OrderBy(x => x).ToArray()); // shuffle 只变顺序，内容仍为 All.Take(6)
+            result.Other.Select(p => p.Id).ToArray()); // 固定顺序（去 shuffle），可精确断言
     }
 
     [Fact]
@@ -231,9 +231,9 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
     }
 
     /// <summary>
-    /// R6 去缓存 — 两次 /recommendations 不依赖缓存也不调 LLM：
-    /// 每次重新计算但内容一致（纯偏好驱动，无偏好时恒为 All.Take(6)），
-    /// mock IChatClient 的 GetResponseAsync 全程未被调用（callCount==0）。
+    /// R7 无随机 — 两次 /recommendations 结果完全一致（确定性，无 shuffle）：
+    /// 无对话历史 + 无偏好 → 每次都是「为您精选商品」兜底，Other 顺序逐次相同（Id 1..6），
+    /// mock IChatClient 的 GetResponseAsync 全程未被调用（callCount==0，不调 LLM）。
     /// </summary>
     [Fact]
     public async Task ShouldReturnConsistentContent_WhenCalledTwice()
@@ -290,25 +290,26 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         var r1 = await resp1.Content.ReadFromJsonAsync<RecommendationResponse>();
         var r2 = await resp2.Content.ReadFromJsonAsync<RecommendationResponse>();
         Assert.NotNull(r1); Assert.NotNull(r2);
-        // 无偏好 → 两次都是兜底，内容一致（shuffle 只变顺序不变内容）
+        // 无对话历史 + 无偏好 → 两次都是「为您精选商品」兜底，内容与顺序一致（去 shuffle 确定性）
         Assert.Null(r1!.BestMatch);
         Assert.Null(r2!.BestMatch);
         Assert.Equal(
-            r1.Other.Select(p => p.Id).OrderBy(x => x).ToArray(),
-            r2.Other.Select(p => p.Id).OrderBy(x => x).ToArray());
-        Assert.Equal([1, 2, 3, 4, 5, 6], r1.Other.Select(p => p.Id).OrderBy(x => x).ToArray());
+            r1.Other.Select(p => p.Id).ToArray(),
+            r2.Other.Select(p => p.Id).ToArray());
+        Assert.Equal([1, 2, 3, 4, 5, 6], r1.Other.Select(p => p.Id).ToArray());
         Assert.Equal(r1.Message, r2.Message);
-        // /recommendations 纯偏好驱动，全程不调 LLM（无缓存命中/未命中之分）
+        // /recommendations 全程不调 LLM（无缓存命中/未命中之分）
         Assert.Equal(0, callCount);
     }
 
     /// <summary>
-    /// R6 纯偏好驱动 — 推荐不随消息变化：
-    /// 两条不同消息的 /chat 后，/recommendations 内容一致（无偏好时恒为 All.Take(6)），
-    /// 且 LLM 调用数仅来自 /chat（callCount==2），/recommendations 不再因新消息触发重算/缓存失效。
+    /// R7 随对话内容 — /recommendations 随最新消息实时变化（消息关键词驱动，不调 LLM）：
+    /// /chat「推荐咖啡机」后 → BestMatch 为意式浓缩咖啡机（Id 5）；/chat「你好」（无关键词，无偏好）后 →
+    /// 走「为您精选商品」兜底（BestMatch=null）。无偏好参与，纯消息关键词驱动；
+    /// LLM 调用数仅来自 /chat（callCount==2），/recommendations 不触发。
     /// </summary>
     [Fact]
-    public async Task ShouldNotChangeWithMessage_WhenPreferenceDriven()
+    public async Task ShouldFollowLatestMessage_WhenMessageChanges()
     {
         var callCount = 0;
         WebApplicationFactory<Program>? f = null;
@@ -353,27 +354,34 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
             });
         });
         using var client = f.CreateClient();
-        var chat1 = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐运动鞋"));
-        chat1.EnsureSuccessStatusCode();
-        var chat2 = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐耳机"));
-        chat2.EnsureSuccessStatusCode();
-        Assert.Equal(2, callCount);   // 两次 /chat 各调一次 LLM
 
-        var resp1 = await client.PostAsJsonAsync("/api/recommendations",
+        // 消息 1：「推荐咖啡机」→ 最新消息命中「咖啡」→ BestMatch 意式浓缩咖啡机 Id 5
+        var chat1 = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐咖啡机"));
+        chat1.EnsureSuccessStatusCode();
+        var reco1Resp = await client.PostAsJsonAsync("/api/recommendations",
             new RecommendationRequest("marla", "keymatch"));
-        resp1.EnsureSuccessStatusCode();
-        var resp2 = await client.PostAsJsonAsync("/api/recommendations",
+        reco1Resp.EnsureSuccessStatusCode();
+        var reco1 = await reco1Resp.Content.ReadFromJsonAsync<RecommendationResponse>();
+        Assert.NotNull(reco1);
+        Assert.NotNull(reco1!.BestMatch);
+        Assert.Equal(5, reco1.BestMatch!.Id); // 意式浓缩咖啡机（消息「咖啡」命中）
+        Assert.Equal("根据您的对话，为您推荐：", reco1.Message);
+
+        // 消息 2：「你好」（无关键词，无偏好）→ 最新消息无关键词 → 走「为您精选商品」兜底
+        var chat2 = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "你好"));
+        chat2.EnsureSuccessStatusCode();
+        var reco2Resp = await client.PostAsJsonAsync("/api/recommendations",
             new RecommendationRequest("marla", "keymatch"));
-        resp2.EnsureSuccessStatusCode();
-        var r1 = await resp1.Content.ReadFromJsonAsync<RecommendationResponse>();
-        var r2 = await resp2.Content.ReadFromJsonAsync<RecommendationResponse>();
-        Assert.NotNull(r1); Assert.NotNull(r2);
-        // 不同消息后 /recommendations 内容一致（纯偏好驱动，不随消息变化）
-        Assert.Equal(
-            r1!.Other.Select(p => p.Id).OrderBy(x => x).ToArray(),
-            r2!.Other.Select(p => p.Id).OrderBy(x => x).ToArray());
-        Assert.Equal(r1.Message, r2.Message);
-        // /recommendations 不再触发 LLM：callCount 仍为 2（仅 /chat 贡献）
+        reco2Resp.EnsureSuccessStatusCode();
+        var reco2 = await reco2Resp.Content.ReadFromJsonAsync<RecommendationResponse>();
+        Assert.NotNull(reco2);
+        Assert.Null(reco2!.BestMatch);                       // 无关键词 → 无最佳匹配
+        Assert.Equal("为您精选商品", reco2.Message);
+
+        // 推荐随最新消息变化（R7 核心语义）：含关键词消息出推荐，无关键词消息走兜底
+        Assert.NotEqual(reco1.Message, reco2.Message);
+        Assert.NotEqual(reco1.BestMatch, reco2.BestMatch);   // 5 vs null
+        // /recommendations 不调 LLM：callCount 仍为 2（仅两次 /chat 贡献）
         Assert.Equal(2, callCount);
     }
 

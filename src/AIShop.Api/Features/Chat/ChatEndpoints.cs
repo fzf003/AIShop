@@ -212,6 +212,8 @@ public static class ChatEndpoints
         api.MapPost("/recommendations", async (
             RecommendationRequest req,
             IUserRepository users,
+            ISessionRepository sessions,
+            IChatMessageRepository chatRepo,
             IProductCatalogService catalog,
             IPreferenceRepository prefRepo,
             CancellationToken ct) =>
@@ -223,43 +225,72 @@ public static class ChatEndpoints
             if (user is null)
                 return Results.Unauthorized();
 
-            // R6 纯偏好驱动：推荐只随持久化偏好变化，不随消息变化。
-            // 已删除 LLM Agent 调用（defaultAgent.RunChatAsync）、对话历史读取（lastUserMessage）
-            // 与缓存读写（reco_ / agent_result_）——纯偏好计算 <100ms，无需缓存。
+            var sessionId = await sessions.GetOrCreateSessionIdAsync(user.Id, ct);
+            var sid = Guid.Parse(sessionId);
+
+            // R7 推荐随对话内容：读最新用户消息关键词 + 偏好叠加，不调 LLM（毫秒级）。
+            // 已去除 R6 shuffle —— 固定顺序，多次调用结果确定（无随机）。
             var prefs = await prefRepo.GetByUserIdAsync(user.Id, ct);
             var prefKeywords = FilterValidPreferenceKeywords(prefs?.KeywordsJson, catalog);
-            var merged = RecommendationMerger.MergeKeywords([], prefKeywords);
+
+            // 最新用户消息（无对话历史则为 null → 消息关键词为空）
+            var lastUserMsg = await chatRepo.GetLastUserMessageAsync(sid, ct);
+            var userMsg = lastUserMsg?.Content ?? "";
+
+            // 与 /chat 端点一致的消息关键词匹配（L128-136）：消息含关键词或其任一扩张 tag。
+            // 不依赖 Agent 结构化 Keywords 输出，只从对话内容实时匹配（R7）。
+            var validKeywords = catalog.KeywordMap.Keys
+                .Where(k => userMsg.Contains(k, StringComparison.OrdinalIgnoreCase)
+                    || (catalog.KeywordMap.TryGetValue(k, out var tags)
+                        && tags.Any(tag => userMsg.Contains(tag, StringComparison.OrdinalIgnoreCase))))
+                .Distinct()
+                .Take(5)
+                .ToArray();
+
+            // 当前消息关键词优先，不足 3 个用偏好补齐（RecommendationMerger 口径与 /chat 一致）
+            var merged = RecommendationMerger.MergeKeywords(validKeywords, prefKeywords);
 
             RecommendationResponse response;
             if (merged.Length > 0)
             {
-                // 有偏好 → SplitProducts 出推荐；推荐/兜底列表轻度随机（R6 shuffle，只变顺序不变内容）
                 var (recommended, others) = catalog.SplitProducts(merged);
-                var recDtos = ShuffleProducts(recommended).Select(ToDto).ToList();
-                var otherDtos = recommended.Length == 0
-                    ? ShuffleProducts(catalog.All.Take(6).ToList()).Select(ToDto).ToList()
-                    : ShuffleProducts(others.Take(12).ToList()).Select(ToDto).ToList();
-
-                response = new RecommendationResponse(
-                    recDtos.FirstOrDefault(),
-                    otherDtos,
-                    "根据您的兴趣，为您推荐：",
-                    recDtos.Select(p => p.Category).Distinct().ToArray());
+                if (recommended.Length > 0)
+                {
+                    // 有推荐（merged>0 且有商品）→ 提示语与内容一致；固定顺序，无 shuffle
+                    var recDtos = recommended.Select(ToDto).ToList();
+                    var otherDtos = others.Take(12).Select(ToDto).ToList();
+                    response = new RecommendationResponse(
+                        recDtos.FirstOrDefault(),
+                        otherDtos,
+                        "根据您的对话，为您推荐：",
+                        recDtos.Select(p => p.Category).Distinct().ToArray());
+                }
+                else
+                {
+                    // merged>0 但无商品命中（如偏好词均未命中商品）→ 兜底精选，不显示「已推荐」空列表
+                    response = new RecommendationResponse(
+                        null,
+                        catalog.All.Take(6).Select(ToDto).ToList(),
+                        "为您精选商品",
+                        null);
+                }
             }
             else
             {
-                // 无偏好 → All.Take(6) 兜底（内容固定 Id 1..6，仅顺序 shuffle）
-                var fallback = ShuffleProducts(catalog.All.Take(6).ToList()).Select(ToDto).ToList();
+                // 无关键词无偏好 → All.Take(6) 固定顺序兜底（无 shuffle）。
+                // 提示语与内容一致：有兜底商品说「为您精选商品」，仅当商品库完全为空才说「暂无特定推荐」
+                //（消除 R6「暂无特定推荐」却列表有商品的矛盾）。
+                var fallback = catalog.All.Take(6).Select(ToDto).ToList();
                 response = new RecommendationResponse(
                     null,
                     fallback,
-                    "暂无特定推荐 — 浏览精选商品",
+                    catalog.All.Count == 0 ? "暂无特定推荐" : "为您精选商品",
                     null);
             }
 
             endpointSw.Stop();
             logger.Information(
-                "[Diagnose] /recommendations 总耗时 Total={TotalMs}ms 纯偏好驱动（无 Agent/缓存）",
+                "[Diagnose] /recommendations 总耗时 Total={TotalMs}ms 随对话内容（消息关键词+偏好，无 Agent/缓存）",
                 endpointSw.ElapsedMilliseconds);
 
             return Results.Ok(response);
@@ -310,22 +341,6 @@ public static class ChatEndpoints
     /// </summary>
     private static bool IsProductId(string idText) =>
         int.TryParse(idText, out var id) && id is >= MinProductId and <= MaxProductId;
-
-    /// <summary>
-    /// 轻量 Fisher-Yates shuffle（R6）：只变顺序不变内容，防推荐列表固化。
-    /// 默认使用 Random.Shared（线程安全）；如需复现顺序可传入固定种子的 Random（便于测试）。
-    /// </summary>
-    private static List<Product> ShuffleProducts(IReadOnlyList<Product> products, Random? random = null)
-    {
-        var list = products.ToList();
-        var rng = random ?? Random.Shared;
-        for (var i = list.Count - 1; i > 0; i--)
-        {
-            var j = rng.Next(i + 1);
-            (list[i], list[j]) = (list[j], list[i]);
-        }
-        return list;
-    }
 
     /// <summary>
     /// 偏好关键词白名单过滤（P2-4）：偏好词来自 DB，可能含非法词/空白词。
