@@ -8,11 +8,12 @@ namespace AIShop.AgentTelemetry;
 /// <summary>
 /// Agent 遥测装配助手：复刻微软官方 <c>microsoft-agent-integration</c> 的 AgentTelemetry 模式，
 /// 用 MAF 内建 <c>OpenTelemetryAgent</c> 装饰 Agent，开启内容采集（消息内容 / 工具参数 / 工具结果）；
-/// 并提供 DebugTelemetry 扩展：按 <c>AgentTelemetry:Debug</c> 开关抓 HTTP 请求/响应头与 body 写本地 <c>traces_*.log</c>。
+/// 并提供 DebugTelemetry 扩展：按 <c>AgentTelemetry:Debug</c> 开关抓 HTTP 请求/响应头写本地 <c>traces_*.log</c>
+    ///（HTTP body 由 Api 侧 DebugHandler 读取打印，避免与 Enrich 回调并发读同一响应流冲突，见 ConfigureDebugTelemetry）。
 ///
 /// 裁剪原则：AIShop 已通过 <c>AddServiceDefaults()</c> 配置 OTLP 导出到 Aspire，
 /// 故不引入官方 Sample 的 <c>CreateTracerProvider</c> OTLP 导出部分；仅引入 <c>FileSpanExporter</c> 用于
-/// DebugTelemetry 的本地 body 日志（body 含敏感信息，只写本地文件，不进 OTLP / Aspire Dashboard）。
+/// DebugTelemetry 的本地 headers 日志（headers 含 Authorization / API key，只写本地文件，不进 OTLP / Aspire Dashboard）。
 /// 不自建 ActivitySource、不自写 span 属性，全部可观测数据来自 MAF 内建埋点。
 /// </summary>
 public static class AgentTelemetry
@@ -49,8 +50,12 @@ public static class AgentTelemetry
     /// <see langword="true"/> 时给 <see cref="HttpClientTraceInstrumentationOptions"/> 配置
     /// <see cref="HttpClientTraceInstrumentationOptions.EnrichWithHttpRequestMessage"/> /
     /// <see cref="HttpClientTraceInstrumentationOptions.EnrichWithHttpResponseMessage"/> 回调，
-    /// 抓 <c>System.Net.Http.HttpRequestOut</c> span 的请求/响应 headers 与 body。
-    /// body 含敏感信息（Authorization / API key），仅写本地文件，不进 OTLP / Aspire Dashboard。
+    /// 抓 <c>System.Net.Http.HttpRequestOut</c> span 的请求/响应 headers 与 request body。
+    /// 不抓 response body：Enrich 回调是 void 委托，async lambda 为 fire-and-forget，并发读
+    /// response body 会与 DeepSeek 直连路径（DeepSeekDirectCallAsync 解析读取）冲突
+    /// （"The stream was already consumed"）；request body 是内存 content 可重读，抓取安全。
+    /// headers 含 Authorization / API key，由 BodyRedactionProcessor 脱敏，不进 OTLP / Aspire Dashboard；
+    /// LLM 对话内容经 <see cref="AgentTelemetryLevel.MetadataAndContent"/> 由 MAF OpenTelemetryAgent 采集进 Aspire。
     /// <see langword="false"/>（默认）时直接返回：不设置任何回调，无额外开销。
     ///
     /// 注意：本方法<b>只设置 EnrichWith 回调，不注册导出 processor</b>——它设计为在
@@ -73,23 +78,36 @@ public static class AgentTelemetry
             return builder;   // Debug 关闭：零配置，不设置 EnrichWith 回调，无额外 body 读取开销
         }
 
+        // Enrich 只抓 request body 与 headers，【不抓 response body】。
+        // request body 是内存 content（StringContent / SDK 发送前已缓冲）可重读，抓取安全；
+        // response body 是网络流——EnrichWith* 回调是 void 委托，async lambda 为 fire-and-forget 并发执行，
+        // 读 response body 会与 DeepSeek 直连路径（DeepSeekDirectCallAsync 解析读取）并发读同一
+        // 未缓冲响应流，抛 System.InvalidOperationException: "The stream was already consumed"。
+        // 回复内容经 AgentTelemetryLevel.MetadataAndContent 由 MAF OpenTelemetryAgent 采集进 Aspire；
+        // 排查原始报文时经 AgentTelemetry:DebugHandler=true 挂载 DebugHandler。
         httpOptions.EnrichWithHttpRequestMessage = async (activity, request) =>
         {
             activity.SetTag("http.request.headers", request.Headers.ToString());
             if (request.Content is not null)
             {
                 activity.SetTag("http.request.content.headers", request.Content.Headers.ToString());
-                activity.SetTag("http.request.content.body", await request.Content.ReadAsStringAsync());
+                try
+                {
+                    activity.SetTag("http.request.content.body", await request.Content.ReadAsStringAsync());
+                }
+                catch
+                {
+                    // request body 不可读时跳过，不破坏 span
+                }
             }
         };
 
-        httpOptions.EnrichWithHttpResponseMessage = async (activity, response) =>
+        httpOptions.EnrichWithHttpResponseMessage = (activity, response) =>
         {
             activity.SetTag("http.response.headers", response.Headers.ToString());
             if (response.Content is not null)
             {
                 activity.SetTag("http.response.content.headers", response.Content.Headers.ToString());
-                activity.SetTag("http.response.content.body", await response.Content.ReadAsStringAsync());
             }
         };
 

@@ -47,8 +47,9 @@ public sealed class ServiceDefaultsDebugTests
     public async Task ShouldNotProduceTracesLogOrCaptureBody_WhenDebugFalse()
     {
         var builder = Host.CreateApplicationBuilder();
-        // 显式覆盖 appsettings.json 的 AgentTelemetry:Debug=true（b4a2cdf 引入，被复制到测试输出目录），
-        // 保证测试隔离：无论宿主配置文件如何，本测试始终以 Debug=false 启动。
+        // 显式声明 Debug=false：WebApplicationFactory 引用 Api 项目时，其 appsettings.json（AgentTelemetry:Debug=true）
+        // 会被复制到测试输出目录，Host.CreateApplicationBuilder() 会读到 true → 误注册 FileSpanExporter。
+        // 测试意图是「Debug 关闭时零开销」，故显式覆盖前置条件（T26 隔离修复），不依赖环境默认。
         builder.Configuration["AgentTelemetry:Debug"] = "false";
         builder.AddServiceDefaults();
         using var host = builder.Build();
@@ -83,12 +84,15 @@ public sealed class ServiceDefaultsDebugTests
     }
 
     // =========================================================
-    // Debug=true：出站调用后本地日志含请求/响应 body，且 body 不进 OTLP
-    // 对应 spec「Debug 开启时抓取 HTTP 请求/响应 body 写本地文件」+「body 只写本地文件不进 OTLP」。
+    // Debug=true：出站调用后本地日志含请求/响应 headers，且不抓 body、headers 不进 OTLP
+    // 对应 spec「Debug 开启时抓取 HTTP 请求/响应头写本地文件」+「headers 只写本地文件不进 OTLP」。
+    // 修复点：Enrich 回调不再抓 body（回调是 void 委托，async lambda 为 fire-and-forget 并发执行，
+    // 抓 response body 会与 DeepSeek 直连路径冲突 → "The stream was already consumed"）；
+    // HTTP body 由 Api 侧 DebugHandler 读取打印。
     // 配置 AgentTelemetry:Debug=true（ServiceDefaults 惰性读取 → 无需重编译仅改配置生效）。
     // =========================================================
     [Fact]
-    public async Task ShouldWriteRequestBodyToLocalLog_AndRedactBodyFromOtlp_WhenDebugTrue()
+    public async Task ShouldWriteHeaderTagsToLocalLog_AndRedactFromOtlp_WhenDebugTrue()
     {
         var builder = Host.CreateApplicationBuilder();
         builder.Configuration["AgentTelemetry:Debug"] = "true";
@@ -113,7 +117,7 @@ public sealed class ServiceDefaultsDebugTests
 
         var before = SnapshotTracesFiles();
 
-        // 出站调用：触发 System.Net.Http.HttpRequestOut span，FileSpanExporter 同步落盘真实 body
+        // 出站调用：触发 System.Net.Http.HttpRequestOut span，FileSpanExporter 同步落盘抓到的 headers tag
         const string requestBody = "{\"q\":\"你好\"}";
         await using var stub = new HttpStubServer();
         using var client = new HttpClient();
@@ -127,10 +131,11 @@ public sealed class ServiceDefaultsDebugTests
         {
             var content = await WaitForFileContentAsync(logFile);
             Assert.Contains("System.Net.Http.HttpRequestOut", content);
-            Assert.Contains("http.request.content.body", content);
-            Assert.Contains(requestBody, content);
-            Assert.Contains("http.response.content.body", content);
-            Assert.Contains(HttpStubServer.ResponseBody, content);   // stub 返回的响应 body
+            // Enrich 抓 request body + headers；不抓 response body（避免并发读同一响应流冲突 → already consumed）：
+            Assert.Contains("http.request.headers", content);
+            Assert.Contains("http.response.headers", content);
+            Assert.Contains(requestBody, content);                        // request body 保留（body 放行进 OTLP）
+            Assert.DoesNotContain(HttpStubServer.ResponseBody, content);  // response body 不抓
         }
         finally
         {
@@ -147,30 +152,32 @@ public sealed class ServiceDefaultsDebugTests
     // 而 Debug 抓取的 body/headers 均为 string，覆盖为占位符后枚举可见。
     // =========================================================
     [Fact]
-    public void ShouldRedactSensitiveBodyAndHeaderTags_WhenOnEnd()
+    public void ShouldRedactHeaderTags_ButKeepBodyTags_WhenOnEnd()
     {
         using var activity = new Activity("System.Net.Http.HttpRequestOut");
         // 标准 OTel http 属性（不含敏感信息）：必须保留
         activity.SetTag("http.request.method", "POST");
         activity.SetTag("http.response.status_code", "429");
-        // Debug 抓取的敏感 tag：必须被覆盖为占位符
+        // Debug 抓取的敏感 headers（含 Authorization / API key）：必须被覆盖为占位符
         activity.SetTag("http.request.headers", "Authorization: Bearer secret-key");
         activity.SetTag("http.request.content.headers", "Content-Type: application/json");
-        activity.SetTag("http.request.content.body", "{\"q\":\"你好\"}");
         activity.SetTag("http.response.headers", "X-Request-Id: req-123");
         activity.SetTag("http.response.content.headers", "Content-Type: application/json");
+        // body tag 按需求放行（用于排查；request body 为对话内容、无 API key）：
+        activity.SetTag("http.request.content.body", "{\"q\":\"你好\"}");
         activity.SetTag("http.response.content.body", "{\"error\":\"rate limit\"}");
 
         new BodyRedactionProcessor().OnEnd(activity);
 
         var tags = activity.Tags.ToDictionary(t => t.Key, t => t.Value);
-        // 敏感 tag 值被覆盖为占位符（真实 body / Authorization 不出进程）
+        // headers（含 Authorization / API key）被覆盖为占位符，真实 key 不出进程
         Assert.Equal(BodyRedactionProcessor.Redacted, tags["http.request.headers"]);
         Assert.Equal(BodyRedactionProcessor.Redacted, tags["http.request.content.headers"]);
-        Assert.Equal(BodyRedactionProcessor.Redacted, tags["http.request.content.body"]);
         Assert.Equal(BodyRedactionProcessor.Redacted, tags["http.response.headers"]);
         Assert.Equal(BodyRedactionProcessor.Redacted, tags["http.response.content.headers"]);
-        Assert.Equal(BodyRedactionProcessor.Redacted, tags["http.response.content.body"]);
+        // body 放行：保留原文进 OTLP / Aspire Dashboard（用于排查）
+        Assert.Equal("{\"q\":\"你好\"}", tags["http.request.content.body"]);
+        Assert.Equal("{\"error\":\"rate limit\"}", tags["http.response.content.body"]);
         // 标准 http.* 属性保留原值
         Assert.Equal("POST", tags["http.request.method"]);
         Assert.Equal("429", tags["http.response.status_code"]);

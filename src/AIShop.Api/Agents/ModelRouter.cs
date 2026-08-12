@@ -22,6 +22,7 @@ public class ModelRouter
     private readonly string _activeModel;
     private readonly IServiceProvider _sp;
     private readonly ConcurrentDictionary<string, Lazy<ShoppingAssistantAgent>> _agents = new(StringComparer.OrdinalIgnoreCase);
+    private readonly bool _enableDebugHandler;
 
     internal sealed record ModelConfig(string Endpoint, string Key, string Model, string Name);
 
@@ -38,6 +39,8 @@ public class ModelRouter
     public ModelRouter(IConfiguration configuration, IServiceProvider sp)
     {
         _sp = sp;
+        // DebugHandler 默认关闭（控制台不打印 LLM 报文、不读流）；排查时经 AgentTelemetry:DebugHandler=true 开启
+        _enableDebugHandler = configuration.GetValue<bool?>("AgentTelemetry:DebugHandler") ?? false;
         var modelsSection = configuration.GetSection("Models");
         var openaiSection = configuration.GetSection("OpenAI");
 
@@ -126,9 +129,12 @@ public class ModelRouter
     /// <summary>获取当前激活模型的默认 Agent 实例。</summary>
     public virtual IShoppingAssistantAgent GetDefaultAgent() => GetAgent(_activeModel);
 
-    private static IChatClient CreateChatClient(ModelConfig cfg)
+    private IChatClient CreateChatClient(ModelConfig cfg)
     {
         var handler = new HttpClientHandler { UseProxy = false, Proxy = null };
+
+        // 始终挂 DebugHandler，内部按开关透明转发：默认关闭（不打印、不读流），排查时 AgentTelemetry:DebugHandler=true 开启
+        var httpHandler = new DebugHandler(handler, _enableDebugHandler);
 
         // 统一路径：所有模型经 DeepSeekDelegatingChatClient 清洗 + 分流
         var isDeepSeek = cfg.Name.Contains("DeepSeek", StringComparison.OrdinalIgnoreCase);
@@ -139,7 +145,7 @@ public class ModelRouter
 
         if (isDeepSeek)
         {
-           var  deepSeekHttpClient = new HttpClient(new DebugHandler(handler)) { Timeout = TimeSpan.FromSeconds(120) };
+            var deepSeekHttpClient = new HttpClient(httpHandler) { Timeout = TimeSpan.FromSeconds(120) };
             deepSeekHttpClient.BaseAddress = new Uri(cfg.Endpoint + "/chat/completions");
             deepSeekHttpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {cfg.Key}");
 
@@ -149,7 +155,7 @@ public class ModelRouter
         }
         else
         {
-            var dehttpClient = new HttpClient(new DebugHandler(handler)) { Timeout = TimeSpan.FromSeconds(120) };
+            var dehttpClient = new HttpClient(httpHandler) { Timeout = TimeSpan.FromSeconds(120) };
             var clientOptions = new OpenAIClientOptions
             {
                 Endpoint = new Uri(cfg.Endpoint),
