@@ -213,6 +213,7 @@ public static class ChatEndpoints
             IProductCatalogService catalog,
             ModelRouter router,
             IMemoryCache cache,
+            IPreferenceRepository prefRepo,
             CancellationToken ct) =>
         {
             var endpointSw = Stopwatch.StartNew();
@@ -224,6 +225,11 @@ public static class ChatEndpoints
 
             var sessionId = await sessions.GetOrCreateSessionIdAsync(user.Id, ct);
             var sid = Guid.Parse(sessionId);
+
+            // 端点层偏好注入（P2-8）：/recommendations 缓存命中路径不调 RunChatAsync，
+            // Agent 层 StateBag 偏好回填仅 /chat 生效；这里加载偏好后用
+            // RecommendationMerger.MergeKeywords 合并，与 /chat 口径一致，避免两端推荐不一致。
+            var prefs = await prefRepo.GetByUserIdAsync(user.Id, ct);
 
             // Use default agent for recommendations
             var defaultAgent = router.GetDefaultAgent();
@@ -290,9 +296,14 @@ public static class ChatEndpoints
             var productSw = Stopwatch.StartNew();
             RecommendationResponse response;
 
-            if (validKeywords.Length > 0)
+            // 推荐合并（design 4.3 / T17 RecommendationMerger）：与 /chat 同一口径——
+            // 当前关键词（Agent Keywords 白名单过滤）优先，不足 3 个时用偏好权重 Top-N 补齐到 ≤5
+            var prefKeywords = RecommendationMerger.GetTopPreferenceKeywords(prefs?.KeywordsJson, 5);
+            var merged = RecommendationMerger.MergeKeywords(validKeywords, prefKeywords);
+
+            if (merged.Length > 0)
             {
-                var (recommended, others) = catalog.SplitProducts(validKeywords);
+                var (recommended, others) = catalog.SplitProducts(merged);
                 var recDtos = recommended.Select(ToDto).ToList();
                 var otherDtos = recommended.Length == 0
                     ? catalog.All.Take(6).Select(ToDto).ToList()
