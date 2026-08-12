@@ -178,19 +178,24 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         Assert.Equal(18, result!.products.Length);
     }
 
+    /// <summary>
+    /// R6 纯偏好驱动 — 无偏好时 /recommendations 走 All.Take(6) 兜底：
+    /// BestMatch=null、Message=暂无特定推荐、Other 内容恒为 Id 1..6（shuffle 只变顺序不变内容）。
+    /// </summary>
     [Fact]
-    public async Task Recommendations_ReturnsResults()
+    public async Task ShouldReturnFallback_WhenNoPreference()
     {
         using var client = _factory.CreateClient();
-        await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐跑步"));
-
         var response = await client.PostAsJsonAsync("/api/recommendations",
             new RecommendationRequest("marla", "keymatch"));
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<RecommendationResponse>();
         Assert.NotNull(result);
-        Assert.NotNull(result!.BestMatch);
-        Assert.NotEmpty(result.Other);
+        Assert.Null(result!.BestMatch);                              // 无偏好 → 无最佳匹配
+        Assert.Equal("暂无特定推荐 — 浏览精选商品", result.Message);
+        Assert.Equal(6, result.Other.Count);
+        Assert.Equal([1, 2, 3, 4, 5, 6],
+            result.Other.Select(p => p.Id).OrderBy(x => x).ToArray()); // shuffle 只变顺序，内容仍为 All.Take(6)
     }
 
     [Fact]
@@ -225,8 +230,13 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         Assert.Contains(userMsgs, m => m.Content == "消息4");
     }
 
+    /// <summary>
+    /// R6 去缓存 — 两次 /recommendations 不依赖缓存也不调 LLM：
+    /// 每次重新计算但内容一致（纯偏好驱动，无偏好时恒为 All.Take(6)），
+    /// mock IChatClient 的 GetResponseAsync 全程未被调用（callCount==0）。
+    /// </summary>
     [Fact]
-    public async Task Recommendations_SecondRequest_ReturnsCachedResult()
+    public async Task ShouldReturnConsistentContent_WhenCalledTwice()
     {
         var callCount = 0;
         WebApplicationFactory<Program>? f = null;
@@ -271,7 +281,6 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
             });
         });
         using var client = f.CreateClient();
-        await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐运动"));
         var resp1 = await client.PostAsJsonAsync("/api/recommendations",
             new RecommendationRequest("marla", "keymatch"));
         resp1.EnsureSuccessStatusCode();
@@ -281,12 +290,25 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         var r1 = await resp1.Content.ReadFromJsonAsync<RecommendationResponse>();
         var r2 = await resp2.Content.ReadFromJsonAsync<RecommendationResponse>();
         Assert.NotNull(r1); Assert.NotNull(r2);
-        Assert.Equal(r1!.BestMatch?.Id, r2!.BestMatch?.Id);
+        // 无偏好 → 两次都是兜底，内容一致（shuffle 只变顺序不变内容）
+        Assert.Null(r1!.BestMatch);
+        Assert.Null(r2!.BestMatch);
+        Assert.Equal(
+            r1.Other.Select(p => p.Id).OrderBy(x => x).ToArray(),
+            r2.Other.Select(p => p.Id).OrderBy(x => x).ToArray());
+        Assert.Equal([1, 2, 3, 4, 5, 6], r1.Other.Select(p => p.Id).OrderBy(x => x).ToArray());
         Assert.Equal(r1.Message, r2.Message);
+        // /recommendations 纯偏好驱动，全程不调 LLM（无缓存命中/未命中之分）
+        Assert.Equal(0, callCount);
     }
 
+    /// <summary>
+    /// R6 纯偏好驱动 — 推荐不随消息变化：
+    /// 两条不同消息的 /chat 后，/recommendations 内容一致（无偏好时恒为 All.Take(6)），
+    /// 且 LLM 调用数仅来自 /chat（callCount==2），/recommendations 不再因新消息触发重算/缓存失效。
+    /// </summary>
     [Fact]
-    public async Task Recommendations_NewMessage_InvalidatesCache()
+    public async Task ShouldNotChangeWithMessage_WhenPreferenceDriven()
     {
         var callCount = 0;
         WebApplicationFactory<Program>? f = null;
@@ -331,14 +353,28 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
             });
         });
         using var client = f.CreateClient();
-        await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐运动鞋"));
-        await client.PostAsJsonAsync("/api/recommendations",
+        var chat1 = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐运动鞋"));
+        chat1.EnsureSuccessStatusCode();
+        var chat2 = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐耳机"));
+        chat2.EnsureSuccessStatusCode();
+        Assert.Equal(2, callCount);   // 两次 /chat 各调一次 LLM
+
+        var resp1 = await client.PostAsJsonAsync("/api/recommendations",
             new RecommendationRequest("marla", "keymatch"));
-        var firstCalls = callCount;
-        await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐耳机"));
-        await client.PostAsJsonAsync("/api/recommendations",
+        resp1.EnsureSuccessStatusCode();
+        var resp2 = await client.PostAsJsonAsync("/api/recommendations",
             new RecommendationRequest("marla", "keymatch"));
-        Assert.True(callCount > firstCalls, "新消息应使缓存失效，导致 Agent 重新被调用");
+        resp2.EnsureSuccessStatusCode();
+        var r1 = await resp1.Content.ReadFromJsonAsync<RecommendationResponse>();
+        var r2 = await resp2.Content.ReadFromJsonAsync<RecommendationResponse>();
+        Assert.NotNull(r1); Assert.NotNull(r2);
+        // 不同消息后 /recommendations 内容一致（纯偏好驱动，不随消息变化）
+        Assert.Equal(
+            r1!.Other.Select(p => p.Id).OrderBy(x => x).ToArray(),
+            r2!.Other.Select(p => p.Id).OrderBy(x => x).ToArray());
+        Assert.Equal(r1.Message, r2.Message);
+        // /recommendations 不再触发 LLM：callCount 仍为 2（仅 /chat 贡献）
+        Assert.Equal(2, callCount);
     }
 
     // ============ Multi-Model Tests ============

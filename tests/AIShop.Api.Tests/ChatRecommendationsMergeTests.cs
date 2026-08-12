@@ -56,14 +56,12 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
     }
 
     /// <summary>
-    /// spec「推荐数据来源」MODIFIED — 有持久化偏好且 Agent 返回 Keywords 为空时，
-    /// /recommendations 用偏好关键词产生 BestMatch：
-    /// mock Agent 返回 Keywords=[]（无当前关键词），预置偏好 {"咖啡":3,"健身":2} →
-    /// merged = [咖啡, 健身] → BestMatch 为意式浓缩咖啡机（偏好「咖啡」优先）。
-    /// 与 /chat 的「偏好存在但无当前关键词时用偏好推荐」口径一致。
+    /// R6 纯偏好驱动 — 有偏好时 /recommendations 用偏好关键词出推荐：
+    /// 预置偏好 {"咖啡":3,"健身":2} → merged = [咖啡, 健身] → SplitProducts 出推荐，
+    /// BestMatch 为偏好命中的商品之一（咖啡机/健身相关，R6 shuffle 只变顺序不变内容）。
     /// </summary>
     [Fact]
-    public async Task PostRecommendations_WithPreferenceButEmptyAgentKeywords_UsesPreferenceKeywords()
+    public async Task ShouldRecommendPreferenceProducts_WhenUserHasPreference()
     {
         using var factory = BuildFactory("""{"Reply":"模拟回复","Keywords":[],"Preferences":[]}""");
         using var client = factory.CreateClient();
@@ -71,30 +69,32 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
         var marlaId = await GetMarlaUserIdAsync(factory);
         await SeedPreferencesAsync(marlaId, """{"咖啡":3,"健身":2}""");
 
-        // 先产生对话历史 + agent_result 缓存（/chat 缓存 agent_result，Keywords=[]）
-        var chatResponse = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "你好"));
-        chatResponse.EnsureSuccessStatusCode();
+        // 期望集合：与端点同一 SplitProducts 口径，取偏好关键词命中的商品 Id 集合
+        // （咖啡机 Id 5 / 跑鞋 3 / 瑜伽垫 6 / 水瓶 8 / 手表 10 / 蛋白粉 14）
+        using var scope = factory.Services.CreateScope();
+        var catalog = scope.ServiceProvider.GetRequiredService<IProductCatalogService>();
+        var expectedIds = catalog.SplitProducts(["咖啡", "健身"]).Recommended.Select(p => p.Id).ToArray();
+        Assert.NotEmpty(expectedIds);   // 偏好命中至少一个商品，否则不该走推荐分支
 
-        // /recommendations：命中 agent_result 缓存（不重新调 LLM），偏好合并出推荐
         var response = await client.PostAsJsonAsync("/api/recommendations",
             new RecommendationRequest("marla", "keymatch"));
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<RecommendationResponse>();
         Assert.NotNull(result);
         Assert.NotNull(result!.BestMatch);
-        Assert.Equal(5, result.BestMatch!.Id);   // 意式浓缩咖啡机（偏好「咖啡」）
+        // 偏好「咖啡」/「健身」→ BestMatch 为咖啡机/健身相关商品之一（shuffle 只变顺序不变内容）
+        Assert.Contains(result.BestMatch!.Id, expectedIds);
         Assert.Equal("根据您的兴趣，为您推荐：", result.Message);
-        Assert.Contains(result.MatchedCategories!, c => c == "厨房用品");
+        Assert.Contains(result.MatchedCategories!, c => c == "厨房用品"); // 偏好「咖啡」的咖啡机分类在列
     }
 
     /// <summary>
-    /// spec「推荐合并 — 当前关键词优先，偏好补齐」在 /recommendations 同样生效：
-    /// mock Agent 返回 Keywords=["鞋子"]（当前关键词）+ 预置偏好 {"咖啡":3,"健身":2} →
-    /// merged = [鞋子, 咖啡, 健身] → BestMatch 为专业跑鞋（当前关键词「鞋子」优先，而非偏好「咖啡」）。
-    /// 验证与 /chat 同一合并口径，避免两端推荐不一致。
+    /// R6 纯偏好驱动 — /recommendations 忽略 Agent/当前消息关键词，只按偏好推荐：
+    /// mock Agent 返回 Keywords=["鞋子"]（旧行为下当前关键词优先会固定推专业跑鞋 Id 3），
+    /// R6 后端点不再读取对话历史/Agent 关键词，BestMatch 仍从偏好命中的商品集合中产生。
     /// </summary>
     [Fact]
-    public async Task PostRecommendations_WithCurrentKeywordAndPreference_PrefersCurrentKeyword()
+    public async Task ShouldIgnoreAgentKeywords_WhenPreferenceDriven()
     {
         using var factory = BuildFactory("""{"Reply":"模拟回复","Keywords":["鞋子"],"Preferences":[]}""");
         using var client = factory.CreateClient();
@@ -102,9 +102,14 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
         var marlaId = await GetMarlaUserIdAsync(factory);
         await SeedPreferencesAsync(marlaId, """{"咖啡":3,"健身":2}""");
 
-        // 先产生对话历史 + agent_result 缓存（/chat 缓存 agent_result，Keywords=["鞋子"]）
+        // 先跑一次 /chat（mock Agent 返回 Keywords=["鞋子"]），R6 后 /recommendations 不再读取其输出
         var chatResponse = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐跑鞋"));
         chatResponse.EnsureSuccessStatusCode();
+
+        // 期望集合：纯偏好关键词「咖啡/健身」命中的商品（不含「鞋子」当前关键词的独立贡献）
+        using var scope = factory.Services.CreateScope();
+        var catalog = scope.ServiceProvider.GetRequiredService<IProductCatalogService>();
+        var expectedIds = catalog.SplitProducts(["咖啡", "健身"]).Recommended.Select(p => p.Id).ToArray();
 
         var response = await client.PostAsJsonAsync("/api/recommendations",
             new RecommendationRequest("marla", "keymatch"));
@@ -112,8 +117,111 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
         var result = await response.Content.ReadFromJsonAsync<RecommendationResponse>();
         Assert.NotNull(result);
         Assert.NotNull(result!.BestMatch);
-        Assert.Equal(3, result.BestMatch!.Id);   // 专业跑鞋（当前关键词「鞋子」优先，先于偏好「咖啡」）
+        // 当前消息「推荐跑鞋」的「鞋子」关键词不参与合并：BestMatch 仍出自纯偏好集合
+        Assert.Contains(result.BestMatch!.Id, expectedIds);
         Assert.Equal("根据您的兴趣，为您推荐：", result.Message);
+    }
+
+    /// <summary>
+    /// R6 纯偏好驱动 — 无偏好时 /recommendations 走 All.Take(6) 兜底：
+    /// BestMatch=null、Message=暂无特定推荐、Other 内容恒为 Id 1..6（shuffle 只变顺序不变内容）。
+    /// </summary>
+    [Fact]
+    public async Task ShouldReturnFallback_WhenNoPreference()
+    {
+        using var factory = BuildFactory("""{"Reply":"模拟回复","Keywords":[],"Preferences":[]}""");
+        using var client = factory.CreateClient();
+
+        var response = await client.PostAsJsonAsync("/api/recommendations",
+            new RecommendationRequest("marla", "keymatch"));
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<RecommendationResponse>();
+        Assert.NotNull(result);
+        Assert.Null(result!.BestMatch);
+        Assert.Equal("暂无特定推荐 — 浏览精选商品", result.Message);
+        Assert.Null(result.MatchedCategories);
+        Assert.Equal(6, result.Other.Count);
+        Assert.Equal([1, 2, 3, 4, 5, 6],
+            result.Other.Select(p => p.Id).OrderBy(x => x).ToArray());
+    }
+
+    /// <summary>
+    /// R6 去缓存/去 LLM — /recommendations 纯偏好驱动，不调用任何 LLM：
+    /// mock IChatClient 的 GetResponseAsync 全程未被调用（无对话历史也直接出兜底推荐）。
+    /// </summary>
+    [Fact]
+    public async Task ShouldNotCallLlm_WhenRequestingRecommendations()
+    {
+        WebApplicationFactory<Program>? factory = null;
+        Meai.IChatClient? capturedMock = null;
+        factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                ReplaceWithIsolatedDb(services, _connStr);
+                services.RemoveAll<ModelRouter>();
+
+                var mockClient = Substitute.For<Meai.IChatClient>();
+                capturedMock = mockClient;
+                mockClient.GetResponseAsync(
+                        Arg.Any<IEnumerable<Meai.ChatMessage>>(),
+                        Arg.Any<Meai.ChatOptions?>(),
+                        Arg.Any<CancellationToken>())
+                    .Returns(new Meai.ChatResponse(new Meai.ChatMessage(Meai.ChatRole.Assistant,
+                        """{"Reply":"模拟回复","Keywords":[],"Preferences":[]}""")));
+                mockClient.GetStreamingResponseAsync(
+                        Arg.Any<IEnumerable<Meai.ChatMessage>>(),
+                        Arg.Any<Meai.ChatOptions?>(),
+                        Arg.Any<CancellationToken>())
+                    .Returns(AsyncEnumerable.Empty<Meai.ChatResponseUpdate>());
+
+                var pipeline = new DeepSeekDelegatingChatClient(mockClient, null, "qwen");
+                services.AddSingleton<Meai.IChatClient>(pipeline);
+
+                var capturedFactory = factory!;
+                var mockRouter = Substitute.For<ModelRouter>();
+                mockRouter.ActiveModel.Returns("qwen");
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(callInfo =>
+                {
+                    var sp = capturedFactory.Services;
+                    return new ShoppingAssistantAgent(
+                        sp.GetRequiredService<Meai.IChatClient>(),
+                        sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        ProductKeywordMap.Entries,
+                        sp.GetRequiredService<CartToolProvider>(),
+                        isOpenAI: false,
+                        sp.GetRequiredService<AgentTelemetryOptions>());
+                });
+                mockRouter.GetDefaultAgent().Returns(
+                    _ => new ShoppingAssistantAgent(
+                        capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
+                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        ProductKeywordMap.Entries,
+                        capturedFactory.Services.GetRequiredService<CartToolProvider>(),
+                        isOpenAI: false,
+                        capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
+                mockRouter.GetAvailableModels().Returns([
+                    new ModelInfo("qwen", "Qwen 3.7", true),
+                ]);
+                services.AddSingleton(mockRouter);
+            }));
+
+        using var f = factory;
+        using var client = f.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/recommendations",
+            new RecommendationRequest("marla", "keymatch"));
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<RecommendationResponse>();
+        Assert.NotNull(result);
+        Assert.Null(result!.BestMatch);                          // 无偏好 → 兜底
+        Assert.Equal("暂无特定推荐 — 浏览精选商品", result.Message);
+        Assert.Equal(6, result.Other.Count);
+        // host 构建后 capturedMock 已被赋值（ConfigureServices 回调在 CreateClient 时执行）
+        Assert.NotNull(capturedMock);
+        // /recommendations 不调用 LLM（无 agent / 无缓存路径）
+        await capturedMock!.DidNotReceive().GetResponseAsync(
+            Arg.Any<IEnumerable<Meai.ChatMessage>>(),
+            Arg.Any<Meai.ChatOptions?>(),
+            Arg.Any<CancellationToken>());
     }
 
     /// <summary>

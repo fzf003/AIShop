@@ -212,11 +212,7 @@ public static class ChatEndpoints
         api.MapPost("/recommendations", async (
             RecommendationRequest req,
             IUserRepository users,
-            ISessionRepository sessions,
-            IChatMessageRepository chatRepo,
             IProductCatalogService catalog,
-            ModelRouter router,
-            IMemoryCache cache,
             IPreferenceRepository prefRepo,
             CancellationToken ct) =>
         {
@@ -227,92 +223,22 @@ public static class ChatEndpoints
             if (user is null)
                 return Results.Unauthorized();
 
-            var sessionId = await sessions.GetOrCreateSessionIdAsync(user.Id, ct);
-            var sid = Guid.Parse(sessionId);
-
-            // 端点层偏好注入（P2-8）：/recommendations 缓存命中路径不调 RunChatAsync，
-            // Agent 层 StateBag 偏好回填仅 /chat 生效；这里加载偏好后用
-            // RecommendationMerger.MergeKeywords 合并，与 /chat 口径一致，避免两端推荐不一致。
+            // R6 纯偏好驱动：推荐只随持久化偏好变化，不随消息变化。
+            // 已删除 LLM Agent 调用（defaultAgent.RunChatAsync）、对话历史读取（lastUserMessage）
+            // 与缓存读写（reco_ / agent_result_）——纯偏好计算 <100ms，无需缓存。
             var prefs = await prefRepo.GetByUserIdAsync(user.Id, ct);
-
-            // Use default agent for recommendations
-            var defaultAgent = router.GetDefaultAgent();
-
-            // Load last user message and ask Agent for keyword matching
-            var lastUserMessage = await chatRepo.GetLastUserMessageAsync(sid, ct);
-
-            if (lastUserMessage is null)
-                return Results.Ok(new RecommendationResponse(null, [], "暂无对话历史，请先聊天。", null));
-
-            // Build cache key: {prefix}_{username}_{sha256(message)[..16]}
-            var hash = GetMessageHash(lastUserMessage.Content);
-            var cacheKey = $"reco_{req.Username}_{hash}";
-            var agentResultCacheKey = $"agent_result_{req.Username}_{hash}";
-
-            if (cache.TryGetValue(cacheKey, out RecommendationResponse? cached) && cached is not null)
-            {
-                endpointSw.Stop();
-                logger.Information("[Diagnose] /recommendations CacheHit=true SessionId={SessionId} Total={ElapsedMs}ms",
-                    sid, endpointSw.ElapsedMilliseconds);
-                return Results.Ok(cached);
-            }
-
-            // Try to reuse agent result cached by /chat endpoint to avoid duplicate LLM call
-            AgentChatResult? agentResult = null;
-            AgentSession? agentSession = null;
-            var agentSw = new Stopwatch();
-            if (cache.TryGetValue(agentResultCacheKey, out var cachedAgentTuple) && cachedAgentTuple is not null)
-            {
-                var tuple = ((AgentChatResult Result, AgentSession? Session))cachedAgentTuple;
-                agentResult = tuple.Result;
-                agentSession = tuple.Session;
-                logger.Information("[Diagnose] /recommendations AgentCacheHit=true SessionId={SessionId}", sid);
-            }
-
-            if (agentResult is null)
-            {
-                agentSw.Start();
-                try
-                {
-                    (agentResult, agentSession) = await defaultAgent.RunChatAsync(sid, lastUserMessage.Content, req.Username, ct: ct);
-                }
-                catch (Exception ex)
-                {
-                    agentSw.Stop();
-                    logger.Error(ex, "[Diagnose] /recommendations Agent调用失败 AgentCall={ElapsedMs}ms SessionId={SessionId}",
-                        agentSw.ElapsedMilliseconds, sid);
-                    return Results.Ok(new RecommendationResponse(null, [], "推荐服务暂时不可用，请重试。", null));
-                }
-                agentSw.Stop();
-                logger.Information("[Diagnose] /recommendations Agent调用 AgentCall={ElapsedMs}ms SessionId={SessionId}",
-                    agentSw.ElapsedMilliseconds, sid);
-            }
-
-            // Validate keywords against white-list (same logic as /chat endpoint)
-            var keywordSw = Stopwatch.StartNew();
-            var validKeywords = (agentResult.Keywords ?? [])
-                .Where(k => catalog.KeywordMap.ContainsKey(k))
-                .Distinct()
-                .Take(5)
-                .ToArray();
-            keywordSw.Stop();
-
-            var productSw = Stopwatch.StartNew();
-            RecommendationResponse response;
-
-            // 推荐合并（design 4.3 / T17 RecommendationMerger）：与 /chat 同一口径——
-            // 当前关键词（Agent Keywords 白名单过滤）优先，不足 3 个时用偏好权重 Top-N 补齐到 ≤5。
-            // 偏好词同样先经白名单过滤（P2-4），避免非法/空白偏好词产生空推荐。
             var prefKeywords = FilterValidPreferenceKeywords(prefs?.KeywordsJson, catalog);
-            var merged = RecommendationMerger.MergeKeywords(validKeywords, prefKeywords);
+            var merged = RecommendationMerger.MergeKeywords([], prefKeywords);
 
+            RecommendationResponse response;
             if (merged.Length > 0)
             {
+                // 有偏好 → SplitProducts 出推荐；推荐/兜底列表轻度随机（R6 shuffle，只变顺序不变内容）
                 var (recommended, others) = catalog.SplitProducts(merged);
-                var recDtos = recommended.Select(ToDto).ToList();
+                var recDtos = ShuffleProducts(recommended).Select(ToDto).ToList();
                 var otherDtos = recommended.Length == 0
-                    ? catalog.All.Take(6).Select(ToDto).ToList()
-                    : others.Take(12).Select(ToDto).ToList();
+                    ? ShuffleProducts(catalog.All.Take(6).ToList()).Select(ToDto).ToList()
+                    : ShuffleProducts(others.Take(12).ToList()).Select(ToDto).ToList();
 
                 response = new RecommendationResponse(
                     recDtos.FirstOrDefault(),
@@ -322,7 +248,8 @@ public static class ChatEndpoints
             }
             else
             {
-                var fallback = catalog.All.Take(6).Select(ToDto).ToList();
+                // 无偏好 → All.Take(6) 兜底（内容固定 Id 1..6，仅顺序 shuffle）
+                var fallback = ShuffleProducts(catalog.All.Take(6).ToList()).Select(ToDto).ToList();
                 response = new RecommendationResponse(
                     null,
                     fallback,
@@ -330,26 +257,10 @@ public static class ChatEndpoints
                     null);
             }
 
-            productSw.Stop();
-
-            // Only cache non-empty results (recommended or fallback)
-            if (response.BestMatch is not null || response.Other.Count > 0)
-            {
-                var cacheOptions = new MemoryCacheEntryOptions
-                {
-                    AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5)
-                };
-                cache.Set(cacheKey, response, cacheOptions);
-            }
-
             endpointSw.Stop();
             logger.Information(
-                "[Diagnose] /recommendations 总耗时 Total={TotalMs}ms Agent={AgentMs}ms " +
-                "KeywordMatch={KeywordMs}ms ProductMatch={ProductMs}ms " +
-                "SessionId={SessionId}",
-                endpointSw.ElapsedMilliseconds, agentSw.ElapsedMilliseconds,
-                keywordSw.ElapsedMilliseconds, productSw.ElapsedMilliseconds,
-                sid);
+                "[Diagnose] /recommendations 总耗时 Total={TotalMs}ms 纯偏好驱动（无 Agent/缓存）",
+                endpointSw.ElapsedMilliseconds);
 
             return Results.Ok(response);
         });
@@ -399,6 +310,22 @@ public static class ChatEndpoints
     /// </summary>
     private static bool IsProductId(string idText) =>
         int.TryParse(idText, out var id) && id is >= MinProductId and <= MaxProductId;
+
+    /// <summary>
+    /// 轻量 Fisher-Yates shuffle（R6）：只变顺序不变内容，防推荐列表固化。
+    /// 默认使用 Random.Shared（线程安全）；如需复现顺序可传入固定种子的 Random（便于测试）。
+    /// </summary>
+    private static List<Product> ShuffleProducts(IReadOnlyList<Product> products, Random? random = null)
+    {
+        var list = products.ToList();
+        var rng = random ?? Random.Shared;
+        for (var i = list.Count - 1; i > 0; i--)
+        {
+            var j = rng.Next(i + 1);
+            (list[i], list[j]) = (list[j], list[i]);
+        }
+        return list;
+    }
 
     /// <summary>
     /// 偏好关键词白名单过滤（P2-4）：偏好词来自 DB，可能含非法词/空白词。
