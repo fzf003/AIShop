@@ -7,6 +7,7 @@ using Microsoft.Extensions.Caching.Memory;
 using Serilog;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace AIShop.Api.Features.Chat;
 
@@ -163,7 +164,7 @@ public static class ChatEndpoints
             {
                 // 无当前关键词且无偏好 → All.Take(6) 兜底（HasRecommendation=false）
                 var fallback = catalog.All.Take(6).Select(ToDto).ToList();
-                chatReply = new ChatReply(result.Reply ?? "",
+                chatReply = new ChatReply(SanitizeReply(result.Reply),
                     RecommendedProducts: null,
                     OtherProducts: fallback,
                     "暂无特定推荐 — 浏览精选商品",
@@ -178,7 +179,7 @@ public static class ChatEndpoints
                     ? catalog.All.Take(6).Select(ToDto).ToList()
                     : others.Take(12).Select(ToDto).ToList();
 
-                chatReply = new ChatReply(result.Reply ?? "", recDtos, otherDtos,
+                chatReply = new ChatReply(SanitizeReply(result.Reply), recDtos, otherDtos,
                     "根据您的兴趣，为您推荐：", HasRecommendation: true,
                     recDtos.Select(p => p.Category).Distinct().ToArray());
             }
@@ -361,6 +362,26 @@ public static class ChatEndpoints
     }
 
     private static ProductDto ToDto(Product p) => new(p.Id, p.Name, p.Category, p.Tags, p.Price, p.Emoji);
+
+    // 商品 ID 标记正则（R4）：预编译 + 显式 timeout（满足 S6444/S6354）。
+    // 不使用裸 \d+（会误删价格/数量），只匹配带 # 前缀或 商品ID 前缀的 ID 形式。
+    private static readonly Regex HashIdPattern =
+        new(@"#\d+", RegexOptions.None, TimeSpan.FromSeconds(1));
+    private static readonly Regex ProductIdLabelPattern =
+        new(@"商品ID[\s:：]*\d+", RegexOptions.None, TimeSpan.FromSeconds(1));
+
+    /// <summary>
+    /// 清洗 LLM 回复文本（R4）：去除「#5」「商品ID: 4」「商品ID：7」等商品 ID 展示，
+    /// 避免对话历史向用户暴露商品 ID。只清洗 Reply 字符串，绝不触碰
+    /// RecommendedProducts/OtherProducts 的 ProductDto.Id——前端加购依赖的结构化数据，不从文本解析。
+    /// </summary>
+    private static string SanitizeReply(string? reply)
+    {
+        var text = reply ?? "";
+        text = HashIdPattern.Replace(text, "");         // 去 #4
+        text = ProductIdLabelPattern.Replace(text, ""); // 去 商品ID 4 / 商品ID：4
+        return text.Trim();                             // 清残留空格/标点
+    }
 
     /// <summary>
     /// 偏好关键词白名单过滤（P2-4）：偏好词来自 DB，可能含非法词/空白词。
