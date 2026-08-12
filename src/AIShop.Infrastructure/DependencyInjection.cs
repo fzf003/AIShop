@@ -19,7 +19,7 @@ public static class DependencyInjection
             sp.GetRequiredService<IDbContextFactory<AppDbContext>>().CreateDbContext());
 
         services.AddMemoryCache();
-        services.AddSingleton<IProductCatalogService, ProductCatalog>();
+        services.AddScoped<IProductCatalogService, ProductCatalog>();
         services.AddScoped<IChatMessageRepository, ChatMessageRepository>();
         services.AddScoped<IUserRepository, UserRepository>();
         services.AddScoped<ISessionRepository, SessionRepository>();
