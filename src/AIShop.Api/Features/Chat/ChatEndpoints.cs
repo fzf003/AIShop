@@ -67,6 +67,7 @@ public static class ChatEndpoints
             IProductCatalogService catalog,
             ModelRouter router,
             IMemoryCache cache,
+            IPreferenceRepository prefRepo,
             CancellationToken ct) =>
         {
             var endpointSw = Stopwatch.StartNew();
@@ -83,6 +84,10 @@ public static class ChatEndpoints
             var sessionId = await sessions.GetOrCreateSessionIdAsync(user.Id, ct);
             var sid = Guid.Parse(sessionId);
 
+            // 会话重建回填：从 DB 加载历史偏好，按权重 Top-5 生成顿号连接文本注入 Agent 上下文
+            var prefs = await prefRepo.GetByUserIdAsync(user.Id, ct);
+            var preferencesText = string.Join("、", RecommendationMerger.GetTopPreferenceKeywords(prefs?.KeywordsJson, 5));
+
             // 1. Get agent and response (history loaded from SQLite by provider)
             var agentSw = Stopwatch.StartNew();
             AgentChatResult result;
@@ -91,7 +96,7 @@ public static class ChatEndpoints
             {
                 var modelId = req.Model ?? router.ActiveModel;
                 var agent = router.GetAgent(modelId);
-                (result, session) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, ct: ct);
+                (result, session) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, ct);
             }
             catch (KeyNotFoundException knf)
             {
@@ -117,12 +122,6 @@ public static class ChatEndpoints
             var chatHash = GetMessageHash(req.Message ?? "");
             var chatCacheKey = $"agent_result_{req.Username}_{chatHash}";
             cache.Set(chatCacheKey, (result, session), TimeSpan.FromMinutes(5));
-
-            // 2.5 Persist extracted preferences to session StateBag for next round
-            if (result.Preferences is { Length: > 0 } && session is not null)
-            {
-                session.StateBag.SetValue("Preferences", string.Join("、", result.Preferences));
-            }
 
             // 3. 关键词匹配：从用户输入直接匹配（不依赖模型结构化输出）
             // 匹配逻辑：消息中包含关键词 → 该关键词对应的所有标签相关产品都推荐
