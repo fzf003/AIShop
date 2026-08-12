@@ -151,9 +151,25 @@ public static class ChatEndpoints
             var productSw = Stopwatch.StartNew();
             ChatReply chatReply;
 
-            if (validKeywords.Length > 0)
+            // 推荐合并（design 4.3 / T17 RecommendationMerger）：当前消息关键词优先，
+            // 不足 3 个时用偏好权重 Top-N 补齐到 ≤5，按序数忽略大小写去重
+            var prefKeywords = RecommendationMerger.GetTopPreferenceKeywords(prefs?.KeywordsJson, 5);
+            var merged = RecommendationMerger.MergeKeywords(validKeywords, prefKeywords);
+
+            if (merged.Length == 0)
             {
-                var (recommended, others) = catalog.SplitProducts(validKeywords);
+                // 无当前关键词且无偏好 → All.Take(6) 兜底（HasRecommendation=false）
+                var fallback = catalog.All.Take(6).Select(ToDto).ToList();
+                chatReply = new ChatReply(result.Reply ?? "",
+                    RecommendedProducts: null,
+                    OtherProducts: fallback,
+                    "暂无特定推荐 — 浏览精选商品",
+                    HasRecommendation: false,
+                    MatchedCategories: null);
+            }
+            else
+            {
+                var (recommended, others) = catalog.SplitProducts(merged);
                 var recDtos = recommended.Select(ToDto).ToList();
                 var otherDtos = recommended.Length == 0
                     ? catalog.All.Take(6).Select(ToDto).ToList()
@@ -162,16 +178,6 @@ public static class ChatEndpoints
                 chatReply = new ChatReply(result.Reply ?? "", recDtos, otherDtos,
                     "根据您的兴趣，为您推荐：", HasRecommendation: true,
                     recDtos.Select(p => p.Category).Distinct().ToArray());
-            }
-            else
-            {
-                var fallback = catalog.All.Take(6).Select(ToDto).ToList();
-                chatReply = new ChatReply(result.Reply ?? "",
-                    RecommendedProducts: null,
-                    OtherProducts: fallback,
-                    "暂无特定推荐 — 浏览精选商品",
-                    HasRecommendation: false,
-                    MatchedCategories: null);
             }
 
             productSw.Stop();
