@@ -417,6 +417,100 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
     }
 
     /// <summary>
+    /// R8.1 — 推荐栏响应含完整推荐列表（含枕套，非仅 BestMatch）：
+    /// mock Agent 返回 Keywords=["咖啡","家居"]（消息「有枕套吗」字面无命中，走语义回退）→
+    /// /chat 推荐 recommendedProducts=[5咖啡机,11煎锅,12蜡烛,16枕套] 写入快照 →
+    /// /recommendations 读缓存 → Recommended == 聊天完整列表 [5,11,12,16]、
+    /// BestMatch == Recommended[0]（5）、Other 不含 5/11/12/16（bestMatch ∉ other 契约）。
+    /// 注：tasks.md L470 写「Keywords=["家居"]」，但 SplitProducts(["家居"])=[12,16] 无法得到
+    /// 设计示例 [5,11,12,16]；[5,11,12,16] 对应 SplitProducts(["咖啡","家居"])，故 mock 用该组关键词。
+    /// </summary>
+    [Fact]
+    public async Task ShouldIncludeFullRecommendedList_WhenMirroringChatSnapshot()
+    {
+        using var factory = BuildFactory("""{"Reply":"模拟回复","Keywords":["咖啡","家居"],"Preferences":[]}""");
+        using var client = factory.CreateClient();
+
+        var chat = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "有枕套吗"));
+        chat.EnsureSuccessStatusCode();
+        var chatReply = await chat.Content.ReadFromJsonAsync<ChatReply>();
+        Assert.NotNull(chatReply);
+        Assert.Equal([5, 11, 12, 16],
+            chatReply!.RecommendedProducts!.Select(p => p.Id).ToArray()); // 聊天完整推荐列表（含枕套）
+
+        var response = await client.PostAsJsonAsync("/api/recommendations",
+            new RecommendationRequest("marla", "keymatch"));
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<RecommendationResponse>();
+        Assert.NotNull(result);
+
+        // Recommended == 聊天完整推荐列表（id 序列 [5,11,12,16]，含枕套）
+        Assert.Equal([5, 11, 12, 16], result!.Recommended.Select(p => p.Id).ToArray());
+        Assert.Equal(chatReply.RecommendedProducts!.Select(p => p.Id).ToArray(),
+            result.Recommended.Select(p => p.Id).ToArray());
+        // 不变量：BestMatch == Recommended[0]
+        Assert.NotNull(result.BestMatch);
+        Assert.Equal(result.Recommended[0].Id, result.BestMatch!.Id);
+        Assert.Equal(5, result.BestMatch.Id);
+        // 不变量：Recommended ∩ Other == ∅（bestMatch ∉ other）
+        var recommendedIds = result.Recommended.Select(p => p.Id).ToHashSet();
+        Assert.DoesNotContain(result.Other, p => recommendedIds.Contains(p.Id));
+    }
+
+    /// <summary>
+    /// R8.1 — 缓存 miss + 偏好兜底有推荐：Recommended 为偏好命中完整列表、
+    /// BestMatch == Recommended[0]、Other 与 Recommended 互斥。
+    /// </summary>
+    [Fact]
+    public async Task ShouldIncludeRecommendedList_WhenPreferenceFallback()
+    {
+        using var factory = BuildFactory("""{"Reply":"模拟回复","Keywords":[],"Preferences":[]}""");
+        using var client = factory.CreateClient();
+
+        var marlaId = await GetMarlaUserIdAsync(factory);
+        await SeedPreferencesAsync(marlaId, """{"咖啡":3,"健身":2}""");
+
+        // 不先调 /chat → recommend_marla 缓存 miss → 偏好兜底
+        var response = await client.PostAsJsonAsync("/api/recommendations",
+            new RecommendationRequest("marla", "keymatch"));
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<RecommendationResponse>();
+        Assert.NotNull(result);
+
+        // 偏好命中完整列表非空、BestMatch 恒为意式浓缩咖啡机（Id 5，咖啡权重最高）
+        Assert.NotEmpty(result!.Recommended);
+        Assert.NotNull(result.BestMatch);
+        Assert.Equal(5, result.BestMatch!.Id);
+        // 不变量：BestMatch == Recommended[0]；Recommended ∩ Other == ∅
+        Assert.Equal(result.Recommended[0].Id, result.BestMatch.Id);
+        var recommendedIds = result.Recommended.Select(p => p.Id).ToHashSet();
+        Assert.DoesNotContain(result.Other, p => recommendedIds.Contains(p.Id));
+    }
+
+    /// <summary>
+    /// R8.1 — 缓存 miss + 无偏好 → 精选兜底：Recommended==[]、BestMatch==null、
+    /// Other==All.Take(6) 固定顺序（Id 1..6）、Message「为您精选商品」。
+    /// </summary>
+    [Fact]
+    public async Task ShouldReturnEmptyRecommended_WhenCuratedFallback()
+    {
+        using var factory = BuildFactory("""{"Reply":"模拟回复","Keywords":[],"Preferences":[]}""");
+        using var client = factory.CreateClient();
+
+        var response = await client.PostAsJsonAsync("/api/recommendations",
+            new RecommendationRequest("marla", "keymatch"));
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<RecommendationResponse>();
+        Assert.NotNull(result);
+
+        Assert.Null(result!.BestMatch);
+        Assert.Empty(result.Recommended);                          // 无推荐 → Recommended 空
+        Assert.Equal("为您精选商品", result.Message);
+        Assert.Null(result.MatchedCategories);
+        Assert.Equal([1, 2, 3, 4, 5, 6], result.Other.Select(p => p.Id).ToArray());
+    }
+
+    /// <summary>
     /// 构造 WebApplicationFactory：隔离库 + mock Agent（返回指定的 agentJson）+ mock Router。
     /// 每个测试自建独立 factory（不基于其他 factory 派生），避免多 host 竞争。
     /// </summary>

@@ -26,7 +26,12 @@ public sealed record LoginResponse(string Username, string DisplayName, string S
 public sealed record ChatMessageDto(string Role, string Content);
 
 public sealed record RecommendationRequest(string Username, string? Provider);
-public sealed record RecommendationResponse(ProductDto? BestMatch, List<ProductDto> Other, string Message, string[]? MatchedCategories);
+public sealed record RecommendationResponse(
+    ProductDto? BestMatch,
+    List<ProductDto> Recommended,
+    List<ProductDto> Other,
+    string Message,
+    string[]? MatchedCategories);
 
 public sealed record ProductDto(int Id, string Name, string Category, string[] Tags, decimal Price, string Emoji);
 
@@ -233,8 +238,11 @@ public static class ChatEndpoints
             var snapshot = cache.Get<RecommendationSnapshot>($"recommend_{req.Username}");
             if (snapshot is not null)
             {
+                // R8.1：Recommended=快照完整推荐列表（含枕套等非首项，BestMatch 为 Recommended[0]），
+                // 不变量 BestMatch==Recommended[0] 且 Recommended ∩ Other == ∅（SplitProducts 天然满足）。
                 var cached = new RecommendationResponse(
                     snapshot.Recommended?.FirstOrDefault(),
+                    snapshot.Recommended ?? [],
                     snapshot.Other ?? [],
                     snapshot.Message,
                     snapshot.MatchedCategories);
@@ -259,6 +267,7 @@ public static class ChatEndpoints
                     var otherDtos = others.Take(12).Select(ToDto).ToList();
                     response = new RecommendationResponse(
                         recDtos.FirstOrDefault(),
+                        recDtos,
                         otherDtos,
                         "根据您的兴趣，为您推荐：",
                         recDtos.Select(p => p.Category).Distinct().ToArray());
@@ -268,6 +277,7 @@ public static class ChatEndpoints
                     // merged>0 但无商品命中（如偏好词均未命中商品）→ 兜底精选，不显示「已推荐」空列表
                     response = new RecommendationResponse(
                         null,
+                        [],
                         catalog.All.Take(6).Select(ToDto).ToList(),
                         "为您精选商品",
                         null);
@@ -281,6 +291,7 @@ public static class ChatEndpoints
                 var fallback = catalog.All.Take(6).Select(ToDto).ToList();
                 response = new RecommendationResponse(
                     null,
+                    [],
                     fallback,
                     catalog.All.Count == 0 ? "暂无特定推荐" : "为您精选商品",
                     null);
