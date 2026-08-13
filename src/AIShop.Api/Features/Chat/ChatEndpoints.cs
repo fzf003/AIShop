@@ -2,7 +2,6 @@ using System.Diagnostics;
 using AIShop.Api.Agents;
 using AIShop.Core.Entities;
 using AIShop.Core.Interfaces;
-using Microsoft.Agents.AI;
 using Microsoft.Extensions.Caching.Memory;
 using Serilog;
 using System.Text.RegularExpressions;
