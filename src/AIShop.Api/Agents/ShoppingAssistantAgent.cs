@@ -69,6 +69,9 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         lines.Add("2. 当不需要调用工具时，");
         lines.Add("   你必须且只能以标准的 JSON 格式回复，");
         lines.Add("   不要包含任何 Markdown 标记或额外的解释文本。");
+        // R9：固定商品 ID 的唯一合法展示格式，配合服务端 SanitizeReply 精确删除，杜绝 ID 泄漏。
+        lines.Add("3. 回复文本中不要出现商品编号。若确需提及，必须且只能使用格式『商品Id:N』（如 商品Id:4）；");
+        lines.Add("   任何其他形式（商品ID为4、#4、编号4、ID：4 等）均属违例。");
         lines.Add("");
         lines.Add("【JSON 输出格式要求】");
         lines.Add($"回复必须使用以下 JSON 格式（工具调用时除外）：");
