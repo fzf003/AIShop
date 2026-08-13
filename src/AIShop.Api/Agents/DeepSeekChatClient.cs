@@ -2,7 +2,6 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Runtime.CompilerServices;
 using Microsoft.Extensions.AI;
-using Serilog;
 
 namespace AIShop.Api.Agents;
 
