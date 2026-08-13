@@ -13,10 +13,26 @@ namespace AIShop.Api.Agents;
 /// 但 OpenAIChatClient 只读不写此字段 → 报错 "must be passed back to the API"。
 /// 此实现绕开 SDK，直接发送原生的 JSON 请求，手动处理 reasoning_content。
 /// </summary>
-public sealed class DeepSeekChatClient(HttpClient httpClient, string modelName) : IChatClient
+public sealed class DeepSeekChatClient : IChatClient
 {
     private static readonly Serilog.ILogger Log = Serilog.Log.ForContext<DeepSeekChatClient>();
-    private readonly HttpClient _httpClient = httpClient;
+    private readonly HttpClient _httpClient;
+    private readonly string _modelName;
+
+    /// <summary>
+    /// IChatClient.Metadata 实现（R10）：修 DeepSeek gen_ai 遥测属性（ProviderName/ModelId）为空——
+    /// 旧主构造函数未实现 Metadata，接口默认 Metadata 为空对象，OTel gen_ai 属性缺失。
+    /// </summary>
+    public ChatClientMetadata Metadata { get; }
+
+    public DeepSeekChatClient(HttpClient httpClient, string modelName)
+    {
+        _httpClient = httpClient;
+        _modelName = modelName;
+        // 构造函数签名 ChatClientMetadata(string providerName, Uri? providerUri, string? defaultModelId)
+        // （实测 10.8.3：第 2 参是 providerUri 而非 modelId，模型名走第 3 参 defaultModelId）
+        Metadata = new ChatClientMetadata(providerName: "DeepSeek", defaultModelId: modelName);
+    }
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -150,7 +166,7 @@ public sealed class DeepSeekChatClient(HttpClient httpClient, string modelName) 
 
         var requestBody = new Dictionary<string, object?>
         {
-            ["model"] = modelName,
+            ["model"] = _modelName,
             ["messages"] = apiMessages,
             ["tools"] = toolsList.Count > 0 ? toolsList : null,
             ["tool_choice"] = "auto",

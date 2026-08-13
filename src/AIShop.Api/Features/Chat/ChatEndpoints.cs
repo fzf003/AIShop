@@ -58,7 +58,10 @@ public static class ChatEndpoints
 
             return Results.Ok(new LoginResponse(
                 user.Username, user.DisplayName, sessionId,
-                history.Select(m => new ChatMessageDto(m.Role, m.Content)).ToList(),
+                // R10：/api/login 历史清洗——assistant 历史消息经 SanitizeReply 去商品 ID 展示
+                //（user 消息原样保留；只清洗展示文本，不碰结构化数据/前端加购来源）
+                history.Select(m => new ChatMessageDto(m.Role,
+                    m.Role == "assistant" ? SanitizeReply(m.Content) : m.Content)).ToList(),
                 router.GetAvailableModels().ToList()));
         });
 

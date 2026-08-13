@@ -238,6 +238,40 @@ public sealed class ChatReplySanitizationTests : IDisposable
     }
 
     /// <summary>
+    /// R10 — /api/login 历史清洗：历史中 assistant 消息含商品 ID 标记（固定格式 商品Id:10、
+    /// 变体 商品ID为4）时，login 返回的历史经 SanitizeReply 清洗——assistant 消息不含这些 ID 片段，
+    /// user 消息原样保留，商品名/价格保留。
+    /// </summary>
+    [Fact]
+    public async Task PostLogin_HistoryAssistantMessages_AreSanitized()
+    {
+        const string agentJson =
+            """{"Reply":"为您推荐无线降噪耳机，商品Id:10 售价 ¥249.99，意式浓缩咖啡机 商品ID为4","Keywords":[],"Preferences":[]}""";
+        using var factory = BuildFactory(agentJson);
+        using var client = factory.CreateClient();
+
+        // 产生对话：user「你好」+ assistant（含商品 ID 标记的 Reply，经 SqliteChatHistoryProvider 持久化到历史）
+        var chat = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "你好"));
+        chat.EnsureSuccessStatusCode();
+
+        using var loginClient = factory.CreateClient();
+        var login = await loginClient.PostAsJsonAsync("/api/login", new LoginRequest("marla"));
+        login.EnsureSuccessStatusCode();
+        var profile = await login.Content.ReadFromJsonAsync<LoginResponse>();
+        Assert.NotNull(profile);
+
+        // user 消息原样保留（不参与清洗）
+        Assert.Contains(profile!.History, m => m.Role == "user" && m.Content == "你好");
+        // assistant 消息被清洗：不含固定格式与变体 ID，商品名与价格保留
+        var assistantMsg = profile.History.Single(m => m.Role == "assistant");
+        Assert.DoesNotContain("商品Id:10", assistantMsg.Content);
+        Assert.DoesNotContain("商品ID为4", assistantMsg.Content);
+        Assert.Contains("无线降噪耳机", assistantMsg.Content);
+        Assert.Contains("249.99", assistantMsg.Content);
+        Assert.Contains("意式浓缩咖啡机", assistantMsg.Content);
+    }
+
+    /// <summary>
     /// 构造 WebApplicationFactory：隔离库 + mock Agent（返回指定的 agentJson）+ mock Router。
     /// 每个测试自建独立 factory（不基于其他 factory 派生），避免多 host 竞争。
     /// </summary>
