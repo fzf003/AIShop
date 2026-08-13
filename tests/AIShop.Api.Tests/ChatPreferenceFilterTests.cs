@@ -128,9 +128,9 @@ public sealed class ChatPreferenceFilterTests : IDisposable
     }
 
     /// <summary>
-    /// P2-4 + R7 /recommendations — 偏好仅含非法词、消息无关键词时，
-    /// 过滤后 merged 为空 → 走兜底（BestMatch=null / Message=为您精选商品，非「暂无特定推荐」），
-    /// 而非「空推荐却提示已推荐」；因有对话历史，走精选兜底而非「完全无内容」的暂无推荐。
+    /// P2-4 + R8 /recommendations — 偏好仅含非法词、消息无关键词时，/chat 过滤后 merged 为空 →
+    /// 走兜底分支并写入快照（BestMatch=null / Message=「暂无特定推荐 — 浏览精选商品」），
+    /// 而非「空推荐却提示已推荐」；/recommendations 镜像该快照（与聊天文案一致，非缓存 miss 的「为您精选商品」）。
     /// </summary>
     [Fact]
     public async Task PostRecommendations_WithOnlyInvalidPreferenceKeywords_FallsBack()
@@ -141,7 +141,7 @@ public sealed class ChatPreferenceFilterTests : IDisposable
         var marlaId = await GetMarlaUserIdAsync(factory);
         await SeedPreferencesAsync(marlaId, """{"外星语":5}""");
 
-        // 先产生对话历史（/chat「你好」，消息无关键词）
+        // 先产生对话历史（/chat「你好」，消息无关键词 + 非法偏好被过滤 → /chat 兜底分支写快照）
         var chatResponse = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "你好"));
         chatResponse.EnsureSuccessStatusCode();
 
@@ -152,7 +152,8 @@ public sealed class ChatPreferenceFilterTests : IDisposable
         Assert.NotNull(result);
 
         Assert.Null(result!.BestMatch);
-        Assert.Equal("为您精选商品", result.Message);
+        // Message 取聊天快照（/chat 兜底 RecMessage），与聊天 100% 一致
+        Assert.Equal("暂无特定推荐 — 浏览精选商品", result.Message);
         Assert.Null(result.MatchedCategories);
         Assert.Equal(6, result.Other.Count);
     }

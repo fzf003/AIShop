@@ -7,6 +7,7 @@ using AIShop.Core.Entities;
 using AIShop.Core.Interfaces;
 using AIShop.Core.StaticData;
 using AIShop.Infrastructure.Data;
+using AIShop.Infrastructure.Entities;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -56,10 +57,10 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
     }
 
     /// <summary>
-    /// R7 — 消息无关键词但有偏好时，用偏好关键词推荐：
-    /// /chat「你好」（无关键词）+ 预置偏好 {"咖啡":3,"健身":2} →
-    /// merged = [咖啡, 健身] → BestMatch 恒为意式浓缩咖啡机（Id 5，权重最高的「咖啡」优先）。
-    /// 去 shuffle 后顺序确定，可精确断言 BestMatch.Id。
+    /// R8 — 消息无关键词但有偏好时，推荐栏镜像 /chat 偏好推荐快照：
+    /// /chat「你好」（无关键词）+ 预置偏好 {"咖啡":3,"健身":2} → /chat 推荐 merged = [咖啡, 健身] →
+    /// 写入 recommend_marla 快照，/recommendations 读缓存 → BestMatch 恒为意式浓缩咖啡机
+    /// （Id 5，权重最高的「咖啡」优先），Message 取快照（与 /chat 的 RecMessage 一致）。
     /// </summary>
     [Fact]
     public async Task ShouldRecommendPreferenceProducts_WhenUserHasPreference()
@@ -70,7 +71,7 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
         var marlaId = await GetMarlaUserIdAsync(factory);
         await SeedPreferencesAsync(marlaId, """{"咖啡":3,"健身":2}""");
 
-        // 先产生对话消息（无关键词「你好」），使「无消息关键词但有偏好」场景成立
+        // 先产生对话消息（无关键词「你好」），使 /chat 走「偏好推荐」分支并写入快照缓存
         var chatResponse = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "你好"));
         chatResponse.EnsureSuccessStatusCode();
 
@@ -82,14 +83,16 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
         Assert.NotNull(result!.BestMatch);
         // 偏好「咖啡」权重最高 → BestMatch 为意式浓缩咖啡机（Id 5）；固定顺序可精确断言
         Assert.Equal(5, result.BestMatch!.Id);
-        Assert.Equal("根据您的对话，为您推荐：", result.Message);
+        // Message 取聊天快照（/chat 推荐分支的 RecMessage），与聊天 100% 一致
+        Assert.Equal("根据您的兴趣，为您推荐：", result.Message);
         Assert.Contains(result.MatchedCategories!, c => c == "厨房用品"); // 偏好「咖啡」的咖啡机分类在列
     }
 
     /// <summary>
-    /// R7 消息关键词驱动 — /recommendations 使用最新用户消息的关键词，忽略 Agent 结构化 Keywords 输出：
-    /// mock Agent 返回 Keywords=["数码"]，但消息「推荐跑鞋」命中 鞋子/跑步 → BestMatch 恒为专业跑鞋（Id 3），
-    /// 而非 Agent 关键词「数码」命中的数码产品。证明推荐随对话内容实时匹配，不依赖 LLM 结构化输出。
+    /// R8 — 推荐栏镜像 /chat 产物（而 /chat 本身消息关键词优先于 Agent 结构化 Keywords）：
+    /// mock Agent 返回 Keywords=["数码"]，但消息「推荐跑鞋」在 /chat 中字面命中 鞋子/跑步 →
+    /// chatReply 推荐含专业跑鞋（Id 3）；/recommendations 读 recommend_marla 快照 →
+    /// BestMatch 恒为跑鞋 Id 3，而非 Agent 关键词「数码」命中的数码产品（推荐栏以聊天产物为准）。
     /// </summary>
     [Fact]
     public async Task ShouldUseMessageKeywords_NotAgentKeywords()
@@ -97,7 +100,7 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
         using var factory = BuildFactory("""{"Reply":"模拟回复","Keywords":["数码"],"Preferences":[]}""");
         using var client = factory.CreateClient();
 
-        // 先跑一次 /chat（mock Agent 返回 Keywords=["数码"]），产生对话历史供 /recommendations 读最新消息
+        // 先跑一次 /chat（mock Agent 返回 Keywords=["数码"]），产生快照缓存（/chat 优先消息字面匹配）
         var chatResponse = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐跑鞋"));
         chatResponse.EnsureSuccessStatusCode();
 
@@ -107,13 +110,13 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
         var result = await response.Content.ReadFromJsonAsync<RecommendationResponse>();
         Assert.NotNull(result);
         Assert.NotNull(result!.BestMatch);
-        // 最新消息「推荐跑鞋」→ 鞋子/跑步 → BestMatch 跑鞋 Id 3（Agent Keywords=["数码"] 不参与）
+        // 消息「推荐跑鞋」→ 鞋子/跑步 → BestMatch 跑鞋 Id 3（Agent Keywords=["数码"] 不参与）
         Assert.Equal(3, result.BestMatch!.Id);
-        Assert.Equal("根据您的对话，为您推荐：", result.Message);
+        Assert.Equal("根据您的兴趣，为您推荐：", result.Message);
     }
 
     /// <summary>
-    /// R7 — 无对话历史且无偏好时，兜底 All.Take(6) 且提示语「为您精选商品」：
+    /// R8 — 缓存 miss（无 /chat 快照 recommend_marla）+ 无偏好时，兜底 All.Take(6) 且提示语「为您精选商品」：
     /// 只要商品库非空就显示精选兜底（不再显示「暂无特定推荐」造成提示语与列表矛盾）。
     /// BestMatch=null、Other 内容恒为 Id 1..6（固定顺序，无 shuffle）。
     /// </summary>
@@ -138,8 +141,8 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
     }
 
     /// <summary>
-    /// R7 随对话内容 — 最新消息含关键词「咖啡」→ /recommendations 推荐含意式浓缩咖啡机（Id 5）：
-    /// 读最新用户消息实时匹配关键词（不调 LLM），BestMatch 恒为咖啡机、提示语为「根据您的对话，为您推荐：」。
+    /// R8 — /chat 消息含关键词「咖啡」→ 写入快照缓存，/recommendations 读缓存 →
+    /// BestMatch 恒为意式浓缩咖啡机（Id 5）、Message 取聊天快照（「根据您的兴趣，为您推荐：」）。
     /// </summary>
     [Fact]
     public async Task ShouldRecommendCoffeeMachine_WhenLatestMessageContainsCoffee()
@@ -158,13 +161,14 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
         Assert.NotNull(result);
         Assert.NotNull(result!.BestMatch);
         Assert.Equal(5, result.BestMatch!.Id);                 // 意式浓缩咖啡机（消息「咖啡」命中）
-        Assert.Equal("根据您的对话，为您推荐：", result.Message);
+        Assert.Equal("根据您的兴趣，为您推荐：", result.Message);
         Assert.Contains(result.MatchedCategories!, c => c == "厨房用品");
     }
 
     /// <summary>
-    /// R7 提示语修正 — 有对话但消息无关键词且无偏好 → 兜底 All.Take(6) 且提示语「为您精选商品」：
-    /// 不再显示「暂无特定推荐」（与列表有商品矛盾）；固定顺序，无 shuffle。
+    /// R8 — 有对话但消息无关键词且无偏好 → /chat 走兜底分支并写入快照（BestMatch=null、
+    /// Other=All.Take(6)、Message=「暂无特定推荐 — 浏览精选商品」），/recommendations 镜像该快照：
+    /// 推荐栏与聊天提示语一致（而非缓存 miss 时的「为您精选商品」）；固定顺序，无 shuffle。
     /// </summary>
     [Fact]
     public async Task ShouldReturnCuratedFallback_WhenMessageHasNoKeywordAndNoPreference()
@@ -172,7 +176,7 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
         using var factory = BuildFactory("""{"Reply":"模拟回复","Keywords":[],"Preferences":[]}""");
         using var client = factory.CreateClient();
 
-        // 先产生对话消息（无关键词「你好」），无偏好 → 非「完全无内容」，走精选兜底
+        // 先产生对话消息（无关键词「你好」），/chat 兜底分支写入快照（Message=暂无特定推荐 — 浏览精选商品）
         var chat = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "你好"));
         chat.EnsureSuccessStatusCode();
 
@@ -182,7 +186,8 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
         var result = await response.Content.ReadFromJsonAsync<RecommendationResponse>();
         Assert.NotNull(result);
         Assert.Null(result!.BestMatch);
-        Assert.Equal("为您精选商品", result.Message);          // 非「暂无特定推荐」
+        // Message 取聊天快照（/chat 兜底 RecMessage），与聊天 100% 一致
+        Assert.Equal("暂无特定推荐 — 浏览精选商品", result.Message);
         Assert.Null(result.MatchedCategories);
         Assert.Equal(6, result.Other.Count);
         Assert.Equal([1, 2, 3, 4, 5, 6],
@@ -190,9 +195,8 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
     }
 
     /// <summary>
-    /// R7 无随机 — 去掉 shuffle 后多次调用推荐顺序完全一致（确定性）：
-    /// 预置偏好 + 消息含关键词「咖啡」，连续 3 次 POST /api/recommendations，
-    /// 每次 Other 的 Id 序列逐次相同、BestMatch 稳定为咖啡机（Id 5）。
+    /// R8 确定性 — 连续 3 次 POST /api/recommendations 都命中同一 recommend_marla 快照缓存，
+    /// 每次 Other 的 Id 序列逐次相同、BestMatch 稳定为咖啡机（Id 5）、Message 一致（缓存返回同一快照）。
     /// </summary>
     [Fact]
     public async Task ShouldReturnDeterministicOrder_WhenCalledMultipleTimes()
@@ -217,7 +221,7 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
             var result = await resp.Content.ReadFromJsonAsync<RecommendationResponse>();
             Assert.NotNull(result);
             Assert.NotNull(result!.BestMatch);
-            Assert.Equal("根据您的对话，为您推荐：", result.Message);
+            Assert.Equal("根据您的兴趣，为您推荐：", result.Message);
 
             var otherIds = result.Other.Select(p => p.Id).ToArray();
             if (firstOtherIds is null)
@@ -316,6 +320,103 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
     }
 
     /// <summary>
+    /// R8 — 推荐栏与聊天产物联动（核心修复，复现并验证字段问题）：
+    /// mock Agent 返回 Keywords=["家居"]（LLM 语义回退，消息「有枕套吗」在 KeywordMap 字面匹配无命中），
+    /// /chat 推荐集合含「家居」相关商品（含真丝枕套套装 Id 16）→ 写 recommend_marla 快照；
+    /// /recommendations 读快照 → BestMatch 与 /chat recommendedProducts 首个完全一致
+    /// （修复前 R7 字面匹配无命中 → 回退偏好咖啡机 Id 5）。
+    /// 注：SplitProducts(["家居"]) 命中 Id 12（香薰蜡烛套装）与 Id 16（真丝枕套套装），
+    /// 按 All 稳定序 12 在前 → BestMatch=12；id=16（枕套）在聊天推荐集合中。
+    /// </summary>
+    [Fact]
+    public async Task ShouldMirrorChatRecommendation_WhenChatHasSemanticFallback()
+    {
+        using var factory = BuildFactory("""{"Reply":"模拟回复","Keywords":["家居"],"Preferences":[]}""");
+        using var client = factory.CreateClient();
+
+        // 消息「有枕套吗」字面匹配无命中 → /chat 回退到 Agent Keywords=["家居"]（LLM 语义）
+        var chatResponse = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "有枕套吗"));
+        chatResponse.EnsureSuccessStatusCode();
+        var chatReply = await chatResponse.Content.ReadFromJsonAsync<ChatReply>();
+        Assert.NotNull(chatReply);
+        Assert.True(chatReply!.HasRecommendation);
+        // 聊天确实推荐了「家居」商品（字段问题：chat 语义回退命中 家居，含真丝枕套套装 Id 16）
+        Assert.Contains(chatReply.RecommendedProducts!, p => p.Id == 16);
+
+        var response = await client.PostAsJsonAsync("/api/recommendations",
+            new RecommendationRequest("marla", "keymatch"));
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<RecommendationResponse>();
+        Assert.NotNull(result);
+        Assert.NotNull(result!.BestMatch);
+        // 推荐栏 = 聊天推荐镜像：BestMatch 与 /chat recommendedProducts 首个 100% 一致
+        //（修复前为咖啡机 Id 5）；Other/Message/MatchedCategories 全部取快照
+        Assert.Equal(chatReply.RecommendedProducts![0].Id, result.BestMatch!.Id);
+        Assert.NotEqual(5, result.BestMatch.Id);                  // 非咖啡机 → 未被偏好兜底驱动
+        Assert.Equal(chatReply.RecMessage, result.Message);
+        Assert.Equal(chatReply.OtherProducts!.Select(p => p.Id), result.Other.Select(p => p.Id));
+        Assert.Equal(chatReply.MatchedCategories, result.MatchedCategories);
+    }
+
+    /// <summary>
+    /// R8 — 缓存 miss（无聊天）+ 有偏好 → 偏好兜底：
+    /// 无 recommend_marla 快照时，/recommendations 走 FilterValidPreferenceKeywords +
+    /// MergeKeywords([], 偏好) + SplitProducts，BestMatch 恒为意式浓缩咖啡机（Id 5，权重最高的「咖啡」优先）。
+    /// </summary>
+    [Fact]
+    public async Task ShouldUsePreferenceFallback_WhenCacheMiss()
+    {
+        using var factory = BuildFactory("""{"Reply":"模拟回复","Keywords":[],"Preferences":[]}""");
+        using var client = factory.CreateClient();
+
+        var marlaId = await GetMarlaUserIdAsync(factory);
+        await SeedPreferencesAsync(marlaId, """{"咖啡":3,"健身":2}""");
+
+        // 不先调 /chat → recommend_marla 缓存 miss → 偏好兜底
+        var response = await client.PostAsJsonAsync("/api/recommendations",
+            new RecommendationRequest("marla", "keymatch"));
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<RecommendationResponse>();
+        Assert.NotNull(result);
+        Assert.NotNull(result!.BestMatch);
+        Assert.Equal(5, result.BestMatch!.Id);                   // 意式浓缩咖啡机（偏好「咖啡」权重最高）
+        Assert.Equal("根据您的兴趣，为您推荐：", result.Message);
+        Assert.Contains(result.MatchedCategories!, c => c == "厨房用品");
+    }
+
+    /// <summary>
+    /// R8 — 缓存命中优先于 DB 最新消息：/chat「有枕套吗」写入家居快照缓存后，
+    /// 直接向 chat_messages 注入一条字面命中「咖啡」的新用户消息（R7 下 /recommendations 读该消息
+    /// 会字面匹配咖啡机），/recommendations 仍返回缓存快照（家居推荐、非咖啡机），
+    /// 证明推荐栏不再自行做消息字面匹配、以聊天产物（缓存快照）为准。
+    /// </summary>
+    [Fact]
+    public async Task ShouldUseCachedSnapshot_EvenWhenDbLatestMessageDiffers()
+    {
+        using var factory = BuildFactory("""{"Reply":"模拟回复","Keywords":["家居"],"Preferences":[]}""");
+        using var client = factory.CreateClient();
+
+        // 先 /chat「有枕套吗」→ 写 recommend_marla 家居快照缓存
+        var chatResponse = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "有枕套吗"));
+        chatResponse.EnsureSuccessStatusCode();
+        var chatReply = await chatResponse.Content.ReadFromJsonAsync<ChatReply>();
+        Assert.NotNull(chatReply);
+
+        // 注入新用户消息「推荐咖啡机」作为 DB 最新消息（R7 下会字面匹配 → 咖啡机）
+        var marlaId = await GetMarlaUserIdAsync(factory);
+        await InsertLatestUserMessageAsync(marlaId, "推荐咖啡机");
+
+        var response = await client.PostAsJsonAsync("/api/recommendations",
+            new RecommendationRequest("marla", "keymatch"));
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<RecommendationResponse>();
+        Assert.NotNull(result);
+        Assert.NotNull(result!.BestMatch);
+        Assert.NotEqual(5, result.BestMatch!.Id);                 // 非咖啡机 → 未被 DB 消息字面匹配驱动
+        Assert.Equal(chatReply!.RecommendedProducts![0].Id, result.BestMatch.Id); // = 聊天家居快照首个
+    }
+
+    /// <summary>
     /// 构造 WebApplicationFactory：隔离库 + mock Agent（返回指定的 agentJson）+ mock Router。
     /// 每个测试自建独立 factory（不基于其他 factory 派生），避免多 host 竞争。
     /// </summary>
@@ -402,6 +503,24 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
             UpdatedAt = DateTime.UtcNow,
         });
         await seedCtx.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// 直接向隔离库注入一条用户消息作为 DB 最新消息（R8 测试用：验证缓存命中优先于 DB 消息）。
+    /// </summary>
+    private async Task InsertLatestUserMessageAsync(Guid userId, string content)
+    {
+        using var ctx = new AppDbContext(
+            new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connStr).Options);
+        var session = await ctx.Sessions.FirstAsync(s => s.UserId == userId);
+        ctx.ChatMessageRecords.Add(new ChatMessageRecord
+        {
+            SessionId = session.Id,
+            Role = "user",
+            Content = content,
+            CreatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
     }
 
     /// <summary>

@@ -5,8 +5,6 @@ using AIShop.Core.Interfaces;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.Caching.Memory;
 using Serilog;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.RegularExpressions;
 
 namespace AIShop.Api.Features.Chat;
@@ -93,12 +91,12 @@ public static class ChatEndpoints
             // 1. Get agent and response (history loaded from SQLite by provider)
             var agentSw = Stopwatch.StartNew();
             AgentChatResult result;
-            AgentSession? session = null;
             try
             {
                 var modelId = req.Model ?? router.ActiveModel;
                 var agent = router.GetAgent(modelId);
-                (result, session) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, ct);
+                // R8：会话对象（第二元组元素）已不再被端点使用（agent_result_ 缓存已删），丢弃
+                (result, _) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, ct);
             }
             catch (KeyNotFoundException knf)
             {
@@ -118,12 +116,6 @@ public static class ChatEndpoints
 
             // 2. Save user message + assistant response to SQLite
             // 由 Agent 的 SqliteChatHistoryProvider.StoreChatHistoryAsync 自动处理，端点不再重复写入
-
-
-            // 2.1 Cache agent result for /recommendations to avoid duplicate LLM call
-            var chatHash = GetMessageHash(req.Message ?? "");
-            var chatCacheKey = $"agent_result_{req.Username}_{chatHash}";
-            cache.Set(chatCacheKey, (result, session), TimeSpan.FromMinutes(5));
 
             // 3. 关键词匹配：从用户输入直接匹配（不依赖模型结构化输出）
             // 匹配逻辑：消息中包含关键词 → 该关键词对应的所有标签相关产品都推荐
@@ -186,6 +178,18 @@ public static class ChatEndpoints
 
             productSw.Stop();
 
+            // R8：聊天产物联动推荐栏 — 写用户维度推荐快照缓存（推荐以聊天产物为准）。
+            // 先同步更新内存（/recommendations 立即读到最新推荐，与聊天 100% 一致），
+            // 偏好异步入队落库保持现状；TTL 10min，miss 时 /recommendations 走偏好/精选兜底。
+            cache.Set($"recommend_{req.Username}",
+                new RecommendationSnapshot(
+                    chatReply.RecommendedProducts,
+                    chatReply.OtherProducts,
+                    chatReply.MatchedCategories,
+                    chatReply.HasRecommendation,
+                    chatReply.RecMessage ?? ""),
+                TimeSpan.FromMinutes(10));
+
             // 偏好异步写入：端点只入队轻量 UserPreferenceUpdate（权重累加在
             // PreferenceWriteHostedService worker 侧串行读-改-写完成），立即返回不等待落库；
             // DropOldest 语义下 TryEnqueue 仅在 channel 标记完成后才返回 false，此处 Warning 作为
@@ -212,10 +216,9 @@ public static class ChatEndpoints
         api.MapPost("/recommendations", async (
             RecommendationRequest req,
             IUserRepository users,
-            ISessionRepository sessions,
-            IChatMessageRepository chatRepo,
             IProductCatalogService catalog,
             IPreferenceRepository prefRepo,
+            IMemoryCache cache,
             CancellationToken ct) =>
         {
             var endpointSw = Stopwatch.StartNew();
@@ -225,30 +228,26 @@ public static class ChatEndpoints
             if (user is null)
                 return Results.Unauthorized();
 
-            var sessionId = await sessions.GetOrCreateSessionIdAsync(user.Id, ct);
-            var sid = Guid.Parse(sessionId);
+            // R8：推荐以聊天产物为准 — 优先读 /api/chat 写入的用户维度快照缓存 recommend_{username}。
+            // 命中 → 直接按快照构造 RecommendationResponse（与聊天 100% 一致），
+            // 不再自行读 DB 最新消息做字面匹配（聊天产物即数据源）。
+            var snapshot = cache.Get<RecommendationSnapshot>($"recommend_{req.Username}");
+            if (snapshot is not null)
+            {
+                var cached = new RecommendationResponse(
+                    snapshot.Recommended?.FirstOrDefault(),
+                    snapshot.Other ?? [],
+                    snapshot.Message,
+                    snapshot.MatchedCategories);
+                return Results.Ok(cached);
+            }
 
-            // R7 推荐随对话内容：读最新用户消息关键词 + 偏好叠加，不调 LLM（毫秒级）。
-            // 已去除 R6 shuffle —— 固定顺序，多次调用结果确定（无随机）。
+            // miss（新用户 / 缓存过期）→ 偏好兜底：偏好关键词白名单过滤 + 合并（无当前消息关键词）。
+            // 与 /chat 推荐分支同一套 FilterValidPreferenceKeywords / MergeKeywords / SplitProducts 口径。
             var prefs = await prefRepo.GetByUserIdAsync(user.Id, ct);
             var prefKeywords = FilterValidPreferenceKeywords(prefs?.KeywordsJson, catalog);
 
-            // 最新用户消息（无对话历史则为 null → 消息关键词为空）
-            var lastUserMsg = await chatRepo.GetLastUserMessageAsync(sid, ct);
-            var userMsg = lastUserMsg?.Content ?? "";
-
-            // 与 /chat 端点一致的消息关键词匹配（L128-136）：消息含关键词或其任一扩张 tag。
-            // 不依赖 Agent 结构化 Keywords 输出，只从对话内容实时匹配（R7）。
-            var validKeywords = catalog.KeywordMap.Keys
-                .Where(k => userMsg.Contains(k, StringComparison.OrdinalIgnoreCase)
-                    || (catalog.KeywordMap.TryGetValue(k, out var tags)
-                        && tags.Any(tag => userMsg.Contains(tag, StringComparison.OrdinalIgnoreCase))))
-                .Distinct()
-                .Take(5)
-                .ToArray();
-
-            // 当前消息关键词优先，不足 3 个用偏好补齐（RecommendationMerger 口径与 /chat 一致）
-            var merged = RecommendationMerger.MergeKeywords(validKeywords, prefKeywords);
+            var merged = RecommendationMerger.MergeKeywords([], prefKeywords);
 
             RecommendationResponse response;
             if (merged.Length > 0)
@@ -262,7 +261,7 @@ public static class ChatEndpoints
                     response = new RecommendationResponse(
                         recDtos.FirstOrDefault(),
                         otherDtos,
-                        "根据您的对话，为您推荐：",
+                        "根据您的兴趣，为您推荐：",
                         recDtos.Select(p => p.Category).Distinct().ToArray());
                 }
                 else
@@ -290,7 +289,7 @@ public static class ChatEndpoints
 
             endpointSw.Stop();
             logger.Information(
-                "[Diagnose] /recommendations 总耗时 Total={TotalMs}ms 随对话内容（消息关键词+偏好，无 Agent/缓存）",
+                "[Diagnose] /recommendations 总耗时 Total={TotalMs}ms 推荐栏（聊天快照缓存优先，miss 偏好兜底，无 Agent）",
                 endpointSw.ElapsedMilliseconds);
 
             return Results.Ok(response);
@@ -355,11 +354,5 @@ public static class ChatEndpoints
                 && (catalog.KeywordMap.ContainsKey(kw) || productTags.Contains(kw)))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
-    }
-
-    private static string GetMessageHash(string message)
-    {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(message));
-        return Convert.ToHexString(bytes)[..16].ToLowerInvariant();
     }
 }
