@@ -45,6 +45,12 @@ public sealed class DeepSeekDelegatingChatClient : DelegatingChatClient
         IEnumerable<ChatMessage> messages, ChatOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        // R10.1：MEAI 埋点的 gen_ai.request.model 从 request.ChatOptions.ModelId 读取（不是 IChatClient.Metadata）。
+        // deepseek 请求时 ChatOptions.ModelId 为空 → 属性空；此处所有模型统一补填，
+        // 已显式指定则不被覆盖（??=）。放在发前清洗与模型分流之前，deepseek 直发路径与 base 路径都生效。
+        options ??= new ChatOptions();
+        options.ModelId ??= _modelName;
+
         var list = messages.ToList();
 
         Log.Information("[DSDelegate] Enter: Count={Count} Roles=[{Roles}] LastTool={LastTool}",

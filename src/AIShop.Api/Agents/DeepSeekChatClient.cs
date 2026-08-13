@@ -271,5 +271,8 @@ public sealed class DeepSeekChatClient : IChatClient
         }
     }
 
-    public object? GetService(Type serviceType, object? serviceKey = null) => null;
+    // R10.1：gen_ai.provider.name 由 MEAI 埋点从 IChatClient.GetService(typeof(ChatClientMetadata))
+    // 返回的 metadata.ProviderName 读取。暴露 R10 已实现的 Metadata，供 DelegatingChatClient 链转发到遥测。
+    public object? GetService(Type serviceType, object? serviceKey = null)
+        => serviceType == typeof(ChatClientMetadata) ? Metadata : null;
 }

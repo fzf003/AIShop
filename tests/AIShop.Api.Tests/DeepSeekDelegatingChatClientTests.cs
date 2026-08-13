@@ -101,4 +101,57 @@ public sealed class DeepSeekDelegatingChatClientTests
         Assert.Equal("call_1", toolMessages[0]["tool_call_id"]);
         Assert.Equal("结果1", toolMessages[0]["content"]);
     }
+
+    /// <summary>
+    /// R10.1 — gen_ai.request.model 由 MEAI 埋点从 request.ChatOptions.ModelId 读取（非 IChatClient.Metadata）。
+    /// DeepSeekDelegatingChatClient.GetResponseAsync 开头填充 options.ModelId（所有模型统一，??= 不覆盖已显式值）。
+    /// 走非 deepseek 分支（mock inner 捕获 options）验证修改逻辑；deepseek 分支在顶部同样生效（分支前设置）。
+    /// </summary>
+    [Fact]
+    public async Task GetResponseAsync_PopulatesOptionsModelId_AndDoesNotOverrideExisting()
+    {
+        ChatOptions? captured = null;
+        var inner = Substitute.For<IChatClient>();
+        inner.GetResponseAsync(
+                Arg.Any<IEnumerable<ChatMessage>>(),
+                Arg.Any<ChatOptions?>(),
+                Arg.Any<CancellationToken>())
+            .Returns(ci =>
+            {
+                captured = ci.Arg<ChatOptions?>();
+                return new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
+            });
+
+        using var sut = new DeepSeekDelegatingChatClient(inner, null, "qwen3.8-max");
+        var messages = new[] { new ChatMessage(ChatRole.User, "你好") };
+
+        // 1) options.ModelId 为空 → 填充 _modelName
+        var options = new ChatOptions();
+        await sut.GetResponseAsync(messages, options);
+        Assert.NotNull(captured);
+        Assert.Equal("qwen3.8-max", captured!.ModelId);
+
+        // 2) options.ModelId 非空 → 不被覆盖（??= 保留显式值）
+        options.ModelId = "explicit-model";
+        await sut.GetResponseAsync(messages, options);
+        Assert.Equal("explicit-model", captured!.ModelId);
+    }
+
+    /// <summary>
+    /// R10.1 — DelegatingChatClient.GetService 转发 inner：DeepSeekDelegatingChatClient(inner=DeepSeekChatClient)
+    /// 调用 GetService(typeof(ChatClientMetadata)) 应返回 inner 的 Metadata（gen_ai.provider.name 遥测链路：
+    /// 埋点从 GetService 读 provider.name，经 delegating 链转发到 DeepSeekChatClient）。
+    /// </summary>
+    [Fact]
+    public void GetService_ForwardsChatClientMetadata_ToInner()
+    {
+        using var inner = new DeepSeekChatClient(new HttpClient(), "deepseek-v4-flash");
+        using var wrapper = new DeepSeekDelegatingChatClient(inner, null, "deepseek-v4-flash");
+
+        var metadata = wrapper.GetService(typeof(ChatClientMetadata)) as ChatClientMetadata;
+
+        Assert.NotNull(metadata);
+        Assert.Equal("DeepSeek", metadata!.ProviderName);
+        Assert.Equal("deepseek-v4-flash", metadata.DefaultModelId);
+    }
 }
