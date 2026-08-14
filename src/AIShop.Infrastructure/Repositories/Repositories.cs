@@ -44,10 +44,4 @@ internal sealed class SessionRepository(AppDbContext db) : ISessionRepository
         await db.SaveChangesAsync(ct);
         return sessionId;
     }
-
-    public async Task<IReadOnlyList<ChatMessage>> GetSessionHistoryAsync(Guid sessionId, CancellationToken ct = default) =>
-        await db.ChatMessages
-            .Where(m => m.SessionId == sessionId)
-            .OrderBy(m => m.Timestamp)
-            .ToListAsync(ct);
 }

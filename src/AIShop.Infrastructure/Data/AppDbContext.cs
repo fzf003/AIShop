@@ -10,7 +10,6 @@ public sealed class AppDbContext : DbContext
 
     public DbSet<User> Users => Set<User>();
     public DbSet<Session> Sessions => Set<Session>();
-    public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     public DbSet<ChatMessageRecord> ChatMessageRecords => Set<ChatMessageRecord>();
     public DbSet<Cart> Carts => Set<Cart>();
     public DbSet<CartItem> CartItems => Set<CartItem>();
@@ -29,15 +28,6 @@ public sealed class AppDbContext : DbContext
         {
             e.HasKey(s => s.Id);
             e.HasIndex(s => s.UserId);
-        });
-
-        modelBuilder.Entity<ChatMessage>(e =>
-        {
-            e.HasKey(m => m.Id);
-            e.HasIndex(m => m.SessionId);
-            e.Property(m => m.Content).HasColumnType("TEXT");
-            e.Property(m => m.ContentsJson).HasColumnType("TEXT");
-            e.Property(m => m.Id).ValueGeneratedOnAdd();
         });
 
         modelBuilder.Entity<ChatMessageRecord>(e =>
