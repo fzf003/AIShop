@@ -11,7 +11,10 @@ PreToolUse hook（matcher: Bash）：拦截 `git commit`，commit 前强制跑
 只在检测到命令是 git commit 时才触发 build/test（避免每次 Bash 调用都跑一遍
 build 拖慢开发），其余 Bash 命令直接放行。
 
-超时保护：build/test 各设 180s 超时，避免 agent 卡在挂起的进程上无限等待。
+超时保护：build/test 各设 300s 超时，避免 agent 卡在挂起的进程上无限等待。
+
+优化：仅当暂存区涉及代码文件（.cs/.csproj/.sln 等）时才跑 build/test；
+只改文档/文本/配置文件的提交直接放行，避免纯文档改动被无谓编译和 flaky 测试误拦。
 """
 import sys
 import json
@@ -30,9 +33,33 @@ TEST_TIMEOUT_SEC = 300
 # 匹配 git commit（含 git -C <dir> commit、git commit -m "..."、复合命令里的 git commit 等）
 COMMIT_PATTERN = re.compile(r"(^|[;&|]\s*)git\s+(-C\s+\S+\s+)?commit\b")
 
+# 需要重新编译的代码文件扩展名（小写比对）。仅当暂存区含这些文件时才跑 build/test。
+CODE_FILE_SUFFIXES = (
+    ".cs", ".csproj", ".sln", ".props", ".targets", ".razor", ".cshtml",
+    ".fs", ".fsproj",
+)
+
 
 def is_git_commit(command: str) -> bool:
     return bool(COMMIT_PATTERN.search(command))
+
+
+def staged_has_code_files() -> bool:
+    """暂存区是否含代码文件（需要重新编译）？无 HEAD（首次提交）或获取失败时保守返回 True。"""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "-z"],
+            capture_output=True, encoding="utf-8", errors="replace", timeout=30,
+        )
+    except Exception:
+        return True
+    if result.returncode != 0:
+        return True
+    return any(
+        name.lower().endswith(CODE_FILE_SUFFIXES)
+        for name in result.stdout.split("\0")
+        if name
+    )
 
 
 def run(cmd):
@@ -53,6 +80,11 @@ def main():
 
     if not is_git_commit(command):
         sys.exit(0)  # 不是 git commit，放行
+
+    # 仅改文本/文档/配置文件、不涉及代码的提交：跳过编译测试环节
+    if not staged_has_code_files():
+        print("SKIP: 本次提交仅改动文本/文档文件，不涉及代码，跳过 build/test。")
+        sys.exit(0)
 
     build_code, build_out = run("dotnet build --nologo --verbosity quiet")
     if build_code != 0:
