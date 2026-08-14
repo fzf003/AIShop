@@ -1,8 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Runtime.CompilerServices;
+using System.Diagnostics;
 using Microsoft.Extensions.AI;
-using Serilog;
 
 namespace AIShop.Api.Agents;
 
@@ -13,10 +13,26 @@ namespace AIShop.Api.Agents;
 /// 但 OpenAIChatClient 只读不写此字段 → 报错 "must be passed back to the API"。
 /// 此实现绕开 SDK，直接发送原生的 JSON 请求，手动处理 reasoning_content。
 /// </summary>
-public sealed class DeepSeekChatClient(HttpClient httpClient, string modelName) : IChatClient
+public sealed class DeepSeekChatClient : IChatClient
 {
     private static readonly Serilog.ILogger Log = Serilog.Log.ForContext<DeepSeekChatClient>();
-    private readonly HttpClient _httpClient = httpClient;
+    private readonly HttpClient _httpClient;
+    private readonly string _modelName;
+
+    /// <summary>
+    /// IChatClient.Metadata 实现（R10）：修 DeepSeek gen_ai 遥测属性（ProviderName/ModelId）为空——
+    /// 旧主构造函数未实现 Metadata，接口默认 Metadata 为空对象，OTel gen_ai 属性缺失。
+    /// </summary>
+    public ChatClientMetadata Metadata { get; }
+
+    public DeepSeekChatClient(HttpClient httpClient, string modelName)
+    {
+        _httpClient = httpClient;
+        _modelName = modelName;
+        // 构造函数签名 ChatClientMetadata(string providerName, Uri? providerUri, string? defaultModelId)
+        // （实测 10.8.3：第 2 参是 providerUri 而非 modelId，模型名走第 3 参 defaultModelId）
+        Metadata = new ChatClientMetadata(providerName: "DeepSeek", defaultModelId: modelName);
+    }
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -150,7 +166,7 @@ public sealed class DeepSeekChatClient(HttpClient httpClient, string modelName) 
 
         var requestBody = new Dictionary<string, object?>
         {
-            ["model"] = modelName,
+            ["model"] = _modelName,
             ["messages"] = apiMessages,
             ["tools"] = toolsList.Count > 0 ? toolsList : null,
             ["tool_choice"] = "auto",
@@ -169,6 +185,16 @@ public sealed class DeepSeekChatClient(HttpClient httpClient, string modelName) 
         if (!response.IsSuccessStatusCode)
         {
             Log.Error("[DeepSeekDirect] API 错误: {StatusCode} {Body}", response.StatusCode, responseBody);
+            // R11：被吞的 API 错误进 OTel span——MEAI 埋点对抛异常只 SetStatus(Error) 不产生 exception 事件，
+            // 且此处是捕获后兜底返回（不抛异常），错误详情默认不可见；手动 SetStatus + AddEvent("exception")。
+            Activity.Current?.SetStatus(ActivityStatusCode.Error,
+                $"DeepSeek API {(int)response.StatusCode}: {Truncate(responseBody, 200)}");
+            Activity.Current?.AddEvent(new ActivityEvent("exception",
+                tags: new ActivityTagsCollection
+                {
+                    { "exception.type", "HttpRequestException" },
+                    { "exception.message", Truncate(responseBody, 200) },
+                }));
             return new ChatResponse(new ChatMessage(ChatRole.Assistant, "抱歉，暂时无法处理您的请求，请重试。"));
         }
 
@@ -256,5 +282,13 @@ public sealed class DeepSeekChatClient(HttpClient httpClient, string modelName) 
         }
     }
 
-    public object? GetService(Type serviceType, object? serviceKey = null) => null;
+    // R10.1：gen_ai.provider.name 由 MEAI 埋点从 IChatClient.GetService(typeof(ChatClientMetadata))
+    // 返回的 metadata.ProviderName 读取。暴露 R10 已实现的 Metadata，供 DelegatingChatClient 链转发到遥测。
+    public object? GetService(Type serviceType, object? serviceKey = null)
+        => serviceType == typeof(ChatClientMetadata) ? Metadata : null;
+
+    /// <summary>
+    /// 截断超长响应体（R11）：避免超大错误详情撑爆 OTel tag/span 属性。
+    /// </summary>
+    private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "...";
 }

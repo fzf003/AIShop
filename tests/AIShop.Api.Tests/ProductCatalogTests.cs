@@ -1,16 +1,58 @@
 using AIShop.Core.Interfaces;
+using AIShop.Core.StaticData;
+using AIShop.Infrastructure.Data;
 using AIShop.Infrastructure.Services;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace AIShop.Api.Tests;
 
-public sealed class ProductCatalogTests
+/// <summary>
+/// ProductCatalog 改走 ProductRepository 缓存链路测试（T10）。
+/// 链路：SQLite 内存库 + 种子 → ProductRepository(cache, dbFactory) → ProductCatalog(repository)。
+/// 对应 spec「ProductCatalog.All 来自数据库」。
+/// </summary>
+public sealed class ProductCatalogTests : IDisposable
 {
-    private static readonly IProductCatalogService Catalog = new ProductCatalog();
+    private readonly SqliteConnection _connection;
+    private readonly DbContextOptions<AppDbContext> _options;
+    private readonly MemoryCache _cache;
+    private readonly CountingDbContextFactory _dbFactory;
+    private readonly IProductCatalogService _catalog;
+
+    public ProductCatalogTests()
+    {
+        _connection = new SqliteConnection("DataSource=:memory:");
+        _connection.Open();
+        _options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(_connection)
+            .Options;
+
+        // 播种：种子入库（与 ProductRepositoryTests 同一模式）
+        using (var seedCtx = new AppDbContext(_options))
+        {
+            seedCtx.Database.EnsureCreated();
+            seedCtx.Products.AddRange(ProductSeedData.Products);
+            seedCtx.SaveChanges();
+        }
+
+        _cache = new MemoryCache(new MemoryCacheOptions());
+        _dbFactory = new CountingDbContextFactory(_options);
+        _catalog = new ProductCatalog(new ProductRepository(_cache, _dbFactory));
+    }
+
+    public void Dispose()
+    {
+        _cache.Dispose();
+        _connection.Close();
+        _connection.Dispose();
+    }
 
     [Fact]
     public void SplitProducts_MatchingKeywords_ReturnsSplit()
     {
-        var (recommended, others) = Catalog.SplitProducts(["跑步"]);
+        var (recommended, others) = _catalog.SplitProducts(["跑步"]);
 
         Assert.Contains(recommended, p => p.Name == "专业跑鞋");
         Assert.Contains(recommended, p => p.Name == "高级瑜伽垫");
@@ -21,7 +63,7 @@ public sealed class ProductCatalogTests
     [Fact]
     public void SplitProducts_EmptyKeywords_ReturnsEmptyRecommended()
     {
-        var (recommended, others) = Catalog.SplitProducts([]);
+        var (recommended, others) = _catalog.SplitProducts([]);
 
         Assert.Empty(recommended);
         Assert.Equal(6, others.Length);
@@ -30,25 +72,25 @@ public sealed class ProductCatalogTests
     [Fact]
     public void SplitProducts_AllProductsCoveredByCombinedKeywords()
     {
-        var allKeywords = Catalog.KeywordMap.Keys.ToArray();
-        var (recommended, _) = Catalog.SplitProducts(allKeywords);
+        var allKeywords = _catalog.KeywordMap.Keys.ToArray();
+        var (recommended, _) = _catalog.SplitProducts(allKeywords);
 
-        Assert.Equal(Catalog.All.Count, recommended.Length);
+        Assert.Equal(_catalog.All.Count, recommended.Length);
     }
 
     [Fact]
     public void SplitProducts_NonMatchingKeywords_ReturnsEmptyRecommended()
     {
-        var (recommended, others) = Catalog.SplitProducts(["不存在的关键词"]);
+        var (recommended, others) = _catalog.SplitProducts(["不存在的关键词"]);
 
         Assert.Empty(recommended);
-        Assert.Equal(Catalog.All.Count, others.Length);
+        Assert.Equal(_catalog.All.Count, others.Length);
     }
 
     [Fact]
     public void PromoteProduct_KeywordExpansionMapsToTags()
     {
-        var (recommended, _) = Catalog.SplitProducts(["运动"]);
+        var (recommended, _) = _catalog.SplitProducts(["运动"]);
 
         Assert.Contains(recommended, p => p.Name == "专业跑鞋");
         Assert.Contains(recommended, p => p.Name == "高级瑜伽垫");
@@ -58,7 +100,7 @@ public sealed class ProductCatalogTests
     [Fact]
     public void MatchProducts_EmptyPreferences_ReturnsEmpty()
     {
-        var result = Catalog.MatchProducts([]);
+        var result = _catalog.MatchProducts([]);
 
         Assert.Empty(result);
     }
@@ -66,7 +108,7 @@ public sealed class ProductCatalogTests
     [Fact]
     public void MatchProducts_WithPreferences_ReturnsScored()
     {
-        var result = Catalog.MatchProducts(["咖啡"]);
+        var result = _catalog.MatchProducts(["咖啡"]);
 
         Assert.Contains(result, p => p.Name == "意式浓缩咖啡机");
         Assert.InRange(result.Length, 1, 6);
@@ -84,8 +126,49 @@ public sealed class ProductCatalogTests
 
         foreach (var key in expected)
         {
-            Assert.True(Catalog.KeywordMap.ContainsKey(key),
+            Assert.True(_catalog.KeywordMap.ContainsKey(key),
                 $"KeywordMap should contain '{key}'");
+        }
+    }
+
+    [Fact]
+    public void All_ReturnsContentMatchingProductsTable()
+    {
+        // 表当前内容（全新 context 从 DB materialization，与缓存数据源独立对比）
+        using var db = new AppDbContext(_options);
+        var table = db.Products.OrderBy(p => p.Id).ToList();
+
+        var all = _catalog.All;
+
+        Assert.Equal(table.Count, all.Count);
+        foreach (var row in table)
+        {
+            var actual = all.Single(p => p.Id == row.Id);
+            Assert.Equal(row.Name, actual.Name);
+            Assert.Equal(row.Category, actual.Category);
+            Assert.Equal(row.Tags, actual.Tags);
+            Assert.Equal(row.Price, actual.Price);
+            Assert.Equal(row.Emoji, actual.Emoji);
+        }
+    }
+
+    /// <summary>
+    /// 计数用 IDbContextFactory：每次创建上下文递增计数（与 ProductRepositoryTests 同模式）。
+    /// </summary>
+    private sealed class CountingDbContextFactory(DbContextOptions<AppDbContext> options) : IDbContextFactory<AppDbContext>
+    {
+        public int CreateCount { get; private set; }
+
+        public AppDbContext CreateDbContext()
+        {
+            CreateCount++;
+            return new AppDbContext(options);
+        }
+
+        public Task<AppDbContext> CreateDbContextAsync(CancellationToken cancellationToken = default)
+        {
+            CreateCount++;
+            return Task.FromResult(new AppDbContext(options));
         }
     }
 }

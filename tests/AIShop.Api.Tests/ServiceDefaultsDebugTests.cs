@@ -39,7 +39,9 @@ public sealed class ServiceDefaultsDebugTests
     // =========================================================
     // Debug=false（默认）：不产生 traces_*.log、无 body 抓取
     // 对应 spec「Debug 开关默认关闭」+「Debug 关闭时无额外开销」。
-    // 不配置 AgentTelemetry:Debug → ServiceDefaults 惰性读到 false，不配 EnrichWith、不注册 FileSpanExporter。
+    // 显式配置 AgentTelemetry:Debug=false 覆盖 appsettings.json 的 true（b4a2cdf 引入，
+    // 被复制到测试输出目录，Host.CreateApplicationBuilder 会读到 true），保证测试隔离：
+    // 不配 EnrichWith、不注册 FileSpanExporter。
     // =========================================================
     [Fact]
     public async Task ShouldNotProduceTracesLogOrCaptureBody_WhenDebugFalse()
@@ -47,7 +49,7 @@ public sealed class ServiceDefaultsDebugTests
         var builder = Host.CreateApplicationBuilder();
         // 显式声明 Debug=false：WebApplicationFactory 引用 Api 项目时，其 appsettings.json（AgentTelemetry:Debug=true）
         // 会被复制到测试输出目录，Host.CreateApplicationBuilder() 会读到 true → 误注册 FileSpanExporter。
-        // 测试意图是「Debug 关闭时零开销」，故显式覆盖前置条件，不依赖环境默认。
+        // 测试意图是「Debug 关闭时零开销」，故显式覆盖前置条件（T26 隔离修复），不依赖环境默认。
         builder.Configuration["AgentTelemetry:Debug"] = "false";
         builder.AddServiceDefaults();
         using var host = builder.Build();

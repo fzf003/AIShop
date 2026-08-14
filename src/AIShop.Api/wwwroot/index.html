@@ -938,26 +938,48 @@
         }
     }
 
-    function renderRecommendations(products, message) {
-        document.getElementById('recoMessage').textContent = message;
+    // R8.1：推荐栏渲染完整推荐列表（含 bestMatch）。data = RecommendationResponse
+    //（bestMatch/recommended/other/message/matchedCategories）。视觉结构与聊天后
+    // renderRecommendationPanel 对齐：有 recommended → 「🎯 为您推荐」（首个高亮）+
+    //「📋 其他商品」；recommended 为空 → 「📋 全部商品」兜底。
+    function renderRecommendations(data) {
+        const msgEl = document.getElementById('recoMessage');
         const container = document.getElementById('recoProducts');
         container.innerHTML = '';
 
-        if (products.length === 0) {
-            document.getElementById('recoMessage').textContent = '暂无推荐';
-            return;
-        }
+        const recommended = data.recommended || [];
+        if (recommended.length > 0) {
+            msgEl.textContent = data.message || '根据您的兴趣推荐：';
+            container.innerHTML += '<div class="section-label best">🎯 为您推荐</div>';
+            recommended.forEach((p, i) =>
+                container.innerHTML += productCard(p, i === 0));
 
-        // 🎯 为您推荐 — best-match style for first product
-        container.innerHTML += '<div class="section-label best">🎯 为您推荐</div>';
-        container.innerHTML += productCard(products[0], true);
-
-        // 📋 其他商品 — remaining products
-        if (products.length > 1) {
-            container.innerHTML += '<div class="section-label other">📋 其他商品</div>';
-            products.slice(1).forEach(p => {
-                container.innerHTML += productCard(p, false);
-            });
+            if (data.other?.length > 0) {
+                container.innerHTML += '<div class="section-label other">📋 其他商品</div>';
+                data.other.forEach(p =>
+                    container.innerHTML += productCard(p, false));
+            }
+        } else {
+            msgEl.textContent = '😅 ' + (data.message || '暂无推荐');
+            if (data.other?.length > 0) {
+                container.innerHTML += '<div class="section-label other" style="color:#999;">📋 全部商品</div>';
+                data.other.forEach(p => {
+                    const encoded = encodeURIComponent(JSON.stringify(p));
+                    container.innerHTML += `
+                        <div class="product-card" style="opacity:0.7;cursor:pointer" onclick="showProductDetail('${encoded}')">
+                            <div style="font-size:0.7rem;color:#999;margin-bottom:4px;">未推荐</div>
+                            <div class="product-icon">${p.emoji}</div>
+                            <div class="product-name">${p.name}</div>
+                            <div class="product-tags">${(p.tags || []).join(' · ')}</div>
+                            <div class="price-row">
+                                <span class="price-value">$${p.price.toFixed(2)}</span>
+                                <button class="cart-inline-btn" data-product-id="${p.id}" onclick="event.stopPropagation(); addToCart(${p.id}, '${p.name}', ${p.price}, '${p.emoji}')">🛒</button>
+                            </div>
+                        </div>
+                        </div>
+                    `;
+                });
+            }
         }
     }
 
@@ -1016,10 +1038,8 @@
             });
             const data = await res.json();
 
-            renderRecommendations(
-                [data.bestMatch, ...(data.other || [])].filter(Boolean),
-                data.message
-            );
+            // R8.1：传整个响应，前端以 recommended 列表为主渲染（bestMatch 字段保留兼容）
+            renderRecommendations(data);
         } catch (err) {
             document.getElementById('recoMessage').textContent = '获取推荐失败。';
         }

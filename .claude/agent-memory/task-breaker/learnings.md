@@ -11,6 +11,7 @@
 | 2026-07-10 | workflow-approval-short-circuit | Phase8 T24-T29 估算 | 60min | - | - | 参考了 Phase0 T0 的 15min 经验，但任务已在前面描述清楚，此次仅做追加无需重新发现；T25 合并 4 个节点为 15min 而非 4x8=32min 是因为模式统一可批量编写 |
 | 2026-07-12 | D--Hermes-Projects-AIShop-docs-design-四合一架构重构 | 任务拆解 | 设计.md 预估 17min（仅实现） | tasks.md 拆分出 33min（实现+测试+验证） | +16min | 设计.md 仅估算了纯实现工时（7min A+B + 10min C），未包含配套测试（15min）和最终验证（5min），tasks.md 按每项实现任务配至少一个测试任务的规则补全了测试覆盖面 |
 | 2026-07-12 | 产品浏览增强与Agent优化 | 全量任务拆解 | 76min（汇总所有子任务预估） | - | - | 方向 A（前端 index.html）含 8 项实现 + 10 项手动验证测试（浏览器操作），方向 B（Program.cs 改 1 行）含 1 项实现 + 3 项验证。前端变更无法用自动化测试覆盖（纯 HTML/CSS/JS 页面的 UI 行为），故以手动测试任务为主。注意：此类前端变更场景下，dotnet test 仅验证后端测试不受影响，前端功能需人工验收。 |
+| 2026-08-11 | product-catalog-persistence | 设计按 review 修正 + 阶段重排 | - | - | - | 按 review 意见同步修正设计（幂等建表兜底、双轨合一、worker 侧累加、Product 迁独立文件）；阶段重排：T11（ProductRepository 缓存）前置到 T8（ProductCatalog 改造）之前（因 ProductCatalog 改为依赖 IProductRepository）；blocking edges 连锁调整（新增 T1→T11、T6→T11、T11→T8） |
 
 ## 任务粒度经验
 

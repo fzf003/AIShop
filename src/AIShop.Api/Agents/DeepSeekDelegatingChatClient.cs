@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Diagnostics;
 using Microsoft.Extensions.AI;
 using Serilog;
 
@@ -45,6 +46,12 @@ public sealed class DeepSeekDelegatingChatClient : DelegatingChatClient
         IEnumerable<ChatMessage> messages, ChatOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        // R10.1：MEAI 埋点的 gen_ai.request.model 从 request.ChatOptions.ModelId 读取（不是 IChatClient.Metadata）。
+        // deepseek 请求时 ChatOptions.ModelId 为空 → 属性空；此处所有模型统一补填，
+        // 已显式指定则不被覆盖（??=）。放在发前清洗与模型分流之前，deepseek 直发路径与 base 路径都生效。
+        options ??= new ChatOptions();
+        options.ModelId ??= _modelName;
+
         var list = messages.ToList();
 
         Log.Information("[DSDelegate] Enter: Count={Count} Roles=[{Roles}] LastTool={LastTool}",
@@ -105,6 +112,16 @@ public sealed class DeepSeekDelegatingChatClient : DelegatingChatClient
         if (!response.IsSuccessStatusCode)
         {
             Log.Error("[DeepSeekDirect] API 错误: {StatusCode} {Body}", response.StatusCode, responseBody);
+            // R11：被吞的 API 错误进 OTel span——此处捕获后兜底返回（不抛异常），错误详情默认不可见；
+            // 手动 SetStatus + AddEvent("exception") 供 Aspire span 展示。
+            Activity.Current?.SetStatus(ActivityStatusCode.Error,
+                $"DeepSeek API {(int)response.StatusCode}: {Truncate(responseBody, 200)}");
+            Activity.Current?.AddEvent(new ActivityEvent("exception",
+                tags: new ActivityTagsCollection
+                {
+                    { "exception.type", "HttpRequestException" },
+                    { "exception.message", Truncate(responseBody, 200) },
+                }));
             return new ChatResponse(new ChatMessage(ChatRole.Assistant, "抱歉，暂时无法处理您的请求，请重试。"));
         }
 
@@ -359,4 +376,9 @@ public sealed class DeepSeekDelegatingChatClient : DelegatingChatClient
     // RenumberCallIds 已被移除。
     // DeepSeek 返回的 call_00_xxx 和 Qwen 存盘 call_sanitized_N 都是合法 ID，
     // 重编号会破坏 FICC 的 tool 结果匹配，导致 [工具调用结果丢失]。
+
+    /// <summary>
+    /// 截断超长响应体（R11）：避免超大错误详情撑爆 OTel tag/span 属性。
+    /// </summary>
+    private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "...";
 }

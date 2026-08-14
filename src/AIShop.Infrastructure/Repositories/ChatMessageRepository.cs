@@ -8,8 +8,6 @@ namespace AIShop.Infrastructure.Repositories;
 
 internal sealed class ChatMessageRepository(AppDbContext db) : IChatMessageRepository
 {
-    public void Add(ChatMessage message) => db.ChatMessages.Add(message);
-
     public async Task<IReadOnlyList<ChatMessage>> GetSessionHistoryAsync(
         Guid sessionId, int? take = null, CancellationToken ct = default)
     {

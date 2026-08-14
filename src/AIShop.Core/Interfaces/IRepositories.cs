@@ -11,7 +11,6 @@ public interface IUserRepository
 public interface ISessionRepository
 {
     Task<string> GetOrCreateSessionIdAsync(Guid userId, CancellationToken ct = default);
-    Task<IReadOnlyList<ChatMessage>> GetSessionHistoryAsync(Guid sessionId, CancellationToken ct = default);
 }
 
 /// <summary>

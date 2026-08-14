@@ -1,14 +1,26 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using AIShop.Core.StaticData;
+using AIShop.Infrastructure.Data;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace AIShop.McpServer.Tests;
 
-public sealed class McpServerIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
+/// <summary>
+/// McpServer 端到端集成测试。
+/// T8 起 ProductCatalog.All 走 ProductRepository 查库，隔离库需 EnsureCreated + 播种 18 商品，
+/// 否则 match_products 抛 "no such table: Products"（与 T23-pre 同模式）。
+/// </summary>
+public sealed class McpServerIntegrationTests : IClassFixture<McpServerIntegrationTests.TestMcpServerFactory>
 {
     private readonly WebApplicationFactory<Program> _factory;
 
-    public McpServerIntegrationTests(WebApplicationFactory<Program> factory)
+    public McpServerIntegrationTests(TestMcpServerFactory factory)
     {
         _factory = factory;
     }
@@ -138,7 +150,7 @@ public sealed class McpServerIntegrationTests : IClassFixture<WebApplicationFact
         Assert.NotNull(text);
         Assert.NotEmpty(text);
         // The JSON text contains Unicode-escaped Chinese characters in the form \uXXXX
-        // The server serializes names with escapes like \u4E13\u4E1A\u8DD1\u978B (= 专业跑鞋)
+        // The server serializes names with escapes like 专业跑鞋 (= 专业跑鞋)
         Assert.Contains("\\u4E13\\u4E1A\\u8DD1\\u978B", text);
     }
 
@@ -183,5 +195,51 @@ public sealed class McpServerIntegrationTests : IClassFixture<WebApplicationFact
         });
 
         Assert.True(json.TryGetProperty("error", out _));
+    }
+
+    /// <summary>
+    /// 测试用 WebApplicationFactory：隔离临时文件库 + EnsureCreated + 播种 18 商品。
+    /// T8 改查库后 match_products 走 ProductCatalog.All → ProductRepository.GetAll() 查库，
+    /// 无 Products 表的空库会抛 "no such table"。
+    /// </summary>
+    public sealed class TestMcpServerFactory : WebApplicationFactory<Program>
+    {
+        private readonly string _dbPath = Path.Combine(Path.GetTempPath(), $"mcp_test_{Guid.NewGuid():N}.db");
+
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IDbContextFactory<AppDbContext>>();
+                services.RemoveAll<DbContextOptions<AppDbContext>>();
+                services.RemoveAll<AppDbContext>();
+
+                var connStr = $"Data Source={_dbPath}";
+                services.AddDbContextFactory<AppDbContext>(options => options.UseSqlite(connStr));
+                services.AddScoped<AppDbContext>(sp =>
+                    sp.GetRequiredService<IDbContextFactory<AppDbContext>>().CreateDbContext());
+
+                // 播种 18 商品（与 ChatEndpointsTests.ReplaceWithIsolatedDb 同模式：独立上下文构造，不 BuildServiceProvider）
+                using var seedCtx = new AppDbContext(
+                    new DbContextOptionsBuilder<AppDbContext>().UseSqlite(connStr).Options);
+                seedCtx.Database.EnsureCreated();
+                seedCtx.Products.AddRange(ProductSeedData.Products);
+                seedCtx.SaveChanges();
+            });
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            SqliteConnection.ClearAllPools();
+            try
+            {
+                if (File.Exists(_dbPath)) File.Delete(_dbPath);
+            }
+            catch (IOException)
+            {
+                // SQLite 文件可能被连接池短暂锁定，忽略清理异常
+            }
+        }
     }
 }

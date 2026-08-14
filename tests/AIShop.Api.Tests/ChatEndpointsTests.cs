@@ -1,9 +1,10 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Diagnostics;
 using AIShop.AgentTelemetry;
 using AIShop.Api.Agents;
 using AIShop.Api.Features.Chat;
-using AIShop.Core.Interfaces;
+using AIShop.Core.StaticData;
 using AIShop.Infrastructure.Data;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
@@ -62,7 +63,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     return new ShoppingAssistantAgent(
                         sp.GetRequiredService<Meai.IChatClient>(),
                         sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        sp.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         sp.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         sp.GetRequiredService<AgentTelemetryOptions>());
@@ -71,7 +72,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -99,6 +100,16 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         services.AddDbContextFactory<AppDbContext>(options => options.UseSqlite(connStr));
         services.AddScoped<AppDbContext>(sp =>
             sp.GetRequiredService<IDbContextFactory<AppDbContext>>().CreateDbContext());
+
+        // 播种 18 商品：隔离库是全新空库，ProductRepository 改查库后 /products 从空表返回 0，
+        // 必须在此建表 + 播入 ProductSeedData，否则 GetProducts_ReturnsAll 期望 18 实际 0。
+        // 用独立 DbContextOptions 直接构造上下文播种（与 ProductRepositoryTests 同一模式），
+        // 避免在 ConfigureServices 阶段 BuildServiceProvider() 触发 Serilog "already frozen"。
+        using var seedCtx = new AppDbContext(
+            new DbContextOptionsBuilder<AppDbContext>().UseSqlite(connStr).Options);
+        seedCtx.Database.EnsureCreated();
+        seedCtx.Products.AddRange(ProductSeedData.Products);
+        seedCtx.SaveChanges();
     }
 
     [Fact]
@@ -168,19 +179,24 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         Assert.Equal(18, result!.products.Length);
     }
 
+    /// <summary>
+    /// R7 — 无对话历史且无偏好时，/recommendations 走 All.Take(6) 精选兜底：
+    /// BestMatch=null、Message=为您精选商品（非「暂无特定推荐」）、Other 内容恒为 Id 1..6（固定顺序，无 shuffle）。
+    /// </summary>
     [Fact]
-    public async Task Recommendations_ReturnsResults()
+    public async Task ShouldReturnFallback_WhenNoPreference()
     {
         using var client = _factory.CreateClient();
-        await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐跑步"));
-
         var response = await client.PostAsJsonAsync("/api/recommendations",
             new RecommendationRequest("marla", "keymatch"));
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<RecommendationResponse>();
         Assert.NotNull(result);
-        Assert.NotNull(result!.BestMatch);
-        Assert.NotEmpty(result.Other);
+        Assert.Null(result!.BestMatch);                              // 无对话历史 + 无偏好 → 无最佳匹配
+        Assert.Equal("为您精选商品", result.Message);
+        Assert.Equal(6, result.Other.Count);
+        Assert.Equal([1, 2, 3, 4, 5, 6],
+            result.Other.Select(p => p.Id).ToArray()); // 固定顺序（去 shuffle），可精确断言
     }
 
     [Fact]
@@ -215,8 +231,13 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         Assert.Contains(userMsgs, m => m.Content == "消息4");
     }
 
+    /// <summary>
+    /// R7 无随机 — 两次 /recommendations 结果完全一致（确定性，无 shuffle）：
+    /// 无对话历史 + 无偏好 → 每次都是「为您精选商品」兜底，Other 顺序逐次相同（Id 1..6），
+    /// mock IChatClient 的 GetResponseAsync 全程未被调用（callCount==0，不调 LLM）。
+    /// </summary>
     [Fact]
-    public async Task Recommendations_SecondRequest_ReturnsCachedResult()
+    public async Task ShouldReturnConsistentContent_WhenCalledTwice()
     {
         var callCount = 0;
         WebApplicationFactory<Program>? f = null;
@@ -244,7 +265,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -252,7 +273,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -261,7 +282,6 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
             });
         });
         using var client = f.CreateClient();
-        await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐运动"));
         var resp1 = await client.PostAsJsonAsync("/api/recommendations",
             new RecommendationRequest("marla", "keymatch"));
         resp1.EnsureSuccessStatusCode();
@@ -271,12 +291,27 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         var r1 = await resp1.Content.ReadFromJsonAsync<RecommendationResponse>();
         var r2 = await resp2.Content.ReadFromJsonAsync<RecommendationResponse>();
         Assert.NotNull(r1); Assert.NotNull(r2);
-        Assert.Equal(r1!.BestMatch?.Id, r2!.BestMatch?.Id);
+        // 无对话历史 + 无偏好 → 两次都是「为您精选商品」兜底，内容与顺序一致（去 shuffle 确定性）
+        Assert.Null(r1!.BestMatch);
+        Assert.Null(r2!.BestMatch);
+        Assert.Equal(
+            r1.Other.Select(p => p.Id).ToArray(),
+            r2.Other.Select(p => p.Id).ToArray());
+        Assert.Equal([1, 2, 3, 4, 5, 6], r1.Other.Select(p => p.Id).ToArray());
         Assert.Equal(r1.Message, r2.Message);
+        // /recommendations 全程不调 LLM（无缓存命中/未命中之分）
+        Assert.Equal(0, callCount);
     }
 
+    /// <summary>
+    /// R8 随聊天变化 — /recommendations 推荐随最新聊天产物实时变化（/chat 每次重写快照缓存，不调 LLM）：
+    /// /chat「推荐咖啡机」→ 快照=咖啡机 → reco1 BestMatch 意式浓缩咖啡机（Id 5）；
+    /// 再 /chat「你好」（mock Agent 语义回退 Keywords=["运动"]）→ /chat 重写快照=运动推荐 →
+    /// reco2 BestMatch 专业跑鞋（Id 3）。两次 /recommendations 均命中各自快照缓存、
+    /// 结果随聊天变化（5 → 3）；LLM 调用数仅来自 /chat（callCount==2），/recommendations 不触发。
+    /// </summary>
     [Fact]
-    public async Task Recommendations_NewMessage_InvalidatesCache()
+    public async Task ShouldFollowLatestMessage_WhenMessageChanges()
     {
         var callCount = 0;
         WebApplicationFactory<Program>? f = null;
@@ -304,7 +339,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -312,7 +347,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -321,14 +356,35 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
             });
         });
         using var client = f.CreateClient();
-        await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐运动鞋"));
-        await client.PostAsJsonAsync("/api/recommendations",
+
+        // 消息 1：「推荐咖啡机」→ /chat 字面命中「咖啡」→ 快照 BestMatch=意式浓缩咖啡机 Id 5
+        var chat1 = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐咖啡机"));
+        chat1.EnsureSuccessStatusCode();
+        var reco1Resp = await client.PostAsJsonAsync("/api/recommendations",
             new RecommendationRequest("marla", "keymatch"));
-        var firstCalls = callCount;
-        await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "推荐耳机"));
-        await client.PostAsJsonAsync("/api/recommendations",
+        reco1Resp.EnsureSuccessStatusCode();
+        var reco1 = await reco1Resp.Content.ReadFromJsonAsync<RecommendationResponse>();
+        Assert.NotNull(reco1);
+        Assert.NotNull(reco1!.BestMatch);
+        Assert.Equal(5, reco1.BestMatch!.Id); // 意式浓缩咖啡机（消息「咖啡」命中）
+        Assert.Equal("根据您的兴趣，为您推荐：", reco1.Message);
+
+        // 消息 2：「你好」→ /chat 字面无命中、Agent 语义回退 Keywords=["运动"] → /chat 重写快照为运动推荐
+        var chat2 = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "你好"));
+        chat2.EnsureSuccessStatusCode();
+        var reco2Resp = await client.PostAsJsonAsync("/api/recommendations",
             new RecommendationRequest("marla", "keymatch"));
-        Assert.True(callCount > firstCalls, "新消息应使缓存失效，导致 Agent 重新被调用");
+        reco2Resp.EnsureSuccessStatusCode();
+        var reco2 = await reco2Resp.Content.ReadFromJsonAsync<RecommendationResponse>();
+        Assert.NotNull(reco2);
+        Assert.NotNull(reco2!.BestMatch);
+        Assert.Equal(3, reco2.BestMatch!.Id); // 专业跑鞋（「运动」命中，运动推荐首项）
+        Assert.Equal("根据您的兴趣，为您推荐：", reco2.Message);
+
+        // 推荐随最新聊天变化（R8 核心语义）：/chat 每次重写快照，推荐栏镜像最新聊天产物（5 → 3）
+        Assert.NotEqual(reco1.BestMatch!.Id, reco2.BestMatch!.Id);
+        // /recommendations 不调 LLM：callCount 仍为 2（仅两次 /chat 贡献）
+        Assert.Equal(2, callCount);
     }
 
     // ============ Multi-Model Tests ============
@@ -381,6 +437,65 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         Assert.Equal(400, (int)response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("不支持的模型", body.GetProperty("detail").GetString());
+    }
+
+    /// <summary>
+    /// R11 — /api/chat Agent 抛异常：catch 块把被吞异常写进 OTel span——
+    /// 请求 Activity（AddAspNetCoreInstrumentation 创建）置 Error 状态、产生 "exception" 事件，
+    /// 响应仍为兜底「抱歉，暂时无法处理您的请求，请重试。」。
+    /// </summary>
+    [Fact]
+    public async Task Chat_WhenAgentThrows_SetsActivityErrorAndReturnsFallback()
+    {
+        var captured = new List<Activity>();
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = _ => true,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStopped = captured.Add,
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        WebApplicationFactory<Program>? f = null;
+        f = _factory.WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                ReplaceWithIsolatedDb(services, Guid.NewGuid().ToString("N"));
+                services.RemoveAll<ModelRouter>();
+
+                var mockAgent = Substitute.For<IShoppingAssistantAgent>();
+                mockAgent.RunChatAsync(
+                        Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                    .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
+                        _ => throw new InvalidOperationException("agent boom"));
+
+                var mockRouter = Substitute.For<ModelRouter>();
+                mockRouter.ActiveModel.Returns("qwen");
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(mockAgent);
+                mockRouter.GetDefaultAgent().Returns(mockAgent);
+                services.AddSingleton(mockRouter);
+            }));
+
+        using var client = f.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "你好"));
+        response.EnsureSuccessStatusCode();
+        var reply = await response.Content.ReadFromJsonAsync<ChatReply>();
+        Assert.NotNull(reply);
+        Assert.Contains("抱歉，暂时无法处理您的请求", reply!.Response);
+
+        // 请求 span 被 catch 置 Error + exception 事件（被吞异常进 OTel）。
+        // 宿主 Activity 在响应返回后毫秒级 Stop，轮询等待避免时序竞态。
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        Activity? errorSpan = null;
+        while (errorSpan is null && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(50);
+            errorSpan = captured.FirstOrDefault(a => a.Status == ActivityStatusCode.Error);
+        }
+        Assert.NotNull(errorSpan);
+        Assert.Contains("agent boom", errorSpan!.StatusDescription);
+        Assert.Contains(errorSpan.Events, e => e.Name == "exception");
     }
 
     [Fact]
@@ -439,7 +554,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     return new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>());
@@ -448,7 +563,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -500,7 +615,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     return new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>());
@@ -509,7 +624,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -572,7 +687,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("qwen"),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -580,7 +695,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("gpt-4.1"),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
@@ -588,7 +703,7 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("qwen"),
                         capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        capturedFactory.Services.GetRequiredService<IProductCatalogService>(),
+                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));

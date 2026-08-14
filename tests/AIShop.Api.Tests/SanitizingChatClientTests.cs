@@ -2,7 +2,7 @@ using System.Reflection;
 using AIShop.AgentTelemetry;
 using AIShop.Api.Agents;
 using AIShop.Api.Features.Chat;
-using AIShop.Core.Interfaces;
+using AIShop.Core.StaticData;
 using AIShop.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
@@ -86,10 +86,8 @@ public sealed class SanitizingChatClientTests
         var scopeFactory = Substitute.For<IServiceScopeFactory>();
         var cartTools = new CartToolProvider(scopeFactory);
         var dbFactory = Substitute.For<IDbContextFactory<AppDbContext>>();
-        var catalog = Substitute.For<IProductCatalogService>();
-        catalog.KeywordMap.Returns(new Dictionary<string, string[]>());
 
-        var agent = new ShoppingAssistantAgent(inner, dbFactory, catalog, cartTools, true,
+        var agent = new ShoppingAssistantAgent(inner, dbFactory, ProductKeywordMap.Entries, cartTools, true,
             new AgentTelemetryOptions { Level = AgentTelemetryLevel.Metadata });
 
         Assert.NotNull(agent);

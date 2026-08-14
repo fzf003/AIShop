@@ -4,8 +4,6 @@ namespace AIShop.Core.Interfaces;
 
 public interface IChatMessageRepository
 {
-    void Add(ChatMessage message);
-
     Task<IReadOnlyList<ChatMessage>> GetSessionHistoryAsync(
         Guid sessionId, int? take = null, CancellationToken ct = default);
 

@@ -8,6 +8,8 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.9" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.9" />
+    <!-- P2-3: PreferenceQueue 在 DropOldest 满容量挤旧时用 Serilog 静态 Log.Warning 记录观测日志 -->
+    <PackageReference Include="Serilog" Version="4.3.0" />
   </ItemGroup>
 
   <!-- 覆盖传递依赖以修复 NU1903 安全漏洞 -->

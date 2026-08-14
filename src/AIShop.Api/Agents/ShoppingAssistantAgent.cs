@@ -1,7 +1,6 @@
 #pragma warning disable MAAI001
 using AIShop.AgentTelemetry;
 using AIShop.Api.Features.Chat;
-using AIShop.Core.Interfaces;
 using AIShop.Infrastructure.Data;
 using Microsoft.Agents.AI;
 using Microsoft.EntityFrameworkCore;
@@ -24,7 +23,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         model.StartsWith("o1-", StringComparison.OrdinalIgnoreCase) ||
         model.StartsWith("o3-", StringComparison.OrdinalIgnoreCase);
 
-    private static string BuildInstructions(IProductCatalogService catalog)
+    private static string BuildInstructions(IReadOnlyDictionary<string, string[]> keywordMap)
     {
         // 所有模型统一用 Text + Instructions 内嵌 JSON 示例
         // 测试报告证明这是唯一 4 模型（OpenAI/DeepSeek/Qwen/MiMo）100% 兼容的路径
@@ -70,6 +69,9 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         lines.Add("2. 当不需要调用工具时，");
         lines.Add("   你必须且只能以标准的 JSON 格式回复，");
         lines.Add("   不要包含任何 Markdown 标记或额外的解释文本。");
+        // R9：固定商品 ID 的唯一合法展示格式，配合服务端 SanitizeReply 精确删除，杜绝 ID 泄漏。
+        lines.Add("3. 回复文本中不要出现商品编号。若确需提及，必须且只能使用格式『商品Id:N』（如 商品Id:4）；");
+        lines.Add("   任何其他形式（商品ID为4、#4、编号4、ID：4 等）均属违例。");
         lines.Add("");
         lines.Add("【JSON 输出格式要求】");
         lines.Add($"回复必须使用以下 JSON 格式（工具调用时除外）：");
@@ -79,7 +81,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         lines.Add("【商品关键词表（用于推荐栏）】");
         lines.Add("关键词 | 覆盖标签");
 
-        foreach (var (key, tags) in catalog.KeywordMap)
+        foreach (var (key, tags) in keywordMap)
         {
             lines.Add($"{key} | {string.Join("、", tags)}");
         }
@@ -88,11 +90,11 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     }
 
     public ShoppingAssistantAgent(IChatClient chatClient, IDbContextFactory<AppDbContext> dbFactory,
-        IProductCatalogService catalog, CartToolProvider cartTools, bool isOpenAI,
+        IReadOnlyDictionary<string, string[]> keywordMap, CartToolProvider cartTools, bool isOpenAI,
         AgentTelemetryOptions telemetryOptions)
     {
         _isOpenAI = isOpenAI;
-        var instructions = BuildInstructions(catalog);
+        var instructions = BuildInstructions(keywordMap);
 
 
         var tools = new List<AITool>();
@@ -176,13 +178,19 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     /// - 非 OpenAI（千问/DeepSeek/MiMo）：纯 Text 路径
     /// </summary>
     public async Task<(AgentChatResult Result, AgentSession Session)> RunChatAsync(
-        Guid sessionId, string userMessage, string username, CancellationToken ct = default)
+        Guid sessionId, string userMessage, string username,
+        string? preferences = null, CancellationToken ct = default)
     {
         CartToolProvider.SetCurrentUser(username);
 
         var sw = Stopwatch.StartNew();
         var session = await _agent.CreateSessionAsync(ct);
         session.StateBag.SetValue("SessionId", sessionId.ToString());
+
+        // 会话重建回填：从数据库加载的历史偏好经端点传入，写入 StateBag，
+        // PreferenceMemoryProvider 在本次运行即可读取并注入 LLM 上下文。
+        if (!string.IsNullOrWhiteSpace(preferences))
+            session.StateBag.SetValue("Preferences", preferences);
 
         AgentChatResult? result = null;
         string? rawText = null;
