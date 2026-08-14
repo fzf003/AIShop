@@ -107,12 +107,29 @@ public static class ChatEndpoints
             }
             catch (KeyNotFoundException knf)
             {
+                // R11：被吞异常进 OTel span——catch 吞掉只 SetStatus(Error) 不产生 exception 事件；
+                // RecordException 扩展在当前 DiagnosticSource 版本不可用，手动 AddEvent("exception") 等价。
+                Activity.Current?.SetStatus(ActivityStatusCode.Error, knf.Message);
+                Activity.Current?.AddEvent(new ActivityEvent("exception",
+                    tags: new ActivityTagsCollection
+                    {
+                        { "exception.type", knf.GetType().FullName },
+                        { "exception.message", knf.Message },
+                    }));
                 logger.Error(knf, "[Diagnose] KeyNotFoundException in /chat: modelId={ModelId}", req.Model ?? router.ActiveModel);
                 return Results.BadRequest(new { detail = "不支持的模型" });
             }
             catch (Exception ex)
             {
                 agentSw.Stop();
+                // R11：被吞异常进 OTel span——catch 吞掉后兜底返回（不抛异常），错误详情默认不可见
+                Activity.Current?.SetStatus(ActivityStatusCode.Error, ex.Message);
+                Activity.Current?.AddEvent(new ActivityEvent("exception",
+                    tags: new ActivityTagsCollection
+                    {
+                        { "exception.type", ex.GetType().FullName },
+                        { "exception.message", ex.Message },
+                    }));
                 logger.Error(ex, "[Diagnose] /chat Agent调用失败 AgentCall={ElapsedMs}ms SessionId={SessionId}",
                     agentSw.ElapsedMilliseconds, sid);
                 result = new AgentChatResult("抱歉，暂时无法处理您的请求，请重试。", [], null);

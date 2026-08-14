@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Diagnostics;
 using AIShop.AgentTelemetry;
 using AIShop.Api.Agents;
 using AIShop.Api.Features.Chat;
@@ -436,6 +437,65 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         Assert.Equal(400, (int)response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("不支持的模型", body.GetProperty("detail").GetString());
+    }
+
+    /// <summary>
+    /// R11 — /api/chat Agent 抛异常：catch 块把被吞异常写进 OTel span——
+    /// 请求 Activity（AddAspNetCoreInstrumentation 创建）置 Error 状态、产生 "exception" 事件，
+    /// 响应仍为兜底「抱歉，暂时无法处理您的请求，请重试。」。
+    /// </summary>
+    [Fact]
+    public async Task Chat_WhenAgentThrows_SetsActivityErrorAndReturnsFallback()
+    {
+        var captured = new List<Activity>();
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = _ => true,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStopped = captured.Add,
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        WebApplicationFactory<Program>? f = null;
+        f = _factory.WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                ReplaceWithIsolatedDb(services, Guid.NewGuid().ToString("N"));
+                services.RemoveAll<ModelRouter>();
+
+                var mockAgent = Substitute.For<IShoppingAssistantAgent>();
+                mockAgent.RunChatAsync(
+                        Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                    .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
+                        _ => throw new InvalidOperationException("agent boom"));
+
+                var mockRouter = Substitute.For<ModelRouter>();
+                mockRouter.ActiveModel.Returns("qwen");
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(mockAgent);
+                mockRouter.GetDefaultAgent().Returns(mockAgent);
+                services.AddSingleton(mockRouter);
+            }));
+
+        using var client = f.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "你好"));
+        response.EnsureSuccessStatusCode();
+        var reply = await response.Content.ReadFromJsonAsync<ChatReply>();
+        Assert.NotNull(reply);
+        Assert.Contains("抱歉，暂时无法处理您的请求", reply!.Response);
+
+        // 请求 span 被 catch 置 Error + exception 事件（被吞异常进 OTel）。
+        // 宿主 Activity 在响应返回后毫秒级 Stop，轮询等待避免时序竞态。
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        Activity? errorSpan = null;
+        while (errorSpan is null && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(50);
+            errorSpan = captured.FirstOrDefault(a => a.Status == ActivityStatusCode.Error);
+        }
+        Assert.NotNull(errorSpan);
+        Assert.Contains("agent boom", errorSpan!.StatusDescription);
+        Assert.Contains(errorSpan.Events, e => e.Name == "exception");
     }
 
     [Fact]

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Runtime.CompilerServices;
+using System.Diagnostics;
 using Microsoft.Extensions.AI;
 
 namespace AIShop.Api.Agents;
@@ -184,6 +185,16 @@ public sealed class DeepSeekChatClient : IChatClient
         if (!response.IsSuccessStatusCode)
         {
             Log.Error("[DeepSeekDirect] API 错误: {StatusCode} {Body}", response.StatusCode, responseBody);
+            // R11：被吞的 API 错误进 OTel span——MEAI 埋点对抛异常只 SetStatus(Error) 不产生 exception 事件，
+            // 且此处是捕获后兜底返回（不抛异常），错误详情默认不可见；手动 SetStatus + AddEvent("exception")。
+            Activity.Current?.SetStatus(ActivityStatusCode.Error,
+                $"DeepSeek API {(int)response.StatusCode}: {Truncate(responseBody, 200)}");
+            Activity.Current?.AddEvent(new ActivityEvent("exception",
+                tags: new ActivityTagsCollection
+                {
+                    { "exception.type", "HttpRequestException" },
+                    { "exception.message", Truncate(responseBody, 200) },
+                }));
             return new ChatResponse(new ChatMessage(ChatRole.Assistant, "抱歉，暂时无法处理您的请求，请重试。"));
         }
 
@@ -275,4 +286,9 @@ public sealed class DeepSeekChatClient : IChatClient
     // 返回的 metadata.ProviderName 读取。暴露 R10 已实现的 Metadata，供 DelegatingChatClient 链转发到遥测。
     public object? GetService(Type serviceType, object? serviceKey = null)
         => serviceType == typeof(ChatClientMetadata) ? Metadata : null;
+
+    /// <summary>
+    /// 截断超长响应体（R11）：避免超大错误详情撑爆 OTel tag/span 属性。
+    /// </summary>
+    private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "...";
 }

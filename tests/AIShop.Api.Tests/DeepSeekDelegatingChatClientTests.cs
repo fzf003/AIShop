@@ -1,4 +1,6 @@
 using System.Reflection;
+using System.Diagnostics;
+using System.Net;
 using AIShop.Api.Agents;
 using Microsoft.Extensions.AI;
 using NSubstitute;
@@ -153,5 +155,53 @@ public sealed class DeepSeekDelegatingChatClientTests
         Assert.NotNull(metadata);
         Assert.Equal("DeepSeek", metadata!.ProviderName);
         Assert.Equal("deepseek-v4-flash", metadata.DefaultModelId);
+    }
+
+    /// <summary>
+    /// R11 — DeepSeekDelegatingChatClient 非 2xx（HTTP 400）：被吞的 API 错误进 OTel span——
+    /// DeepSeekDirectCallAsync 置 Activity Error + "exception" 事件，兜底回复保留。
+    /// </summary>
+    [Fact]
+    public async Task DeepSeekDirectCall_OnHttp400_SetsActivityErrorAndExceptionEvent()
+    {
+        // DeepSeek 直发路径用 PostAsync("") 依赖 BaseAddress；测试须显式设置（否则空 URI 抛异常）
+        using var httpClient = new HttpClient(new StubHttpMessageHandler(HttpStatusCode.BadRequest, "bad request detail"))
+        {
+            BaseAddress = new Uri("https://api.deepseek.example"),
+        };
+        using var sut = new DeepSeekDelegatingChatClient(Substitute.For<IChatClient>(), httpClient, "deepseek-v4-flash");
+
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = _ => true,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+        };
+        ActivitySource.AddActivityListener(listener);
+        try
+        {
+            using var source = new ActivitySource("R11.DeepSeekDelegatingTests");
+            using var activity = source.StartActivity("deepseek.request", ActivityKind.Client);
+
+            var response = await sut.GetResponseAsync([new ChatMessage(ChatRole.User, "hi")]);
+
+            Assert.Equal("抱歉，暂时无法处理您的请求，请重试。", response.Messages[0].Text);
+            Assert.Equal(ActivityStatusCode.Error, activity!.Status);
+            Assert.Contains("DeepSeek API 400", activity.StatusDescription);
+            var excEvent = Assert.Single(activity.Events, e => e.Name == "exception");
+            Assert.Equal("HttpRequestException", (string)excEvent.Tags.First(t => t.Key == "exception.type").Value!);
+        }
+        finally
+        {
+            listener.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// 固定响应 handler：返回指定状态码 + body，供 DeepSeek 直发路径非 2xx 分支测试。
+    /// </summary>
+    private sealed class StubHttpMessageHandler(HttpStatusCode statusCode, string body) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(new HttpResponseMessage(statusCode) { Content = new StringContent(body) });
     }
 }
