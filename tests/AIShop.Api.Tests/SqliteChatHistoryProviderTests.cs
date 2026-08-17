@@ -483,6 +483,54 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task Store_IncompleteOldRound_KeptWholeNotCompacted()
+    {
+        // 无 is_final 的旧轮（FICC 迭代耗尽 / 异常中断 / 仅调工具未输出最终回复，组内无 is_final=true 行）
+        // → 触发压缩时整组保留不被压缩，即使它是最旧的消息（对应 spec「未完成轮整组保留」）
+        SeedIncompleteToolRound(); // 1 个未完成轮（3 行：user → assistant(FCC) → tool，无 is_final，最旧的 3 行）
+        SeedRounds(14);            // 14 个完整轮（各 2 行，末条 is_final=true）
+
+        // Store 再落 1 个新完整轮（user + assistant 纯文本轮）→ 完整轮共 15 个 > K=12，
+        // 从最旧完整轮整轮压缩直到剩余 ≤ K=12 → 压缩最旧 3 个完整轮（6 行）；
+        // 未完成轮不在「可压缩完整轮」集合内，整组保留不被压缩
+        await InvokeStoreAsync();
+
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var rows = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId)
+            .OrderBy(m => m.Id)
+            .ToListAsync();
+
+        // 总行数 = 3（未完成轮）+ 14×2（完整轮）+ 2（新轮）= 33；压缩只标 is_compacted=true 不物理删除
+        Assert.Equal(33, rows.Count);
+
+        // 未完成轮（最旧的 3 行 id 1-3）整组保留：均未被压缩，即使它是最旧的消息
+        var incomplete = rows.Take(3).ToList();
+        Assert.All(incomplete, r => Assert.False(r.IsCompacted));
+
+        // 未完成轮组内 3 行共享同一 run_id 且与所有完整轮 run_id 不同（独立轮组）
+        var incompleteRunId = incomplete[0].RunId;
+        Assert.NotNull(incompleteRunId);
+        Assert.Equal(3, rows.Count(r => r.RunId == incompleteRunId));
+        Assert.DoesNotContain(rows.Skip(3), r => r.RunId == incompleteRunId);
+
+        // 被压缩的是最旧 3 个完整轮（6 行，id 4-9）：未完成轮（id 1-3）先于它们落库却保留，
+        // 完整轮反而被压——证明保留的唯一原因是「未完成轮整组保留」而非新旧
+        var compacted = rows.Where(r => r.IsCompacted).ToList();
+        Assert.Equal(6, compacted.Count);
+        Assert.Equal(
+            rows.Skip(3).Take(6).Select(r => r.Id).OrderBy(x => x),
+            compacted.Select(r => r.Id).OrderBy(x => x));
+
+        // 保留区以轮为边界：未压缩 27 行 = 13 个轮组（1 未完成轮 + 11 完整轮 + 1 新轮），且未完成轮组内 FCC↔tool 配对完整
+        var uncompacted = rows.Where(r => !r.IsCompacted).ToList();
+        Assert.Equal(13, uncompacted.GroupBy(r => r.RunId).Count());
+        Assert.Equal(27, uncompacted.Count);
+        Assert.Contains(uncompacted, r => r.Role == "assistant" && !string.IsNullOrEmpty(r.ToolCalls));
+        Assert.Contains(uncompacted, r => r.Role == "tool");
+    }
+
+    [Fact]
     public async Task Store_MultiFrcToolPair_CompressedTogetherWithAssistantFcc()
     {
         // seed 49 条：id1 = assistant(FCC)（ToolCalls 非空）、id2 = 多 FRC tool 行（ToolCalls 为 JSON 数组）、id3-49 = 普通 user/assistant
@@ -977,6 +1025,47 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
                 IsFinal = true,
             });
         }
+        ctx.SaveChanges();
+    }
+
+    /// <summary>
+    /// seed 一个未完成工具调用轮（3 行：user → assistant(FCC) → tool），共享同一 run_id，
+    /// 组内无 is_final=true 行（模拟 FICC 迭代耗尽 / 异常中断 / 仅调工具未输出最终回复的未完成轮）。
+    /// </summary>
+    private void SeedIncompleteToolRound()
+    {
+        using var ctx = _dbFactory.CreateDbContext();
+        var runId = Guid.NewGuid();
+        var callId = "call_inc";
+
+        var fccJson = JsonSerializer.Serialize(new[]
+        {
+            new { id = callId, type = "function", function = new { name = "search_product", arguments = "{}" } }
+        }, JsonOptions);
+
+        ctx.ChatMessageRecords.Add(new ChatMessageRecord
+        {
+            SessionId = _sessionId,
+            RunId = runId,
+            Role = "user",
+            Content = "未完成轮问题",
+        });
+        ctx.ChatMessageRecords.Add(new ChatMessageRecord
+        {
+            SessionId = _sessionId,
+            RunId = runId,
+            Role = "assistant",
+            Content = "正在查询",
+            ToolCalls = fccJson,
+        });
+        ctx.ChatMessageRecords.Add(new ChatMessageRecord
+        {
+            SessionId = _sessionId,
+            RunId = runId,
+            Role = "tool",
+            Content = "查询结果",
+            ToolCallId = callId,
+        });
         ctx.SaveChanges();
     }
 
