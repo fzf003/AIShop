@@ -605,6 +605,53 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task Store_ExceedsHardLimit4K_CompressesOldestWholeRound()
+    {
+        // 条数硬上限 4K 兜底（spec「条数硬上限 4K 兜底」/ T7 安全阀 2，随 K 缩放）：
+        // 单轮极大（4100 行同一 run_id 的完整轮）+ Store 落 1 个新完整轮（2 行）= 未压缩 4102 行 > 4096，
+        // 但完整轮仅 2 个 ≤ K=12、无未完成轮 —— 阶段 1/2（按轮数裁剪 / 未完成轮上限）均不触发，
+        // 由阶段 3 硬上限强制压最旧整轮（4100 行的大轮）直到 ≤ 4K，防止单轮极大导致存储膨胀
+        SeedHugeCompleteRound(4100);
+
+        await InvokeStoreAsync();
+
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var rows = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId)
+            .OrderBy(m => m.Id)
+            .ToListAsync();
+
+        // 压缩只标记 is_compacted=true 不物理删除：总行数 = 4100 + 2 = 4102
+        Assert.Equal(4102, rows.Count);
+
+        // 硬上限生效：未压缩条数被压到硬上限内（实际仅剩新轮 2 行）
+        var uncompacted = rows.Where(r => !r.IsCompacted).ToList();
+        Assert.Equal(2, uncompacted.Count);
+        Assert.True(uncompacted.Count <= 4096);
+
+        // 以轮为边界整轮整切：同一 run_id 组内所有行压缩状态一致（无半轮被拆散）
+        Assert.All(rows.GroupBy(r => r.RunId), g =>
+            Assert.True(
+                g.All(r => r.IsCompacted) || !g.Any(r => r.IsCompacted),
+                $"run_id {g.Key} 同一轮被拆散：部分行压缩、部分行保留"));
+
+        // 被强制压缩的是最旧整轮（4100 行的大轮，id 1-4100）：压缩行恰好是 id 最小的 4100 行
+        var compacted = rows.Where(r => r.IsCompacted).ToList();
+        Assert.Equal(4100, compacted.Count);
+        Assert.Equal(
+            rows.Take(4100).Select(r => r.Id).OrderBy(x => x),
+            compacted.Select(r => r.Id).OrderBy(x => x));
+
+        // 保留区仅剩新轮（Store 落库的 user + assistant 2 行），run_id 与极大轮不同
+        Assert.Single(uncompacted.Select(r => r.RunId).Distinct());
+        Assert.Equal("user", uncompacted[0].Role);
+        Assert.Equal("Hello", uncompacted[0].Content);
+        Assert.Equal("assistant", uncompacted[1].Role);
+        Assert.Equal("Hi", uncompacted[1].Content);
+        Assert.NotEqual(compacted[0].RunId, uncompacted[0].RunId);
+    }
+
+    [Fact]
     public async Task StoreAndProvide_LegacyNullRunIdRows_CompressAndLoadCompatible()
     {
         // 存量 run_id=NULL / is_final=0 历史行（spec「存量 NULL 行压缩与加载兼容」）：压缩时每行自成一组走旧行为，
@@ -1107,6 +1154,28 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
             Content = "查询结果",
             ToolCallId = callId,
         });
+        ctx.SaveChanges();
+    }
+
+    /// <summary>
+    /// seed 单个极大完整轮：rowCount 行共享同一 run_id，末条 IsFinal=true（对应「单轮极大」场景，
+    /// 用于验证条数硬上限 4K 兜底）。
+    /// </summary>
+    private void SeedHugeCompleteRound(int rowCount)
+    {
+        using var ctx = _dbFactory.CreateDbContext();
+        var runId = Guid.NewGuid();
+        for (var i = 0; i < rowCount; i++)
+        {
+            ctx.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = i % 2 == 0 ? "user" : "assistant",
+                Content = $"第{i}条",
+                IsFinal = i == rowCount - 1,
+            });
+        }
         ctx.SaveChanges();
     }
 
