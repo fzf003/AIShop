@@ -34,8 +34,8 @@ public sealed class SqliteChatHistoryProvider(
         return base.InvokedCoreAsync(context, cancellationToken);
     }
 
-    /// <summary>每次 Store 后保留的最大消息数。</summary>
-    private const int MaxStoredMessages = 50;
+    /// <summary>压缩保留的最大完整轮数（K=12，偏保守，容量约等于旧 50 条硬切）。</summary>
+    private const int MaxCompletedRounds = 12;
 
     private static readonly Serilog.ILogger Logger = Log.ForContext<SqliteChatHistoryProvider>();
 
@@ -334,69 +334,57 @@ public sealed class SqliteChatHistoryProvider(
         // 先提交新消息，确保它们有 Id 且对后续查询可见
         await db.SaveChangesAsync(cancellationToken);
 
-        // 步骤 2：裁剪旧消息，控制存储大小
-        // 只保留该 session 最新的 MaxStoredMessages 条，超出部分标记为已压缩。
-        // 非物理删除，保留原始数据——历史可追溯、可查询。
-        var unCompressedCount = await db.ChatMessageRecords
+        // 步骤 2：裁剪旧消息，控制存储大小 —— 按 run_id 整轮整切（不拆轮）。
+        // 设计（design.md §6 / spec #8「压缩按 run_id 整轮整切不拆轮」）：
+        //   1. 未压缩消息按 run_id 分组（run_id=NULL 的历史行每行自成一组，走旧行为，视为可压缩完整轮）
+        //   2. 从最旧完整轮开始，整轮整轮标记 is_compacted=true，直到剩余完整轮数 ≤ K=12
+        //   3. 未完成轮（组内无 is_final=true 行）整组保留，即使它很旧（T7 再补「未完成轮上限 5」兜底）
+        // 配对保护天然成立：整轮一起压，FCC↔tool 结构性不分离，因此删除原 compressIds 的 ±1 相邻推断逻辑
+        var rows = await db.ChatMessageRecords
             .Where(m => m.SessionId == sessionId && !m.IsCompacted)
-            .CountAsync(cancellationToken);
+            .Select(m => new { m.Id, m.RunId, m.IsFinal })
+            .ToListAsync(cancellationToken);
 
-        var toCompressCount = unCompressedCount - MaxStoredMessages;
-        if (toCompressCount <= 0)
+        // 按 run_id 分组识别轮次；run_id=NULL 的历史行每行自成一组（用唯一 Id 作分组键，走旧行为）
+        var rounds = rows
+            .GroupBy(r => new { RunId = r.RunId, NullRowKey = r.RunId is null ? r.Id : (long?)null })
+            .Select(g => new
+            {
+                RunId = g.Key.RunId,
+                // 完整轮判定：组内有 is_final=true 行；NULL 历史行（RunId 为空）走旧行为，视为可压缩
+                IsComplete = g.Key.RunId is null || g.Any(r => r.IsFinal),
+                MaxId = g.Max(r => r.Id),
+                Ids = g.Select(r => r.Id).ToList(),
+            })
+            .ToList();
+
+        // 未完成轮整组保留、不参与压缩；只对完整轮按新旧排序（组内最大 id，最旧在前）
+        var completeRounds = rounds
+            .Where(r => r.IsComplete)
+            .OrderBy(r => r.MaxId)
+            .ToList();
+
+        var compressRoundCount = completeRounds.Count - MaxCompletedRounds;
+        if (compressRoundCount <= 0)
         {
-            Logger.Debug("裁剪旧消息 Session={SessionId} 无需裁剪 Count={Count}",
-                sessionId, unCompressedCount);
+            Logger.Debug("裁剪旧消息 Session={SessionId} 无需裁剪 Rounds={RoundCount}",
+                sessionId, completeRounds.Count);
             return;
         }
 
-        // 找出要压缩的 Id：保留最新的 MaxStoredMessages 条，其余压缩。
-        // 降序排列，跳过前 MaxStoredMessages 条（最新的），取剩下的压缩。
-        var compressIds = await db.ChatMessageRecords
-            .Where(m => m.SessionId == sessionId && !m.IsCompacted)
-            .OrderByDescending(m => m.Id)
-            .Select(m => m.Id)
-            .Skip(MaxStoredMessages)
-            .Take(toCompressCount)
-            .ToHashSetAsync(cancellationToken);
+        // 从最旧完整轮开始整轮压缩，直到剩余完整轮数 ≤ K
+        var compressIds = completeRounds
+            .Take(compressRoundCount)
+            .SelectMany(r => r.Ids)
+            .ToHashSet();
 
-        // 关键：确保不切断 assistant(FCC) → tool 的配对。
-        // compressIds 是降序排序后跳过50条的结果，即要压缩的最旧N条。
-        // 取压缩集中最小的 id（即保留区之后的第一条被压缩消息）。
-        var firstCompressId = compressIds.OrderBy(id => id).FirstOrDefault();
-        if (firstCompressId > 0)
-        {
-            var firstCompress = await db.ChatMessageRecords.FindAsync(firstCompressId, cancellationToken);
-            if (firstCompress is not null)
-            {
-                // 检查前一条是否是对应此 tool 的 assistant(FCC)
-                if (firstCompress.Role == "tool")
-                {
-                    var prevMsg = await db.ChatMessageRecords
-                        .Where(m => m.SessionId == sessionId && m.Id == firstCompressId - 1 && !m.IsCompacted
-                            && m.Role == "assistant" && m.ToolCalls != null && m.ToolCalls != "")
-                        .FirstOrDefaultAsync(cancellationToken);
-                    if (prevMsg is not null)
-                        compressIds.Remove(prevMsg.Id);
-                }
-                // 检查第一条被压缩的是 assistant(FCC)，则也要压缩紧跟的 tool
-                else if (firstCompress.Role == "assistant" && !string.IsNullOrEmpty(firstCompress.ToolCalls))
-                {
-                    var nextMsg = await db.ChatMessageRecords
-                        .Where(m => m.SessionId == sessionId && m.Id == firstCompressId + 1 && m.Role == "tool")
-                        .FirstOrDefaultAsync(cancellationToken);
-                    if (nextMsg is not null)
-                        compressIds.Add(nextMsg.Id);
-                }
-            }
-        }
-
-        // 执行压缩
+        // 执行压缩：整轮标记 is_compacted=true（非物理删除，保留原始数据——历史可追溯、可查询）
         await db.ChatMessageRecords
             .Where(m => compressIds.Contains(m.Id))
             .ExecuteUpdateAsync(s => s.SetProperty(m => m.IsCompacted, true), cancellationToken);
 
-        Logger.Information("裁剪旧消息 Session={SessionId} Count={DeleteCount}",
-            sessionId, compressIds.Count);
+        Logger.Information("裁剪旧消息 Session={SessionId} CompressRounds={RoundCount} DeleteCount={DeleteCount}",
+            sessionId, compressRoundCount, compressIds.Count);
 
 
         sw.Stop();

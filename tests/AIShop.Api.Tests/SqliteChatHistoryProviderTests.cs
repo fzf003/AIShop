@@ -365,50 +365,63 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     [Fact]
     public async Task Store_AppendsThenTrimsToStoredLimit()
     {
+        // 15 条 NULL run_id 历史行（每行自成一组）+ 1 个完整轮（2 行）= 16 完整轮，超过 K=12 → 压缩最旧 4 组（4 行）
         SeedMessages(15);
 
         await InvokeStoreAsync();
 
         using (var ctx = await _dbFactory.CreateDbContextAsync())
         {
+            // 压缩只标记 is_compacted=true 不物理删除，总行数不变：15 + 2 = 17
             var count = await ctx.ChatMessageRecords
                 .Where(m => m.SessionId == _sessionId)
                 .CountAsync();
             Assert.Equal(17, count);
+
+            // 剩余未压缩 13 行 = 11 条 NULL 历史行 + 1 个完整轮（2 行），共 12 轮
+            var uncompacted = await ctx.ChatMessageRecords
+                .Where(m => m.SessionId == _sessionId && !m.IsCompacted)
+                .CountAsync();
+            Assert.Equal(13, uncompacted);
         }
     }
 
     [Fact]
     public async Task Store_TrimsWhenExceedsLimit()
     {
+        // 55 条 NULL run_id 历史行（每行自成一组）+ 1 个完整轮 = 56 完整轮，压缩最旧 44 组直到剩余完整轮数 ≤ K=12
         SeedMessages(55);
 
         await InvokeStoreAsync();
 
         using (var ctx = await _dbFactory.CreateDbContextAsync())
         {
-            // 55 种子 + 2 新增 = 57，标记压缩后 is_compacted=0 应为 50
+            // 55 种子 + 2 新增 = 57 行；压缩 44 行后未压缩应为 13 行（11 条 NULL 行 + 1 个完整轮 2 行 = 12 轮）
             var uncompacted = await ctx.ChatMessageRecords
                 .Where(m => m.SessionId == _sessionId && !m.IsCompacted)
                 .CountAsync();
-            Assert.Equal(50, uncompacted);
+            Assert.Equal(13, uncompacted);
         }
     }
 
     [Fact]
-    public async Task Store_TrimsToExactly50()
+    public async Task Store_TrimsToAtMostKCompleteRounds()
     {
-        SeedMessages(60);
+        // 30 个完整轮（各 2 行，末条 is_final）+ 1 个新完整轮 = 31 完整轮 → 压缩最旧 19 轮直到剩余完整轮数 ≤ K=12
+        SeedRounds(30);
 
         await InvokeStoreAsync();
 
         using (var ctx = await _dbFactory.CreateDbContextAsync())
         {
-            // 60 种子 + 2 新增 = 62，标记压缩后 is_compacted=0 应为 50
-            var uncompacted = await ctx.ChatMessageRecords
+            var rows = await ctx.ChatMessageRecords
                 .Where(m => m.SessionId == _sessionId && !m.IsCompacted)
-                .CountAsync();
-            Assert.Equal(50, uncompacted);
+                .OrderBy(m => m.Id)
+                .ToListAsync();
+
+            // 剩余 12 个完整轮 × 2 行 = 24 行未压缩；压缩区与保留区均以轮为边界
+            Assert.Equal(24, rows.Count);
+            Assert.Equal(12, rows.GroupBy(r => r.RunId).Count());
         }
     }
 
@@ -459,7 +472,8 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
             await seed.SaveChangesAsync();
         }
 
-        // Store 默认再增 user + assistant → 51 条，toCompressCount = 51 - 50 = 1（只触发 1 条压缩，命中配对保护）
+        // Store 默认再增 1 个完整轮（user + assistant）→ 共 50 完整轮（49 条 NULL 行各自成组 + 1 轮），
+        // 压缩最旧 38 组直到剩余完整轮数 ≤ K=12；id1/id2 是最旧两行，整组一并压缩、FCC↔tool 配对不分离
         await InvokeStoreAsync();
 
         using var ctx = await _dbFactory.CreateDbContextAsync();
@@ -480,9 +494,9 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
         Assert.True(row2.IsCompacted);
         Assert.Equal("call_a", JsonDocument.Parse(row2.ToolCalls!).RootElement[0].GetProperty("id").GetString());
 
-        // 多 FRC tool 只占 1 行参与计数：51 总行 - 2 压缩 = 49 未压缩
+        // 压缩最旧 38 组（id1/id2 及 id3-38 各 NULL 行），剩余未压缩 = 51 - 38 = 13 行（id39-49 共 11 行 + 新轮 2 行）
         var uncompacted = rows.Count(r => !r.IsCompacted);
-        Assert.Equal(49, uncompacted);
+        Assert.Equal(13, uncompacted);
     }
 
     [Fact]
@@ -824,6 +838,34 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
                 SessionId = _sessionId,
                 Role = role,
                 Content = content,
+            });
+        }
+        ctx.SaveChanges();
+    }
+
+    /// <summary>
+    /// 按轮 seed：每轮两行（user + assistant），共享同一 run_id，末条 assistant 标 IsFinal=true（纯文本轮）。
+    /// </summary>
+    private void SeedRounds(int roundCount)
+    {
+        using var ctx = _dbFactory.CreateDbContext();
+        for (var i = 0; i < roundCount; i++)
+        {
+            var runId = Guid.NewGuid();
+            ctx.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "user",
+                Content = $"第{i}轮问题",
+            });
+            ctx.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "assistant",
+                Content = $"第{i}轮回复",
+                IsFinal = true,
             });
         }
         ctx.SaveChanges();
