@@ -75,6 +75,19 @@ public sealed class SqliteChatHistoryProvider(
         Logger.Information("ProvideChatHistory: Session={SessionId} Count={Count} Elapsed={ElapsedMs}ms",
             sessionId, rows.Count, sw.ElapsedMilliseconds);
 
+        // T8：孤儿 tool 配对检查（spec「孤儿 tool 按同 run_id 组内配对过滤」）——
+        // 预计算「含 assistant-FCC 行的 run_id 集合」与「assistant-FCC 行 id 集合」。
+        // assistant-FCC 行 = Role=="assistant" 且 ToolCalls 非空（该轮发起工具调用的信号）。
+        // 有 run_id 的行走组内配对；run_id=NULL 的历史行无组可查，走相邻 id 退化路径。
+        var assistantFccRunIds = rows
+            .Where(r => r.Role == "assistant" && !string.IsNullOrEmpty(r.ToolCalls) && r.RunId is not null)
+            .Select(r => r.RunId!.Value)
+            .ToHashSet();
+        var assistantFccRowIds = rows
+            .Where(r => r.Role == "assistant" && !string.IsNullOrEmpty(r.ToolCalls))
+            .Select(r => r.Id)
+            .ToHashSet();
+
         var result = new List<AgentChatMessage>(rows.Count);
 
         foreach (var row in rows)
@@ -173,6 +186,21 @@ public sealed class SqliteChatHistoryProvider(
             // 过滤无 FunctionResultContent 的孤儿 tool 消息（CallId 可能为空或不对齐）
             if (role == ChatRole.Tool && contents.Count == 0)
                 continue;
+
+            // T8：孤儿 tool 配对检查升级（spec「孤儿 tool 按同 run_id 组内配对过滤」）——
+            // 有 FRC 内容的 tool 行还必须能在其轮次内找到对应的 assistant-FCC 行才进上下文：
+            //   1. 有 run_id → 检查同 run_id 组内是否存在 assistant-FCC 行，不存在则过滤
+            //      （比旧相邻 id 推断可靠，能吸收历史碎片，FCC 行丢失/错位时不留孤儿 tool）
+            //   2. run_id=NULL 的历史 tool 行无组可查 → 退化为旧相邻 id 检查（id-1 为 assistant-FCC
+            //      则保留，否则过滤，兼容存量数据）
+            if (role == ChatRole.Tool)
+            {
+                var hasPairedFcc = row.RunId is { } rid
+                    ? assistantFccRunIds.Contains(rid)
+                    : assistantFccRowIds.Contains(row.Id - 1);
+                if (!hasPairedFcc)
+                    continue;
+            }
 
             result.Add(new AgentChatMessage(role, contents));
         }

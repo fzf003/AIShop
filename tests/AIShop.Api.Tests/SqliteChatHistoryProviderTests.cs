@@ -878,6 +878,12 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     public async Task Provide_RebuildsMultiFrcToolMessageFromToolCallsJson()
     {
         // seed 多 FRC tool 行：ToolCalls 列存 JSON 数组 [{id, result}, ...]，ToolCallId 置空
+        // 前置相邻 assistant-FCC 行（同 session、无 run_id，走 NULL 相邻 id 退化路径）满足 T8 配对过滤
+        var fccJson = JsonSerializer.Serialize(new[]
+        {
+            new { id = "call_1", type = "function", function = new { name = "search_product", arguments = "{}" } }
+        }, JsonOptions);
+
         var toolCallsJson = JsonSerializer.Serialize(new[]
         {
             new { id = "call_a", result = "结果A" },
@@ -886,6 +892,15 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
 
         using (var seed = _dbFactory.CreateDbContext())
         {
+            // id N：assistant-FCC 行（ToolCalls 非空），为紧随的 tool 行提供配对
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                Role = "assistant",
+                Content = "",
+                ToolCalls = fccJson,
+            });
+            // id N+1：多 FRC tool 行——ToolCalls 列存 JSON 数组、ToolCallId 置空、单行不拆行
             seed.ChatMessageRecords.Add(new ChatMessageRecord
             {
                 SessionId = _sessionId,
@@ -912,9 +927,24 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     [Fact]
     public async Task Provide_RebuildsLegacyToolMessageWithToolCallIdAndContent()
     {
-        // 旧格式兼容：ToolCalls 列空 + Content + ToolCallId（存量单 FRC 格式），零迁移读取路径
+        // 旧格式兼容：ToolCalls 列空 + Content + ToolCallId（存量单 FRC 格式），零迁移读取路径。
+        // 前置相邻 assistant-FCC 行（同 session、无 run_id，走 NULL 相邻 id 退化路径）满足 T8 配对过滤
+        var fccJson = JsonSerializer.Serialize(new[]
+        {
+            new { id = "call_1", type = "function", function = new { name = "search_product", arguments = "{}" } }
+        }, JsonOptions);
+
         using (var seed = _dbFactory.CreateDbContext())
         {
+            // id N：assistant-FCC 行（ToolCalls 非空），为紧随的 tool 行提供配对
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                Role = "assistant",
+                Content = "",
+                ToolCalls = fccJson,
+            });
+            // id N+1：tool 行——旧格式单 FRC（Content + ToolCallId），ToolCalls 列空
             seed.ChatMessageRecords.Add(new ChatMessageRecord
             {
                 SessionId = _sessionId,
