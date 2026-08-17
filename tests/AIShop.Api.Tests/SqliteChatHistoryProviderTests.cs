@@ -290,6 +290,79 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task Store_LastMessagePlainTextAssistant_MarksIsFinalTrue()
+    {
+        // 批末条为纯文本 assistant（无 tool_calls / FunctionCallContent，即 FICC 迭代结束信号）
+        // → 该行落库时 IsFinal=true，作为本轮轮次终点标记（对应 spec「Store 内判定写 is_final（末条纯文本 assistant）」）
+        await InvokeStoreAsync(
+            requestMessages: [new AgentChatMessage(ChatRole.User, "你好")],
+            responseMessages: [new AgentChatMessage(ChatRole.Assistant, "最终回复")]);
+
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var rows = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId)
+            .OrderBy(m => m.Id)
+            .ToListAsync();
+
+        // user + assistant 两行；user 行恒为 false，末条纯文本 assistant 行为轮次终点标记
+        Assert.Equal(2, rows.Count);
+        Assert.False(rows[0].IsFinal);
+        Assert.True(rows[1].IsFinal);
+        Assert.Equal("assistant", rows[1].Role);
+        Assert.Equal("最终回复", rows[1].Content);
+    }
+
+    [Fact]
+    public async Task Store_LastMessageAssistantFcc_NoRowIsFinal()
+    {
+        // 批末条为 assistant(FCC)（FICC 中间态，含 tool_calls）→ 非纯文本 assistant，本批不落 is_final
+        // （对应 spec「Store 内判定写 is_final」反例：末条非纯文本不落）
+        var asstMsg = new AgentChatMessage(ChatRole.Assistant, "正在查询");
+        asstMsg.Contents.Add(new FunctionCallContent("call_1", "search_product",
+            new Dictionary<string, object?> { ["q"] = "手机" }));
+
+        await InvokeStoreAsync(
+            requestMessages: [new AgentChatMessage(ChatRole.User, "你好")],
+            responseMessages: [asstMsg]);
+
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var rows = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId)
+            .OrderBy(m => m.Id)
+            .ToListAsync();
+
+        // 末条为 assistant(FCC)，非纯文本 → 该行 is_final=false，本批无 is_final 行
+        Assert.Equal(2, rows.Count);
+        Assert.All(rows, r => Assert.False(r.IsFinal));
+        Assert.Equal("assistant", rows[1].Role);
+        Assert.NotNull(rows[1].ToolCalls);
+        Assert.False(rows[1].IsFinal);
+    }
+
+    [Fact]
+    public async Task Store_LastMessageTool_NoRowIsFinal()
+    {
+        // 批末条为 tool（FICC 中间态，tool 结果消息）→ 非纯文本 assistant，本批不落 is_final
+        // （对应 spec「Store 内判定写 is_final」反例：末条为 tool 行不落）
+        var toolMsg = new AgentChatMessage { Role = ChatRole.Tool };
+        toolMsg.Contents.Add(new FunctionResultContent("call_1", "查询结果"));
+
+        await InvokeStoreAsync(
+            requestMessages: [],
+            responseMessages: [toolMsg]);
+
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var rows = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId)
+            .OrderBy(m => m.Id)
+            .ToListAsync();
+
+        var row = Assert.Single(rows);
+        Assert.Equal("tool", row.Role);
+        Assert.False(row.IsFinal);
+    }
+
+    [Fact]
     public async Task Store_AppendsThenTrimsToStoredLimit()
     {
         SeedMessages(15);
