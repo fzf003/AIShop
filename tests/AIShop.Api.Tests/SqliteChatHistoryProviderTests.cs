@@ -209,6 +209,87 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task Store_SameStateBagRunId_TwoBatchesShareRunIdAndKeepIdOrder()
+    {
+        // 模拟 FICC 两次迭代：StateBag 同一 RunId，两次 Store 写入的所有行共享该 run_id（对应 spec「Store 读取 StateBag 为所有 FICC 迭代打同一 run_id」）
+        var runId = Guid.NewGuid();
+        _session.StateBag.SetValue("RunId", runId.ToString());
+
+        // 第 1 次 Store（FICC 迭代 1）：user + assistant(FCC)
+        var asstMsg = new AgentChatMessage(ChatRole.Assistant, "正在查询");
+        asstMsg.Contents.Add(new FunctionCallContent("call_1", "search_product",
+            new Dictionary<string, object?> { ["q"] = "手机" }));
+        await InvokeStoreAsync(
+            requestMessages: [new AgentChatMessage(ChatRole.User, "你好")],
+            responseMessages: [asstMsg]);
+
+        // 第 2 次 Store（FICC 迭代 2）：tool 结果消息
+        var toolMsg = new AgentChatMessage { Role = ChatRole.Tool };
+        toolMsg.Contents.Add(new FunctionResultContent("call_1", "查询结果"));
+        await InvokeStoreAsync(requestMessages: [], responseMessages: [toolMsg]);
+
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var rows = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId)
+            .OrderBy(m => m.Id)
+            .ToListAsync();
+
+        // 两次 Store 的所有行共享同一 run_id
+        Assert.NotEmpty(rows);
+        Assert.All(rows, r => Assert.Equal(runId, r.RunId));
+
+        // 组内按 id 升序保持时序（写入顺序 = id 顺序），时序为 user → assistant(FCC) → tool
+        var ids = rows.Select(r => r.Id).ToList();
+        Assert.Equal(ids.OrderBy(x => x), ids);
+        Assert.Equal("user", rows[0].Role);
+        Assert.Equal("你好", rows[0].Content);
+        Assert.Equal("assistant", rows[1].Role);
+        Assert.NotNull(rows[1].ToolCalls);
+        Assert.Equal("tool", rows[2].Role);
+        Assert.Equal("call_1", rows[2].ToolCallId);
+    }
+
+    [Fact]
+    public async Task Store_NoStateBagRunId_EachBatchGetsIndependentRunId()
+    {
+        // StateBag 无 RunId → 兜底生成独立 run_id：每批自成独立轮次，写入正常不抛异常（对应 spec「无 RunId 时兜底生成独立 run_id」）
+        await InvokeStoreAsync(
+            requestMessages: [new AgentChatMessage(ChatRole.User, "第一轮提问")],
+            responseMessages: [new AgentChatMessage(ChatRole.Assistant, "第一轮回复")]);
+
+        await InvokeStoreAsync(
+            requestMessages: [new AgentChatMessage(ChatRole.User, "第二轮提问")],
+            responseMessages: [new AgentChatMessage(ChatRole.Assistant, "第二轮回复")]);
+
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var rows = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId)
+            .OrderBy(m => m.Id)
+            .ToListAsync();
+
+        // 两批均正常落库（不抛异常），共 4 行
+        Assert.Equal(4, rows.Count);
+
+        // 每批各自独立 run_id：两批 run_id 不同，共 2 个不同 run_id
+        var runIds = rows.Select(r => r.RunId).ToList();
+        Assert.DoesNotContain(runIds, r => r is null);
+        Assert.Equal(2, runIds.Distinct().Count());
+
+        // 同一批内的行共享同一 run_id（每批自成独立轮次），跨批 run_id 不同
+        Assert.Equal(rows[0].RunId, rows[1].RunId);
+        Assert.Equal(rows[2].RunId, rows[3].RunId);
+        Assert.NotEqual(rows[0].RunId, rows[2].RunId);
+
+        // 组内按 id 升序保持时序（第一轮两行在前，第二轮两行在后）
+        var ids = rows.Select(r => r.Id).ToList();
+        Assert.Equal(ids.OrderBy(x => x), ids);
+        Assert.Equal("第一轮提问", rows[0].Content);
+        Assert.Equal("第一轮回复", rows[1].Content);
+        Assert.Equal("第二轮提问", rows[2].Content);
+        Assert.Equal("第二轮回复", rows[3].Content);
+    }
+
+    [Fact]
     public async Task Store_AppendsThenTrimsToStoredLimit()
     {
         SeedMessages(15);
