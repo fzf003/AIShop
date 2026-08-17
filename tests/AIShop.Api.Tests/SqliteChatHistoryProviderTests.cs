@@ -605,6 +605,47 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task StoreAndProvide_LegacyNullRunIdRows_CompressAndLoadCompatible()
+    {
+        // 存量 run_id=NULL / is_final=0 历史行（spec「存量 NULL 行压缩与加载兼容」）：压缩时每行自成一组走旧行为，
+        // 压缩后 Provide 加载顺序不变、不丢消息不抛异常——
+        // seed 30 条 NULL 历史行（每行自成一组）+ Store 落 1 个新完整轮 = 31 完整轮 > K=12 → 压缩最旧 19 组（ids 1-19）
+        SeedMessages(30);
+
+        await InvokeStoreAsync();
+
+        using (var ctx = await _dbFactory.CreateDbContextAsync())
+        {
+            var allRows = await ctx.ChatMessageRecords
+                .Where(m => m.SessionId == _sessionId)
+                .OrderBy(m => m.Id)
+                .ToListAsync();
+
+            // 压缩只标记 is_compacted=true 不物理删除：总行数 = 30 + 2 = 32
+            Assert.Equal(32, allRows.Count);
+
+            // 压缩最旧 19 组（ids 1-19，均为 NULL 历史行），剩余未压缩 13 行（ids 20-32 = 11 条 NULL 行 + 新轮 2 行）
+            Assert.Equal(19, allRows.Count(r => r.IsCompacted));
+            Assert.Equal(13, allRows.Count(r => !r.IsCompacted));
+        }
+
+        // Provide 加载：只返回未压缩行（13 条），按 id 升序——NULL 历史行与新轮行均正常重建，不丢消息不抛异常
+        var result = await InvokeProvideAsync();
+        Assert.Equal(13, result.Count);
+
+        // 顺序保持 id 升序：首条为最旧未压缩 NULL 行（id20 = seed 第 20 条，assistant "消息19"）；
+        // 第 11 条为最末 NULL 行（id30 = assistant "消息29"）；末尾为新轮（user "Hello" → assistant "Hi"）
+        Assert.Equal(ChatRole.Assistant, result[0].Role);
+        Assert.Equal("消息19", result[0].Text);
+        Assert.Equal(ChatRole.Assistant, result[10].Role);
+        Assert.Equal("消息29", result[10].Text);
+        Assert.Equal(ChatRole.User, result[11].Role);
+        Assert.Equal("Hello", result[11].Text);
+        Assert.Equal(ChatRole.Assistant, result[12].Role);
+        Assert.Equal("Hi", result[12].Text);
+    }
+
+    [Fact]
     public async Task Provide_RebuildsUserMessageAsTextContent()
     {
         SeedMessages(1, roles: ["user"], contents: ["你好"]);
