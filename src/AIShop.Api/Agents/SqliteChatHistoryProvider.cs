@@ -482,6 +482,40 @@ public sealed class SqliteChatHistoryProvider(
             sessionId, allMessages.Count, sw.ElapsedMilliseconds);
     }
 
+    /// <summary>
+    /// Run 后兜底补标轮次终点（spec「Run 后兜底补标 is_final」#5 +「轮次完成判断基于 is_final 查询」#7）。
+    ///
+    /// 语义以「轮次终点标记」为准（评审 Y1）：当本轮尚无 <c>is_final=true</c> 行时（如仅调工具未输出文本、
+    /// FICC 迭代结束信号漏判），把该轮最后一条消息（max id）补标为轮次终点——补标可能落在
+    /// tool/FCC 行上，该行是轮次终点但不必是最终回复。已存在终点行则不动；runId 无对应行则静默返回。
+    ///
+    /// 职责边界（评审 Y3）：补标写入口收敛在本方法，不新增其他写入口；Agent 不直接操作 DbContext。
+    /// </summary>
+    /// <param name="runId">轮次标识（RunChatAsync 每轮开始生成的 Guid）。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    public async Task MarkRoundFinalAsync(Guid runId, CancellationToken cancellationToken = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+
+        // 该轮已有 is_final=true 终点行 → 正常完成，不重复补标
+        if (await db.ChatMessageRecords.AnyAsync(m => m.RunId == runId && m.IsFinal, cancellationToken))
+            return;
+
+        // 该轮最后一条（max id）即为轮次终点；runId 无对应行时 FirstOrDefaultAsync 返回 null，静默返回不抛异常
+        var last = await db.ChatMessageRecords
+            .Where(m => m.RunId == runId)
+            .OrderByDescending(m => m.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (last is null)
+            return;
+
+        last.IsFinal = true;
+        await db.SaveChangesAsync(cancellationToken);
+
+        Logger.Information("MarkRoundFinal: Run={RunId} RowId={RowId} 末条补标 is_final（轮次终点标记）",
+            runId, last.Id);
+    }
+
     private static Guid GetSessionId(AgentSession session)
     {
         if (session.StateBag.TryGetValue<string>("SessionId", out var id, null) && id is not null)
