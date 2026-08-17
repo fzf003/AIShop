@@ -201,12 +201,21 @@ public sealed class SqliteChatHistoryProvider(
             ? parsedRunId
             : Guid.NewGuid();
 
+        // T5：判定批内最后一条是否为「纯文本 assistant」（无 FunctionCallContent / tool_calls）——
+        // 这是 FICC 迭代结束信号，若是则将该行 IsFinal=true 落库，作为本轮轮次终点标记；
+        // 末条非纯文本（assistant(FCC) 或 tool 行）则本批不落 is_final，该轮视为未完成
+        // （正常场景该批消息即本轮全部响应，最后一条为最终回复，覆盖绝大多数完成场景）
+        var lastMessage = allMessages[^1];
+        var isFinalLastMessage = lastMessage.Role == ChatRole.Assistant
+            && !lastMessage.Contents.OfType<FunctionCallContent>().Any();
+
         // 步骤 1：追加本轮增量消息
         // 注意：绝不先删再插。FICC 在第 2 轮只传了 [ToolMessage] 进来，
         // 如果先删历史再插，第 1 轮的 UserMessage + Assistant{tool_calls} 会丢失，
         // 下次 Provide 就凑不出完整的消息配对，导致 400。
-        foreach (var msg in allMessages)
+        for (var i = 0; i < allMessages.Count; i++)
         {
+            var msg = allMessages[i];
             var role = msg.Role.ToString() ?? "user";
 
             // 提取纯文本内容
@@ -316,6 +325,8 @@ public sealed class SqliteChatHistoryProvider(
                 ToolCalls = toolCalls,
                 ToolCallId = toolCallId,
                 Reasoning = reasoning,
+                // 批内最后一条为纯文本 assistant → 本轮轮次终点标记；其余行恒为 false
+                IsFinal = isFinalLastMessage && i == allMessages.Count - 1,
                 CreatedAt = DateTime.UtcNow,
             });
         }
