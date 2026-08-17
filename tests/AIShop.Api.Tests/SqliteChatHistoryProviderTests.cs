@@ -841,6 +841,9 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     [Fact]
     public async Task Provide_RebuildsToolMessageAsFunctionResultContent()
     {
+        // 单 FRC tool 行重建为 FunctionResultContent（ToolCallId + Content 旧格式读取路径）。
+        // 前置相邻 assistant-FCC 行（同 session、无 run_id，走 NULL 相邻 id 退化路径）满足 T8 配对过滤——
+        // 存量 NULL 行加载兼容（spec「存量 NULL 行压缩与加载兼容」），既有配对语义保持不变被验证
         var toolCallsJson = JsonSerializer.Serialize(new[]
         {
             new { id = "call_1", type = "function", function = new { name = "search_product", arguments = "{}" } }
@@ -848,6 +851,7 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
 
         using (var seed = _dbFactory.CreateDbContext())
         {
+            // id N：assistant-FCC 行（ToolCalls 非空），为紧随的 tool 行提供配对
             seed.ChatMessageRecords.Add(new ChatMessageRecord
             {
                 SessionId = _sessionId,
@@ -855,6 +859,7 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
                 Content = "",
                 ToolCalls = toolCallsJson,
             });
+            // id N+1：tool 行——单 FRC（Content + ToolCallId），ToolCalls 列空
             seed.ChatMessageRecords.Add(new ChatMessageRecord
             {
                 SessionId = _sessionId,
