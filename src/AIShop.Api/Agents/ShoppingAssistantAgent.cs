@@ -15,6 +15,7 @@ namespace AIShop.Api.Agents;
 public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 {
     private readonly AIAgent _agent;
+    private readonly SqliteChatHistoryProvider _provider;
     private readonly bool _isOpenAI;
     private static readonly Serilog.ILogger Logger = Log.ForContext<ShoppingAssistantAgent>();
 
@@ -126,7 +127,9 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 
         var chartOptions = new ChatOptions { Tools = tools };
 
-
+        // T10：Provider 存为字段（不只内联传给 ChatHistoryProvider）——
+        // RunChatAsync 在 Run 正常返回后需调用 _provider.MarkRoundFinalAsync(runId) 兜底补标本轮终点
+        _provider = new SqliteChatHistoryProvider(dbFactory);
 
         var options = new HarnessAgentOptions
         {
@@ -134,7 +137,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             Description = "智能购物助手",
             HarnessInstructions = instructions,
             ChatOptions = chartOptions,
-            ChatHistoryProvider = new SqliteChatHistoryProvider(dbFactory),
+            ChatHistoryProvider = _provider,
 
             DisableCompaction = true,
             MaximumIterationsPerRequest = 3,
@@ -186,6 +189,12 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         var sw = Stopwatch.StartNew();
         var session = await _agent.CreateSessionAsync(ct);
         session.StateBag.SetValue("SessionId", sessionId.ToString());
+
+        // T10：每轮开始生成唯一 run_id 写入 StateBag（一次 Run 只生成一次，spec「RunChatAsync
+        // 每轮开始生成 run_id 写 StateBag」）——Provider.Store 从 StateBag 读同一值，
+        // 为一次 Run 的所有 FICC 迭代写入的消息行打同一轮次标记
+        var runId = Guid.NewGuid();
+        session.StateBag.SetValue("RunId", runId.ToString());
 
         // 会话重建回填：从数据库加载的历史偏好经端点传入，写入 StateBag，
         // PreferenceMemoryProvider 在本次运行即可读取并注入 LLM 上下文。
@@ -254,6 +263,12 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
                 }
             }
         }
+
+        // T10：Run 正常返回后兜底补标本轮终点（spec「Run 后兜底补标 is_final」）——
+        // 若 Store 内判定（T5）未落 is_final=true 行（如仅调工具未输出文本），
+        // 由 Provider 将本轮末条补标为轮次终点；补标收敛在 Provider.MarkRoundFinalAsync，
+        // Agent 不直接操作 DbContext（评审 Y3）。异常中断时不会执行到此，该轮天然视为未完成
+        await _provider.MarkRoundFinalAsync(runId, ct);
 
         return (result ?? new AgentChatResult(rawText ?? "", [], null), session);
     }
