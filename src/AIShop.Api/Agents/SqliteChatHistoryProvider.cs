@@ -194,6 +194,13 @@ public sealed class SqliteChatHistoryProvider(
 
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
 
+        // 读取本轮 run_id：同一 StateBag RunId 为所有 FICC 迭代打同一轮次标记；
+        // StateBag 无 RunId 或值非法时兜底生成独立 run_id，该批自成独立轮次，不抛异常（退化现状）
+        var runId = context.Session!.StateBag.TryGetValue<string>("RunId", out var runIdText, null)
+            && Guid.TryParse(runIdText, out var parsedRunId)
+            ? parsedRunId
+            : Guid.NewGuid();
+
         // 步骤 1：追加本轮增量消息
         // 注意：绝不先删再插。FICC 在第 2 轮只传了 [ToolMessage] 进来，
         // 如果先删历史再插，第 1 轮的 UserMessage + Assistant{tool_calls} 会丢失，
@@ -303,6 +310,7 @@ public sealed class SqliteChatHistoryProvider(
             db.ChatMessageRecords.Add(new ChatMessageRecord
             {
                 SessionId = sessionId,
+                RunId = runId,
                 Role = role,
                 Content = textContent,
                 ToolCalls = toolCalls,
