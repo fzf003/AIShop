@@ -63,6 +63,9 @@ public sealed class ChatMessageRecordConfigurationTests : IDisposable
         Assert.Contains("reasoning", columns);
         Assert.Contains("created_at", columns);
         Assert.Contains("is_compacted", columns);
+        // 轮次边界字段（T2 新增）：run_id 轮次分组（可空）、is_final 轮次终点标记（默认 0）
+        Assert.Contains("run_id", columns);
+        Assert.Contains("is_final", columns);
     }
 
     [Fact]
@@ -177,5 +180,43 @@ public sealed class ChatMessageRecordConfigurationTests : IDisposable
             .SingleAsync();
 
         Assert.False(msg.IsCompacted);
+    }
+
+    [Fact]
+    public async Task ChatMessagesTable_IsFinalDefault_ShouldBeZero()
+    {
+        using var ctx = new AppDbContext(_options);
+
+        var sessionId = Guid.NewGuid();
+        // 原生 SQL 插入：不提供 is_final 列，验证数据库默认值 0（对应方案 B 全新库 EnsureCreated 建列）；
+        // created_at 同样不提供，验证 datetime('now') 默认值
+        await ctx.Database.ExecuteSqlRawAsync(
+            "INSERT INTO chat_messages (session_id, role, content) VALUES ({0}, 'user', 'test')",
+            sessionId);
+
+        var msg = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == sessionId)
+            .SingleAsync();
+
+        Assert.False(msg.IsFinal);
+    }
+
+    [Fact]
+    public async Task ChatMessagesTable_CompositeIndex_ShouldContainRunId()
+    {
+        using var ctx = new AppDbContext(_options);
+
+        // pragma_index_info 返回索引各列的列名（按索引定义顺序）
+        var indexColumns = (await ctx.Database.SqlQueryRaw<string>(
+            "SELECT name FROM pragma_index_info('idx_cm_session_active')")
+            .ToListAsync())
+            .Select(c => c.ToLowerInvariant())
+            .ToList();
+
+        // 索引维度：SessionId + IsCompacted + RunId + Id，支撑按 run_id 分组压缩与加载
+        Assert.Contains("run_id", indexColumns);
+        Assert.Contains("session_id", indexColumns);
+        Assert.Contains("is_compacted", indexColumns);
+        Assert.Contains("id", indexColumns);
     }
 }
