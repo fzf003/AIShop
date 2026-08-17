@@ -37,6 +37,15 @@ public sealed class SqliteChatHistoryProvider(
     /// <summary>压缩保留的最大完整轮数（K=12，偏保守，容量约等于旧 50 条硬切）。</summary>
     private const int MaxCompletedRounds = 12;
 
+    /// <summary>未完成轮上限（5 个）：未完成轮堆积超限时强制压最旧未完成轮并记 Warning（T7 安全阀 1，spec #11）。</summary>
+    private const int MaxIncompleteRounds = 5;
+
+    /// <summary>
+    /// 条数硬上限（4K 条）：保留区未压缩条数超限时强制压最旧整轮并记 Warning（T7 安全阀 2，spec #10）。
+    /// 存储安全阀，防单轮极大 / 异常堆积导致膨胀；K 决定业务保留多少轮，硬上限只兜存储上限。
+    /// </summary>
+    private const int MaxMessagesHardLimit = 4096;
+
     private static readonly Serilog.ILogger Logger = Log.ForContext<SqliteChatHistoryProvider>();
 
     /// <summary>
@@ -335,10 +344,15 @@ public sealed class SqliteChatHistoryProvider(
         await db.SaveChangesAsync(cancellationToken);
 
         // 步骤 2：裁剪旧消息，控制存储大小 —— 按 run_id 整轮整切（不拆轮）。
-        // 设计（design.md §6 / spec #8「压缩按 run_id 整轮整切不拆轮」）：
+        // 设计（design.md §6 / spec #8「压缩按 run_id 整轮整切不拆轮」+ #10/#11/#12 安全阀）：
         //   1. 未压缩消息按 run_id 分组（run_id=NULL 的历史行每行自成一组，走旧行为，视为可压缩完整轮）
         //   2. 从最旧完整轮开始，整轮整轮标记 is_compacted=true，直到剩余完整轮数 ≤ K=12
-        //   3. 未完成轮（组内无 is_final=true 行）整组保留，即使它很旧（T7 再补「未完成轮上限 5」兜底）
+        //   3. 未完成轮（组内无 is_final=true 行）整组保留，即使它很旧；但受「未完成轮上限 5」兜底，
+        //      超限强制压最旧未完成轮并记 Warning（T7 安全阀 1，spec #11）
+        //   4. 保留区未压缩条数超「硬上限 4K 条」时强制压最旧整轮并记 Warning（T7 安全阀 2，spec #10，
+        //      防单轮极大 / 异常堆积导致存储膨胀）
+        //   5. 未完成轮计数口径（spec #12）：只统计 run_id 非空且组内行数 ≥2 的组；
+        //      run_id=NULL 历史行不计入未完成轮，防止历史库瞬间超上限触发误压缩
         // 配对保护天然成立：整轮一起压，FCC↔tool 结构性不分离，因此删除原 compressIds 的 ±1 相邻推断逻辑
         var rows = await db.ChatMessageRecords
             .Where(m => m.SessionId == sessionId && !m.IsCompacted)
@@ -358,25 +372,73 @@ public sealed class SqliteChatHistoryProvider(
             })
             .ToList();
 
-        // 未完成轮整组保留、不参与压缩；只对完整轮按新旧排序（组内最大 id，最旧在前）
+        var compressIds = new HashSet<long>();
+        var compressedRoundCount = 0;
+
+        // 阶段 1（T6 既有）：未完成轮整组保留、不参与本阶段；只对完整轮按新旧排序（组内最大 id，最旧在前），
+        // 从最旧完整轮开始整轮压缩，直到剩余完整轮数 ≤ K=12
         var completeRounds = rounds
             .Where(r => r.IsComplete)
             .OrderBy(r => r.MaxId)
             .ToList();
+        var completeToCompress = completeRounds.Count - MaxCompletedRounds;
+        if (completeToCompress > 0)
+        {
+            compressIds.UnionWith(completeRounds.Take(completeToCompress).SelectMany(r => r.Ids));
+            compressedRoundCount += completeToCompress;
+        }
 
-        var compressRoundCount = completeRounds.Count - MaxCompletedRounds;
-        if (compressRoundCount <= 0)
+        // 阶段 2（T7 安全阀 1）：未完成轮上限 5 个 —— 超限时强制压最旧未完成轮并记 Warning。
+        // 未完成轮计数口径（spec #12）：只统计 run_id 非空且组内行数 ≥2 的组；
+        // run_id=NULL 历史行不计入未完成轮（否则历史库瞬间超上限触发误压缩），它们走旧行为由阶段 1 处理
+        var incompleteRounds = rounds
+            .Where(r => !r.IsComplete && r.RunId is not null && r.Ids.Count >= 2)
+            .OrderBy(r => r.MaxId)
+            .ToList();
+        var incompleteToCompress = incompleteRounds.Count - MaxIncompleteRounds;
+        if (incompleteToCompress > 0)
+        {
+            Logger.Warning(
+                "压缩安全阀：未完成轮超上限 Session={SessionId} IncompleteRounds={Count} Max={Max}，强制压最旧 {Compress} 个未完成轮",
+                sessionId, incompleteRounds.Count, MaxIncompleteRounds, incompleteToCompress);
+            compressIds.UnionWith(incompleteRounds.Take(incompleteToCompress).SelectMany(r => r.Ids));
+            compressedRoundCount += incompleteToCompress;
+        }
+
+        // 阶段 3（T7 安全阀 2）：条数硬上限 4K 条 —— 单轮极大或异常堆积导致保留区未压缩条数超硬上限时，
+        // 强制压最旧整轮（组内最大 id 最旧在前）直到 ≤ 4K 并记 Warning。存储安全阀优先于「未完成轮整组保留」，
+        // 未完成轮在阶段 2 已压到上限内，此处作为最后兜底亦可被压
+        var remainingCount = rows.Count - compressIds.Count;
+        if (remainingCount > MaxMessagesHardLimit)
+        {
+            Logger.Warning(
+                "压缩安全阀：保留区条数超硬上限 Session={SessionId} Count={Count} HardLimit={HardLimit}，强制压最旧整轮",
+                sessionId, remainingCount, MaxMessagesHardLimit);
+
+            // 按最旧顺序累计行数，取累计超过溢出量所需的最少整轮前缀（整轮整切，末轮可能多压到 4K 以内）
+            var overflow = remainingCount - MaxMessagesHardLimit;
+            var candidates = rounds
+                .Where(r => !r.Ids.Any(compressIds.Contains))
+                .OrderBy(r => r.MaxId)
+                .ToList();
+            var takeCount = 0;
+            var accumulatedRows = 0L;
+            while (takeCount < candidates.Count && accumulatedRows < overflow)
+            {
+                accumulatedRows += candidates[takeCount].Ids.Count;
+                takeCount++;
+            }
+
+            compressIds.UnionWith(candidates.Take(takeCount).SelectMany(r => r.Ids));
+            compressedRoundCount += takeCount;
+        }
+
+        if (compressIds.Count == 0)
         {
             Logger.Debug("裁剪旧消息 Session={SessionId} 无需裁剪 Rounds={RoundCount}",
                 sessionId, completeRounds.Count);
             return;
         }
-
-        // 从最旧完整轮开始整轮压缩，直到剩余完整轮数 ≤ K
-        var compressIds = completeRounds
-            .Take(compressRoundCount)
-            .SelectMany(r => r.Ids)
-            .ToHashSet();
 
         // 执行压缩：整轮标记 is_compacted=true（非物理删除，保留原始数据——历史可追溯、可查询）
         await db.ChatMessageRecords
@@ -384,7 +446,7 @@ public sealed class SqliteChatHistoryProvider(
             .ExecuteUpdateAsync(s => s.SetProperty(m => m.IsCompacted, true), cancellationToken);
 
         Logger.Information("裁剪旧消息 Session={SessionId} CompressRounds={RoundCount} DeleteCount={DeleteCount}",
-            sessionId, compressRoundCount, compressIds.Count);
+            sessionId, compressedRoundCount, compressIds.Count);
 
 
         sw.Stop();
