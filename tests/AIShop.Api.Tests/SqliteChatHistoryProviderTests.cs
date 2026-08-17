@@ -964,6 +964,246 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task Provide_ToolWithRunId_HasAssistantFccInGroup_Kept()
+    {
+        // 孤儿 tool 配对检查升级（T8，spec「孤儿 tool 按同 run_id 组内配对过滤」）：
+        // tool 行带 run_id 时，同 run_id 组内存在 assistant-FCC 行 → tool 保留、正常重建 FRC 进上下文
+        var runId = Guid.NewGuid();
+        var fccJson = JsonSerializer.Serialize(new[]
+        {
+            new { id = "call_1", type = "function", function = new { name = "search_product", arguments = "{}" } }
+        }, JsonOptions);
+
+        using (var seed = _dbFactory.CreateDbContext())
+        {
+            // 一轮完整工具调用：user → assistant(FCC) → tool，共享同一 run_id
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "user",
+                Content = "问题",
+            });
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "assistant",
+                Content = "",
+                ToolCalls = fccJson,
+            });
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "tool",
+                Content = "查询结果",
+                ToolCallId = "call_1",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var result = await InvokeProvideAsync();
+
+        // user + assistant(FCC) + tool 三条均保留，tool 行在同 run_id 组内找到 assistant-FCC 配对，不触发孤儿过滤
+        Assert.Equal(3, result.Count);
+        var toolMsg = Assert.Single(result, m => m.Role == ChatRole.Tool);
+        var frc = Assert.Single(toolMsg.Contents.OfType<FunctionResultContent>());
+        Assert.Equal("call_1", frc.CallId);
+        Assert.Equal("查询结果", frc.Result);
+    }
+
+    [Fact]
+    public async Task Provide_ToolWithRunId_HasNonAdjacentFccInGroup_Kept()
+    {
+        // 组内配对「比相邻 id 推断可靠，能吸收历史碎片」（T8 设计意图，spec「孤儿 tool 按同 run_id 组内配对过滤」）：
+        // FCC 行与 tool 行同 run_id 但不相邻（中间隔着普通消息）→ 仍按组内配对保留。
+        // 旧相邻 id 推断（id-1 为 FCC 才保留）在此场景会误过滤，证明配对已升级为同 run_id 组内判定
+        var runId = Guid.NewGuid();
+        var fccJson = JsonSerializer.Serialize(new[]
+        {
+            new { id = "call_1", type = "function", function = new { name = "search_product", arguments = "{}" } }
+        }, JsonOptions);
+
+        using (var seed = _dbFactory.CreateDbContext())
+        {
+            // id1：user
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "user",
+                Content = "问题",
+            });
+            // id2：assistant(FCC)
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "assistant",
+                Content = "",
+                ToolCalls = fccJson,
+            });
+            // id3：普通 assistant 文本（FCC 与 tool 之间的历史碎片，非 FCC）
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "assistant",
+                Content = "中间文本",
+            });
+            // id4：tool 行——同 run_id 组内有 FCC（id2）但不相邻，组内配对判定保留
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "tool",
+                Content = "查询结果",
+                ToolCallId = "call_1",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var result = await InvokeProvideAsync();
+
+        // 四条均保留（user + FCC + 中间文本 + tool）；tool 行由同 run_id 组内 FCC 配对，不被相邻 id 推断误过滤
+        Assert.Equal(4, result.Count);
+        var toolMsg = Assert.Single(result, m => m.Role == ChatRole.Tool);
+        Assert.Single(toolMsg.Contents.OfType<FunctionResultContent>());
+        Assert.Contains(result, m => m.Role == ChatRole.Assistant
+            && m.Contents.OfType<FunctionCallContent>().Any(f => f.CallId == "call_1"));
+    }
+
+    [Fact]
+    public async Task Provide_ToolWithRunId_NoAssistantFccInGroup_Filtered()
+    {
+        // 孤儿 tool 配对检查（T8，spec「孤儿 tool 按同 run_id 组内配对过滤」）：
+        // tool 行带 run_id 时，同 run_id 组内不存在 assistant-FCC → tool 被过滤、不进上下文。
+        // 即便会话中其他轮次（不同 run_id）存在 assistant-FCC，也必须「同 run_id 组内」配对才算数
+        var fccRunId = Guid.NewGuid();   // 轮 A：assistant-FCC + tool 配对，保留
+        var orphanRunId = Guid.NewGuid(); // 轮 B：仅 tool 行、无 assistant-FCC，孤儿应被过滤
+        var fccJson = JsonSerializer.Serialize(new[]
+        {
+            new { id = "call_a", type = "function", function = new { name = "search_product", arguments = "{}" } }
+        }, JsonOptions);
+
+        using (var seed = _dbFactory.CreateDbContext())
+        {
+            // 轮 A（run_id=fccRunId）：assistant(FCC) + tool 配对
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = fccRunId,
+                Role = "assistant",
+                Content = "",
+                ToolCalls = fccJson,
+            });
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = fccRunId,
+                Role = "tool",
+                Content = "配对结果",
+                ToolCallId = "call_a",
+            });
+            // 轮 B（run_id=orphanRunId）：孤立 tool 行，组内无 assistant-FCC（FCC 行丢失/错位）
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = orphanRunId,
+                Role = "tool",
+                Content = "孤儿结果",
+                ToolCallId = "call_orphan",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var result = await InvokeProvideAsync();
+
+        // 轮 A 的 tool 保留（组内有 FCC）；轮 B 的孤儿 tool 被过滤（不同 run_id 组内的 FCC 不救回它）
+        var keptTool = Assert.Single(result, m => m.Role == ChatRole.Tool);
+        var frc = Assert.Single(keptTool.Contents.OfType<FunctionResultContent>());
+        Assert.Equal("call_a", frc.CallId);
+        Assert.DoesNotContain(result, m => m.Role == ChatRole.Tool
+            && m.Contents.OfType<FunctionResultContent>().Any(f => f.Result?.ToString() == "孤儿结果"));
+    }
+
+    [Fact]
+    public async Task Provide_NullRunIdTool_AdjacentAssistantFcc_Kept()
+    {
+        // run_id=NULL 的历史 tool 行无组可查 → 退化旧的相邻 id 检查（T8 / 评审 G1，spec「孤儿 tool 按同 run_id 组内配对过滤」兼容存量）：
+        // id-1 为 assistant-FCC 则保留。seed 的 assistant(FCC) 与紧随的 tool 行均不带 run_id（存量数据形态）
+        var fccJson = JsonSerializer.Serialize(new[]
+        {
+            new { id = "call_1", type = "function", function = new { name = "search_product", arguments = "{}" } }
+        }, JsonOptions);
+
+        using (var seed = _dbFactory.CreateDbContext())
+        {
+            // id N：assistant-FCC（RunId=NULL）
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                Role = "assistant",
+                Content = "",
+                ToolCalls = fccJson,
+            });
+            // id N+1：tool 行（RunId=NULL），id-1 恰为 assistant-FCC → 相邻退化路径配对成功、保留
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                Role = "tool",
+                Content = "旧结果",
+                ToolCallId = "call_1",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var result = await InvokeProvideAsync();
+
+        // assistant(FCC) + tool 均保留：NULL tool 行走相邻 id 退化路径，正常重建 FRC
+        Assert.Equal(2, result.Count);
+        var toolMsg = Assert.Single(result, m => m.Role == ChatRole.Tool);
+        var frc = Assert.Single(toolMsg.Contents.OfType<FunctionResultContent>());
+        Assert.Equal("call_1", frc.CallId);
+        Assert.Equal("旧结果", frc.Result);
+    }
+
+    [Fact]
+    public async Task Provide_NullRunIdTool_NoAdjacentAssistantFcc_Filtered()
+    {
+        // run_id=NULL 的历史 tool 行无组可查 → 退化旧的相邻 id 检查（T8 / 评审 G1，spec「孤儿 tool 按同 run_id 组内配对过滤」兼容存量）：
+        // id-1 非 assistant-FCC 则过滤。seed 的 tool 行前一条是纯文本 assistant（非 FCC），相邻退化路径配对失败
+        using (var seed = _dbFactory.CreateDbContext())
+        {
+            // id N：纯文本 assistant（无 ToolCalls，非 FCC）
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                Role = "assistant",
+                Content = "普通回复",
+            });
+            // id N+1：tool 行（RunId=NULL），id-1 是纯文本 assistant 而非 FCC → 孤儿被过滤
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                Role = "tool",
+                Content = "孤立结果",
+                ToolCallId = "call_orphan",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var result = await InvokeProvideAsync();
+
+        // 纯文本 assistant 保留，孤立 tool 行被过滤、不进上下文
+        var asstMsg = Assert.Single(result);
+        Assert.Equal(ChatRole.Assistant, asstMsg.Role);
+        Assert.Equal("普通回复", asstMsg.Text);
+        Assert.DoesNotContain(result, m => m.Role == ChatRole.Tool);
+    }
+
+    [Fact]
     public async Task Provide_ToolCallsJsonDeserializationFailure_LogsWarningAndSkipsOrphanTool()
     {
         // 反序列化失败：ToolCalls 列非法 JSON → catch 记 Warning 不抛异常，contents 空 → 孤儿 tool 消息被过滤、不进入返回列表
