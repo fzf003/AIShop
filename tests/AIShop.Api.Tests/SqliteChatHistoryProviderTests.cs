@@ -652,6 +652,109 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task Store_MoreThan5IncompleteRounds_ForceCompressesOldestIncompleteRound()
+    {
+        // 未完成轮上限 5 个兜底（spec「未完成轮上限 5 个兜底」/ T7 安全阀 1）：
+        // 构造 6 个有效未完成轮（run_id 非空且组内 ≥2 行、无 is_final 行）→ 未完成轮数 6 > 上限 5，
+        // Store 落 1 个新完整轮触发压缩 → 强制压最旧 1 个未完成轮（整轮整切），
+        // 其余 5 个未完成轮 + 新完整轮保留
+        SeedIncompleteRounds(6);
+
+        await InvokeStoreAsync();
+
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var rows = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId)
+            .OrderBy(m => m.Id)
+            .ToListAsync();
+
+        // 压缩只标记 is_compacted=true 不物理删除：总行数 = 6×2 + 2 = 14
+        Assert.Equal(14, rows.Count);
+
+        // 超上限强制压最旧 1 个未完成轮（id 1-2，2 行整轮整切）
+        var compacted = rows.Where(r => r.IsCompacted).ToList();
+        Assert.Equal(2, compacted.Count);
+        Assert.Equal(
+            rows.Take(2).Select(r => r.Id).OrderBy(x => x),
+            compacted.Select(r => r.Id).OrderBy(x => x));
+        // 被压的两行同属一个未完成轮（共享 run_id 且无 is_final 行）
+        Assert.Equal(compacted[0].RunId, compacted[1].RunId);
+        Assert.DoesNotContain(compacted, r => r.IsFinal);
+
+        // 保留 5 个未完成轮（10 行）+ 1 个新完整轮（2 行）= 12 行未压缩、6 个轮组
+        var uncompacted = rows.Where(r => !r.IsCompacted).ToList();
+        Assert.Equal(12, uncompacted.Count);
+        Assert.Equal(6, uncompacted.GroupBy(r => r.RunId).Count());
+
+        // 未压缩的 5 个未完成轮组内仍无 is_final（保持未完成语义，整组保留）
+        var incompleteKept = uncompacted
+            .GroupBy(r => r.RunId)
+            .Where(g => !g.Any(r => r.IsFinal))
+            .ToList();
+        Assert.Equal(5, incompleteKept.Count);
+        Assert.All(incompleteKept, g => Assert.Equal(2, g.Count()));
+
+        // 新完整轮保留：末条 assistant 行为轮次终点标记（IsFinal=true）
+        var completeKept = uncompacted.GroupBy(r => r.RunId).Single(g => g.Any(r => r.IsFinal));
+        Assert.Equal(2, completeKept.Count());
+        Assert.Equal("assistant", completeKept.Single(r => r.IsFinal).Role);
+
+        // 以轮为边界：同一 run_id 组内所有行压缩状态一致（无半轮被拆散）
+        Assert.All(rows.GroupBy(r => r.RunId), g =>
+            Assert.True(
+                g.All(r => r.IsCompacted) || !g.Any(r => r.IsCompacted),
+                $"run_id {g.Key} 同一轮被拆散：部分行压缩、部分行保留"));
+    }
+
+    [Fact]
+    public async Task Store_IncompleteRoundsWithNullRows_NullSingleRowGroupsNotCounted()
+    {
+        // 未完成轮计数口径只统计有效轮组（spec「未完成轮计数口径只统计有效轮组」/ 评审 Y2）：
+        // 6 个有效未完成轮 + 10 条 run_id=NULL 单行组 → 若 NULL 行计入未完成轮计数（16 > 5）
+        // 会误压 11 个最旧组波及 NULL 行；正确口径下 NULL 行不计入，仍只压最旧 1 个未完成轮，
+        // NULL 行原样保留（不触发误压缩）
+        SeedIncompleteRounds(6);
+        SeedMessages(10);
+
+        await InvokeStoreAsync();
+
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var rows = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId)
+            .OrderBy(m => m.Id)
+            .ToListAsync();
+
+        // 压缩只标记 is_compacted=true 不物理删除：总行数 = 6×2 + 10 + 2 = 24
+        Assert.Equal(24, rows.Count);
+
+        // 只压最旧 1 个未完成轮（id 1-2，2 行），而非把 NULL 行计入后的大范围误压缩
+        var compacted = rows.Where(r => r.IsCompacted).ToList();
+        Assert.Equal(2, compacted.Count);
+        Assert.Equal(
+            rows.Take(2).Select(r => r.Id).OrderBy(x => x),
+            compacted.Select(r => r.Id).OrderBy(x => x));
+
+        // 10 条 NULL 单行组（ids 13-22）原样保留：run_id 为空且未被压缩
+        var nullRows = rows.Skip(12).Take(10).ToList();
+        Assert.All(nullRows, r => Assert.Null(r.RunId));
+        Assert.All(nullRows, r => Assert.False(r.IsCompacted));
+
+        // 未压缩 22 行：5 个未完成轮（10 行）+ 10 条 NULL 行 + 新完整轮（2 行）
+        var uncompacted = rows.Where(r => !r.IsCompacted).ToList();
+        Assert.Equal(22, uncompacted.Count);
+
+        // 保留的 5 个未完成轮组（run_id 非空、组内无 is_final）仍整组保留
+        var incompleteKept = uncompacted
+            .GroupBy(r => r.RunId)
+            .Where(g => g.Key is not null && !g.Any(r => r.IsFinal))
+            .ToList();
+        Assert.Equal(5, incompleteKept.Count);
+
+        // 新完整轮保留（含轮次终点标记 IsFinal=true 的行）
+        Assert.Contains(uncompacted, r => r.IsFinal);
+    }
+
+    [Fact]
     public async Task StoreAndProvide_LegacyNullRunIdRows_CompressAndLoadCompatible()
     {
         // 存量 run_id=NULL / is_final=0 历史行（spec「存量 NULL 行压缩与加载兼容」）：压缩时每行自成一组走旧行为，
@@ -1174,6 +1277,35 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
                 Role = i % 2 == 0 ? "user" : "assistant",
                 Content = $"第{i}条",
                 IsFinal = i == rowCount - 1,
+            });
+        }
+        ctx.SaveChanges();
+    }
+
+    /// <summary>
+    /// 按未完成轮 seed：每轮 2 行（user + assistant），共享同一 run_id，
+    /// 组内无 is_final=true 行（模拟 FICC 迭代耗尽 / 异常中断的未完成轮，
+    /// 满足「有效轮组」计数口径：run_id 非空且组内行数 ≥2）。
+    /// </summary>
+    private void SeedIncompleteRounds(int roundCount)
+    {
+        using var ctx = _dbFactory.CreateDbContext();
+        for (var i = 0; i < roundCount; i++)
+        {
+            var runId = Guid.NewGuid();
+            ctx.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "user",
+                Content = $"未完成第{i}轮问题",
+            });
+            ctx.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "assistant",
+                Content = $"未完成第{i}轮中间回复",
             });
         }
         ctx.SaveChanges();
