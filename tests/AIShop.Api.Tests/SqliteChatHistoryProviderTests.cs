@@ -363,6 +363,121 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task MarkRoundFinal_NoFinalToolEndingRound_MarksLastRowFinal()
+    {
+        // 无 is_final 的轮（末条为 tool 行，仅调工具未输出最终文本场景）→ 调用 MarkRoundFinalAsync 后
+        // 末条 tool 行补标 is_final=true。对应 spec「Run 后兜底补标 is_final」的 tool/FCC 终点语义——
+        // 补标可能落在 tool 行上，该行是轮次终点但不必是最终回复（评审 Y1，语义以「轮次终点标记」为准）。
+        var runId = Guid.NewGuid();
+        var fccJson = JsonSerializer.Serialize(new[]
+        {
+            new { id = "call_1", type = "function", function = new { name = "search_product", arguments = "{}" } }
+        }, JsonOptions);
+
+        using (var seed = _dbFactory.CreateDbContext())
+        {
+            // 一轮仅调工具未输出最终回复：user → assistant(FCC) → tool，共享同一 run_id，组内无 is_final=true 行
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "user",
+                Content = "查一下价格",
+            });
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "assistant",
+                Content = "",
+                ToolCalls = fccJson,
+            });
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "tool",
+                Content = "价格查询结果",
+                ToolCallId = "call_1",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        // 调用前前置条件：该轮组内无 is_final=true 行（Store 内判定未落标，本轮尚未收尾）
+        using (var preCtx = await _dbFactory.CreateDbContextAsync())
+        {
+            var preRows = await preCtx.ChatMessageRecords
+                .Where(m => m.SessionId == _sessionId && m.RunId == runId)
+                .ToListAsync();
+            Assert.DoesNotContain(preRows, r => r.IsFinal);
+        }
+
+        await _provider.MarkRoundFinalAsync(runId);
+
+        // 调用后：本轮最后一条（max id = tool 行）补标 is_final=true，其余行恒为 false
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var rows = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId && m.RunId == runId)
+            .OrderBy(m => m.Id)
+            .ToListAsync();
+
+        Assert.Equal(3, rows.Count);
+        Assert.False(rows[0].IsFinal); // user
+        Assert.False(rows[1].IsFinal); // assistant(FCC)
+        Assert.True(rows[2].IsFinal);  // tool 行补标为轮次终点标记（轮次终点 ≠ 最终回复）
+        Assert.Equal("tool", rows[2].Role);
+    }
+
+    [Fact]
+    public async Task MarkRoundFinal_NoFinalAssistantFccEndingRound_MarksLastRowFinal()
+    {
+        // 无 is_final 的轮（末条为 assistant(FCC) 行，FICC 迭代耗尽 / MaximumIterationsPerRequest 场景）→
+        // 调用 MarkRoundFinalAsync 后末条 assistant(FCC) 行补标 is_final=true。对应 spec「Run 后兜底补标 is_final」
+        // 的 tool/FCC 终点语义（评审 Y1：补标可能落在 assistant(FCC) 行上，该行是轮次终点但不必是最终回复）。
+        var runId = Guid.NewGuid();
+        var fccJson = JsonSerializer.Serialize(new[]
+        {
+            new { id = "call_1", type = "function", function = new { name = "search_product", arguments = "{}" } }
+        }, JsonOptions);
+
+        using (var seed = _dbFactory.CreateDbContext())
+        {
+            // 一轮在发起工具调用后中断：user → assistant(FCC)，共享同一 run_id，组内无 is_final=true 行
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "user",
+                Content = "搜索一下",
+            });
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "assistant",
+                Content = "",
+                ToolCalls = fccJson,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await _provider.MarkRoundFinalAsync(runId);
+
+        // 调用后：本轮最后一条（max id = assistant(FCC) 行）补标 is_final=true，user 行恒为 false
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var rows = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId && m.RunId == runId)
+            .OrderBy(m => m.Id)
+            .ToListAsync();
+
+        Assert.Equal(2, rows.Count);
+        Assert.False(rows[0].IsFinal); // user
+        Assert.True(rows[1].IsFinal);  // assistant(FCC) 行补标为轮次终点标记
+        Assert.Equal("assistant", rows[1].Role);
+        Assert.False(string.IsNullOrEmpty(rows[1].ToolCalls)); // 仍为 FCC 行，补标不改变其内容
+    }
+
+    [Fact]
     public async Task Store_AppendsThenTrimsToStoredLimit()
     {
         // 15 条 NULL run_id 历史行（每行自成一组）+ 1 个完整轮（2 行）= 16 完整轮，超过 K=12 → 压缩最旧 4 组（4 行）
