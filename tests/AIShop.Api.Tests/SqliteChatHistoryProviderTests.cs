@@ -478,6 +478,104 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task MarkRoundFinal_RoundAlreadyHasFinalRow_DoesNotReMark()
+    {
+        // 轮内已有 is_final=true 终点行（正常完成轮）→ 调用 MarkRoundFinalAsync 后不重复补标。
+        // 对应 spec「轮次完成判断基于 is_final 查询」——AnyAsync 短路直接返回。故意把终点行放在中间、
+        // 末条残留一行 tool：若实现退化为「不查 AnyAsync、直接给 max id 补标」，会在末条行上产生第二个
+        // is_final=true，本测试断言「终点行唯一」可捕获该回归。
+        var runId = Guid.NewGuid();
+
+        using (var seed = _dbFactory.CreateDbContext())
+        {
+            // 正常完成轮：user → assistant(纯文本，已是轮次终点)，其后残留一行 tool（终点行并非末条）
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "user",
+                Content = "查一下价格",
+            });
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "assistant",
+                Content = "这是最终回复",
+                IsFinal = true, // 轮次终点已存在
+            });
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "tool",
+                Content = "价格查询结果",
+                ToolCallId = "call_1",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await _provider.MarkRoundFinalAsync(runId);
+
+        // 调用后：该轮仍只有唯一的 is_final=true 行（assistant 终点行），末条 tool 行不被重复补标
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var rows = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId && m.RunId == runId)
+            .OrderBy(m => m.Id)
+            .ToListAsync();
+
+        Assert.Equal(3, rows.Count);
+        Assert.Equal(1, rows.Count(r => r.IsFinal)); // 未重复补标，终点行唯一
+        Assert.False(rows[0].IsFinal); // user
+        Assert.True(rows[1].IsFinal);  // 既有终点行保持不变
+        Assert.False(rows[2].IsFinal); // 末条 tool 行不被误补标
+        Assert.Equal("assistant", rows[1].Role);
+    }
+
+    [Fact]
+    public async Task MarkRoundFinal_UnknownRunId_ReturnsSilently()
+    {
+        // runId 无对应行 → 静默返回不抛异常，DB 不产生任何变更。
+        // 对应 spec「轮次完成判断基于 is_final 查询」——无行可查即视为无该轮，直接返回。
+        // 会话中预置另一轮次（不同 run_id）数据，验证未知 runId 的调用不影响既有轮。
+        var unknownRunId = Guid.NewGuid();
+        var otherRunId = Guid.NewGuid();
+
+        using (var seed = _dbFactory.CreateDbContext())
+        {
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = otherRunId,
+                Role = "user",
+                Content = "你好",
+            });
+            seed.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = otherRunId,
+                Role = "assistant",
+                Content = "你好，有什么可以帮你？",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        // 调用不抛异常（无对应行时 FirstOrDefaultAsync 返回 null，方法静默返回）
+        await _provider.MarkRoundFinalAsync(unknownRunId);
+
+        // DB 无新增无变更：既有轮的行数与 is_final 状态保持不变
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var rows = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId)
+            .OrderBy(m => m.Id)
+            .ToListAsync();
+
+        Assert.Equal(2, rows.Count);
+        Assert.DoesNotContain(rows, r => r.IsFinal); // 未被误补标
+        Assert.All(rows, r => Assert.Equal(otherRunId, r.RunId)); // 未被未知 runId 触碰
+    }
+
+    [Fact]
     public async Task Store_AppendsThenTrimsToStoredLimit()
     {
         // 15 条 NULL run_id 历史行（每行自成一组）+ 1 个完整轮（2 行）= 16 完整轮，超过 K=12 → 压缩最旧 4 组（4 行）
