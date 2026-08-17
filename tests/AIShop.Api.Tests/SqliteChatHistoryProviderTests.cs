@@ -426,6 +426,63 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task Store_CompressesAtRoundBoundaries_KeepsFccToolPairsTogether()
+    {
+        // 构造 14 个含工具调用的完整轮（每轮 4 行：user → assistant(FCC) → tool → assistant 最终回复，
+        // 同 run_id，末条 IsFinal=true），触发压缩后断言：保留区与压缩区均以轮为边界、
+        // 同轮 FCC↔tool 配对结构性不分离（对应 spec「压缩按 run_id 整轮整切不拆轮」）
+        SeedToolRounds(14);
+
+        // Store 再落 1 个新完整轮（user + assistant 纯文本轮）→ 共 15 完整轮 > K=12，
+        // 从最旧完整轮整轮压缩直到剩余 ≤ K=12 → 压缩最旧 3 轮（每轮 4 行 = 12 行）
+        await InvokeStoreAsync();
+
+        using var ctx = await _dbFactory.CreateDbContextAsync();
+        var rows = await ctx.ChatMessageRecords
+            .Where(m => m.SessionId == _sessionId)
+            .OrderBy(m => m.Id)
+            .ToListAsync();
+
+        // 压缩只标记 is_compacted=true 不物理删除：总行数 = 14×4 + 2 = 58
+        Assert.Equal(58, rows.Count);
+
+        // 15 个不同 run_id（14 个工具轮 + 1 个新轮）
+        var grouped = rows.GroupBy(r => r.RunId).ToList();
+        Assert.Equal(15, grouped.Count);
+
+        // 保留区与压缩区均以轮为边界：同一 run_id 组内所有行压缩状态一致（整轮整切，无半轮被拆散）
+        Assert.All(grouped, g =>
+            Assert.True(
+                g.All(r => r.IsCompacted) || !g.Any(r => r.IsCompacted),
+                $"run_id {g.Key} 同一轮被拆散：部分行压缩、部分行保留"));
+
+        // 保留 12 轮（46 行 = 11 工具轮×4 + 新轮 2 行），压缩 3 轮（12 行，均为最旧的工具轮）
+        var uncompacted = rows.Where(r => !r.IsCompacted).ToList();
+        var compacted = rows.Where(r => r.IsCompacted).ToList();
+        Assert.Equal(12, uncompacted.GroupBy(r => r.RunId).Count());
+        Assert.Equal(3, compacted.GroupBy(r => r.RunId).Count());
+        Assert.Equal(46, uncompacted.Count);
+        Assert.Equal(12, compacted.Count);
+
+        // 压缩的是最旧 3 整轮：其行 id 恰为全量行中 id 最小的 12 行
+        Assert.Equal(
+            rows.Take(12).Select(r => r.Id).OrderBy(x => x),
+            compacted.Select(r => r.Id).OrderBy(x => x));
+
+        // 同轮 FCC↔tool 结构性不分离：压缩区每个工具轮 4 行同被压缩，
+        // 未出现 assistant(FCC) 被压而 tool 保留、或反之的孤儿配对
+        foreach (var round in compacted.GroupBy(r => r.RunId))
+        {
+            var roundRows = round.ToList();
+            Assert.Equal(4, roundRows.Count);
+            // 该轮含 assistant(FCC) 行（ToolCalls 非空）与 tool 行，且整轮同被压缩
+            Assert.Contains(roundRows, r => r.Role == "assistant" && !string.IsNullOrEmpty(r.ToolCalls));
+            Assert.Contains(roundRows, r => r.Role == "tool");
+            Assert.All(roundRows, r => Assert.True(r.IsCompacted));
+        }
+    }
+
+    [Fact]
     public async Task Store_MultiFrcToolPair_CompressedTogetherWithAssistantFcc()
     {
         // seed 49 条：id1 = assistant(FCC)（ToolCalls 非空）、id2 = 多 FRC tool 行（ToolCalls 为 JSON 数组）、id3-49 = 普通 user/assistant
@@ -858,6 +915,58 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
                 RunId = runId,
                 Role = "user",
                 Content = $"第{i}轮问题",
+            });
+            ctx.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "assistant",
+                Content = $"第{i}轮回复",
+                IsFinal = true,
+            });
+        }
+        ctx.SaveChanges();
+    }
+
+    /// <summary>
+    /// 按含工具调用的完整轮 seed：每轮 4 行（user → assistant(FCC) → tool → assistant 最终回复），
+    /// 共享同一 run_id，末条 assistant 标 IsFinal=true（对应真实 FICC 工具调用轮的落库结构）。
+    /// </summary>
+    private void SeedToolRounds(int roundCount)
+    {
+        using var ctx = _dbFactory.CreateDbContext();
+        for (var i = 0; i < roundCount; i++)
+        {
+            var runId = Guid.NewGuid();
+            var callId = $"call_{i}";
+
+            var fccJson = JsonSerializer.Serialize(new[]
+            {
+                new { id = callId, type = "function", function = new { name = "search_product", arguments = "{}" } }
+            }, JsonOptions);
+
+            ctx.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "user",
+                Content = $"第{i}轮问题",
+            });
+            ctx.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "assistant",
+                Content = "正在查询",
+                ToolCalls = fccJson,
+            });
+            ctx.ChatMessageRecords.Add(new ChatMessageRecord
+            {
+                SessionId = _sessionId,
+                RunId = runId,
+                Role = "tool",
+                Content = "查询结果",
+                ToolCallId = callId,
             });
             ctx.ChatMessageRecords.Add(new ChatMessageRecord
             {
