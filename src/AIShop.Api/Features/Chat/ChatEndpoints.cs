@@ -120,6 +120,38 @@ public static class ChatEndpoints
                 logger.Error(knf, "[Diagnose] KeyNotFoundException in /chat: modelId={ModelId}", req.Model ?? router.ActiveModel);
                 return Results.BadRequest(new { detail = "不支持的模型" });
             }
+            catch (Exception ex) when (IsRetryableAgentFailure(ex, ct))
+            {
+                // T13（方案 A 应用层重试）：网络/超时/429 等临时性失败 → 换默认模型重试一次（新 run_id、新轮）。
+                // 首次失败仅记 Warning，不置 Activity Error——重试成功即不污染 span；
+                // 重试仍失败才走 R11 的 OTel Error + 兜底语义。
+                logger.Warning(ex,
+                    "[Diagnose] /chat Agent调用失败，换默认模型重试一次 AgentCall={ElapsedMs}ms SessionId={SessionId}",
+                    agentSw.ElapsedMilliseconds, sid);
+                try
+                {
+                    // 重试一次：首次若用非默认模型则换到默认模型；已用默认模型则同模型再试
+                    var retryModel = router.ActiveModel;
+                    (result, _) = await router.GetAgent(retryModel).RunChatAsync(
+                        sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, ct);
+                }
+                catch (Exception retryEx)
+                {
+                    agentSw.Stop();
+                    // R11：重试也失败——被吞异常进 OTel span，置 Error + exception 事件后兜底返回
+                    Activity.Current?.SetStatus(ActivityStatusCode.Error, retryEx.Message);
+                    Activity.Current?.AddEvent(new ActivityEvent("exception",
+                        tags: new ActivityTagsCollection
+                        {
+                            { "exception.type", retryEx.GetType().FullName },
+                            { "exception.message", retryEx.Message },
+                        }));
+                    logger.Error(retryEx,
+                        "[Diagnose] /chat 重试仍失败 AgentCall={ElapsedMs}ms SessionId={SessionId}",
+                        agentSw.ElapsedMilliseconds, sid);
+                    result = new AgentChatResult("抱歉，暂时无法处理您的请求，请重试。", [], null);
+                }
+            }
             catch (Exception ex)
             {
                 agentSw.Stop();
