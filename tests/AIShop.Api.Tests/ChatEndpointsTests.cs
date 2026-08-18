@@ -831,5 +831,101 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         }
     }
 
+    // ============ T13T1 重试路径测试（方案 A：mock HttpRequestException） ============
+
+    /// <summary>
+    /// T13T1 — mock RunChatAsync 首次抛 HttpRequestException（网络抖动，IsRetryableAgentFailure→true）、
+    /// 第二次返回正常回复 → /api/chat 响应为重试后的正常回复、RunChatAsync 恰被调用 2 次
+    /// （重试成功路径：首次失败仅 Warning，重试成功用重试结果，不污染 span）。
+    /// </summary>
+    [Fact]
+    public async Task ShouldReturnRetriedReply_WhenFirstRunChatCallThrowsHttpRequestException()
+    {
+        IShoppingAssistantAgent? mockAgent = null;
+        WebApplicationFactory<Program>? f = null;
+        f = _factory.WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                ReplaceWithIsolatedDb(services, Guid.NewGuid().ToString("N"));
+                services.RemoveAll<ModelRouter>();
+
+                var agent = Substitute.For<IShoppingAssistantAgent>();
+                // NSubstitute 回调队列：第 1 次抛 HttpRequestException，第 2 次返回正常回复
+                agent.RunChatAsync(
+                        Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                    .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
+                        _ => throw new HttpRequestException("网络抖动"),
+                        _ => Task.FromResult(
+                            (new AgentChatResult("重试成功回复", [], null),
+                             Substitute.For<Microsoft.Agents.AI.AgentSession>())));
+                mockAgent = agent;
+
+                var mockRouter = Substitute.For<ModelRouter>();
+                mockRouter.ActiveModel.Returns("qwen");
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(agent);
+                mockRouter.GetDefaultAgent().Returns(agent);
+                services.AddSingleton(mockRouter);
+            }));
+
+        using var client = f.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "你好"));
+        response.EnsureSuccessStatusCode();
+        var reply = await response.Content.ReadFromJsonAsync<ChatReply>();
+        Assert.NotNull(reply);
+        Assert.Contains("重试成功回复", reply!.Response);
+
+        // 重试成功路径：RunChatAsync 恰好被调用 2 次（首次失败 + 一次重试）
+        await mockAgent!.Received(2).RunChatAsync(
+            Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string?>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// T13T1 — mock RunChatAsync 两次都抛 HttpRequestException → 重试也失败才兜底：
+    /// /api/chat 响应为「抱歉，暂时无法处理您的请求，请重试。」、RunChatAsync 恰被调用 2 次
+    /// （首次失败 + 重试失败，重试失败才 OTel Error + 兜底返回）。
+    /// </summary>
+    [Fact]
+    public async Task ShouldReturnFallback_WhenRetryAlsoThrowsHttpRequestException()
+    {
+        IShoppingAssistantAgent? mockAgent = null;
+        WebApplicationFactory<Program>? f = null;
+        f = _factory.WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                ReplaceWithIsolatedDb(services, Guid.NewGuid().ToString("N"));
+                services.RemoveAll<ModelRouter>();
+
+                var agent = Substitute.For<IShoppingAssistantAgent>();
+                // 第 1 次与第 2 次（重试）均抛 HttpRequestException
+                agent.RunChatAsync(
+                        Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                    .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
+                        _ => throw new HttpRequestException("网络抖动 1"),
+                        _ => throw new HttpRequestException("网络抖动 2"));
+                mockAgent = agent;
+
+                var mockRouter = Substitute.For<ModelRouter>();
+                mockRouter.ActiveModel.Returns("qwen");
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(agent);
+                mockRouter.GetDefaultAgent().Returns(agent);
+                services.AddSingleton(mockRouter);
+            }));
+
+        using var client = f.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "你好"));
+        response.EnsureSuccessStatusCode();
+        var reply = await response.Content.ReadFromJsonAsync<ChatReply>();
+        Assert.NotNull(reply);
+        Assert.Contains("抱歉，暂时无法处理您的请求", reply!.Response);
+
+        // 兜底路径：RunChatAsync 恰好被调用 2 次（首次失败 + 一次重试，重试仍失败才兜底）
+        await mockAgent!.Received(2).RunChatAsync(
+            Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string?>(), Arg.Any<CancellationToken>());
+    }
+
     private sealed record ProductsResponse(ProductDto[] products);
 }
