@@ -41,7 +41,12 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>cec96733-9c44-43c8-9fb5-f0d4b7058233</UserSecretsId>
-    <InternalsVisibleTo>AIShop.Api.Tests</InternalsVisibleTo>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 测试缝：使 internal static BuildChatHttpPipeline 对测试程序集可见。
+         （property 形式的 <InternalsVisibleTo> 不生成 friend 特性，必须用 item 形式 Include） -->
+    <InternalsVisibleTo Include="AIShop.Api.Tests" />
+  </ItemGroup>
 
 </Project>

@@ -3,7 +3,9 @@ using AIShop.Core.StaticData;
 using AIShop.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Http.Resilience;
 using OpenAI;
+using Polly;
 using Serilog;
 using System.ClientModel;
 using System.ClientModel.Primitives;
@@ -133,9 +135,6 @@ public class ModelRouter
     {
         var handler = new HttpClientHandler { UseProxy = false, Proxy = null };
 
-        // 始终挂 DebugHandler，内部按开关透明转发：默认关闭（不打印、不读流），排查时 AgentTelemetry:DebugHandler=true 开启
-        var httpHandler = new DebugHandler(handler, _enableDebugHandler);
-
         // 统一路径：所有模型经 DeepSeekDelegatingChatClient 清洗 + 分流
         var isDeepSeek = cfg.Name.Contains("DeepSeek", StringComparison.OrdinalIgnoreCase);
 
@@ -145,7 +144,8 @@ public class ModelRouter
 
         if (isDeepSeek)
         {
-            var deepSeekHttpClient = new HttpClient(httpHandler) { Timeout = TimeSpan.FromSeconds(120) };
+            // DeepSeek 路径接入标准弹性策略（429/5xx/网络抖动自动重试）；DebugHandler 在管线内层、每次重试尝试可见
+            var deepSeekHttpClient = new HttpClient(BuildChatHttpPipeline(handler, _enableDebugHandler)) { Timeout = TimeSpan.FromSeconds(120) };
             deepSeekHttpClient.BaseAddress = new Uri(cfg.Endpoint + "/chat/completions");
             deepSeekHttpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {cfg.Key}");
 
@@ -155,7 +155,8 @@ public class ModelRouter
         }
         else
         {
-            var dehttpClient = new HttpClient(httpHandler) { Timeout = TimeSpan.FromSeconds(120) };
+            // OpenAI/Qwen 路径同样接入标准弹性策略；与 DeepSeek 各自构建、不共享同一 DelegatingHandler 实例
+            var dehttpClient = new HttpClient(BuildChatHttpPipeline(handler, _enableDebugHandler)) { Timeout = TimeSpan.FromSeconds(120) };
             var clientOptions = new OpenAIClientOptions
             {
                 Endpoint = new Uri(cfg.Endpoint),
@@ -174,6 +175,27 @@ public class ModelRouter
             .Build();
     }
 
- 
-    
+    /// <summary>
+    /// 构建自建 HttpClient 的 HTTP 管线（标准弹性策略 + DebugHandler 链）——T11 测试缝。
+    /// 外层 <see cref="ResilienceHandler"/> 承载标准弹性策略，内层 <see cref="DebugHandler"/> 按开关透明转发——
+    /// 因包在 ResilienceHandler 内层，每次重试尝试都可见，不破坏既有 DebugHandler 包装链。
+    /// DeepSeek 与 OpenAI/Qwen 两条路径各自调用本方法构建，不共享同一 DelegatingHandler 实例；
+    /// HttpClient.Timeout=120s 留在外层作硬天花板（&gt; 弹性 TotalRequestTimeout=110s，弹性先到点、外层兜底，无双重超时冲突）。
+    /// 注意：Microsoft.Extensions.Http.Resilience 10.7.0（ServiceDefaults 锁定）无
+    /// ResiliencePipelineBuilder.AddStandardResilienceHandler 重载（仅 IHttpClientBuilder 有），
+    /// 故用公开策略积木等效复现标准弹性——总请求超时（最外层）+ 标准 HTTP 重试 + 熔断。
+    /// </summary>
+    internal static HttpMessageHandler BuildChatHttpPipeline(HttpMessageHandler inner, bool enableDebugHandler)
+    {
+        var pipeline = new ResiliencePipelineBuilder<HttpResponseMessage>()
+            .AddTimeout(TimeSpan.FromSeconds(110))                      // TotalRequestTimeout=110s：整体预算，弹性先到点
+            .AddRetry(new HttpRetryStrategyOptions())                   // 标准重试：IsTransient（429/5xx/网络抖动）自动重试 ≤3 次
+            .AddCircuitBreaker(new HttpCircuitBreakerStrategyOptions()) // 标准熔断：持续失败时快速失败、防上游被打爆
+            .Build();
+
+        return new ResilienceHandler(pipeline)
+        {
+            InnerHandler = new DebugHandler(inner, enableDebugHandler)
+        };
+    }
 }
