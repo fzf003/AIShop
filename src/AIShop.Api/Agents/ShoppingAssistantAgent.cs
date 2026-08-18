@@ -125,7 +125,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             "search_product",
             "搜索商品。参数 keyword=商品关键词（如咖啡机、耳机）。用户提到商品名时调用。"));
 
-        var chartOptions = new ChatOptions { Tools = tools };
+        var chartOptions = new ChatOptions { Tools = tools, Reasoning = new() { Effort = ReasoningEffort.Medium } };
 
         // T10：Provider 存为字段（不只内联传给 ChatHistoryProvider）——
         // RunChatAsync 在 Run 正常返回后需调用 _provider.MarkRoundFinalAsync(runId) 兜底补标本轮终点
@@ -150,7 +150,8 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             DisableAgentSkillsProvider = true,
             DisableAgentModeProvider = true,
             DisableApprovalNotRequiredFunctionBypassing = false,
-     
+         
+
             AIContextProviders = [new PreferenceMemoryProvider()]
         };
 

@@ -3,7 +3,6 @@ using AIShop.AgentTelemetry;
 using AIShop.Api.Agents;
 using AIShop.Core.StaticData;
 using AIShop.Infrastructure.Data;
-using AIShop.Infrastructure.Entities;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
