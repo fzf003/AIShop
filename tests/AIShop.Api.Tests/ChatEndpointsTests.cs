@@ -927,5 +927,94 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
             Arg.Any<string?>(), Arg.Any<CancellationToken>());
     }
 
+    // ============ T13T2 非重试异常不重试测试（方案 A：确定性失败） ============
+
+    /// <summary>
+    /// T13T2 — mock RunChatAsync 抛 InvalidOperationException（非重试类型，IsRetryableAgentFailure→false）：
+    /// /api/chat 响应为兜底「抱歉，暂时无法处理您的请求，请重试。」、RunChatAsync 只被调用 1 次
+    /// （确定性失败不重试，保持既有 R11 行为，不进入 IsRetryableAgentFailure 重试分支）。
+    /// </summary>
+    [Fact]
+    public async Task ShouldReturnFallback_WhenRunChatThrowsInvalidOperationException()
+    {
+        IShoppingAssistantAgent? mockAgent = null;
+        WebApplicationFactory<Program>? f = null;
+        f = _factory.WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                ReplaceWithIsolatedDb(services, Guid.NewGuid().ToString("N"));
+                services.RemoveAll<ModelRouter>();
+
+                var agent = Substitute.For<IShoppingAssistantAgent>();
+                agent.RunChatAsync(
+                        Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                    .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
+                        _ => throw new InvalidOperationException("agent boom"));
+                mockAgent = agent;
+
+                var mockRouter = Substitute.For<ModelRouter>();
+                mockRouter.ActiveModel.Returns("qwen");
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(agent);
+                mockRouter.GetDefaultAgent().Returns(agent);
+                services.AddSingleton(mockRouter);
+            }));
+
+        using var client = f.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "你好"));
+        response.EnsureSuccessStatusCode();
+        var reply = await response.Content.ReadFromJsonAsync<ChatReply>();
+        Assert.NotNull(reply);
+        Assert.Contains("抱歉，暂时无法处理您的请求", reply!.Response);
+
+        // 非重试异常：RunChatAsync 只被调用 1 次（不重试）
+        await mockAgent!.Received(1).RunChatAsync(
+            Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string?>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// T13T2 — mock RunChatAsync 抛 KeyNotFoundException（模型不存在）：
+    /// /api/chat 响应为 400「不支持的模型」、RunChatAsync 只被调用 1 次
+    /// （T13 独立 catch 优先，不被重试逻辑覆盖，对应方案 A「KeyNotFoundException 不重试」）。
+    /// </summary>
+    [Fact]
+    public async Task ShouldReturnBadRequest_WhenRunChatThrowsKeyNotFoundException()
+    {
+        IShoppingAssistantAgent? mockAgent = null;
+        WebApplicationFactory<Program>? f = null;
+        f = _factory.WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                ReplaceWithIsolatedDb(services, Guid.NewGuid().ToString("N"));
+                services.RemoveAll<ModelRouter>();
+
+                var agent = Substitute.For<IShoppingAssistantAgent>();
+                agent.RunChatAsync(
+                        Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                    .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
+                        _ => throw new KeyNotFoundException("model not found"));
+                mockAgent = agent;
+
+                var mockRouter = Substitute.For<ModelRouter>();
+                mockRouter.ActiveModel.Returns("qwen");
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(agent);
+                mockRouter.GetDefaultAgent().Returns(agent);
+                services.AddSingleton(mockRouter);
+            }));
+
+        using var client = f.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "你好"));
+        Assert.Equal(400, (int)response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("不支持的模型", body.GetProperty("detail").GetString());
+
+        // 独立 catch 优先：RunChatAsync 只被调用 1 次（不重试）
+        await mockAgent!.Received(1).RunChatAsync(
+            Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string?>(), Arg.Any<CancellationToken>());
+    }
+
     private sealed record ProductsResponse(ProductDto[] products);
 }
