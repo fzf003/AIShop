@@ -1,3 +1,5 @@
+using System.ClientModel;
+using System.ClientModel.Primitives;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Diagnostics;
@@ -738,6 +740,95 @@ public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Pro
         var assistantMsgs = profile.History.Where(m => m.Role == "assistant").ToList();
         Assert.Contains(assistantMsgs, m => m.Content == "这是 Qwen 回复");
         Assert.Contains(assistantMsgs, m => m.Content == "这是 GPT 回复");
+    }
+
+    // ============ T12 重试分类器测试 ============
+
+    /// <summary>
+    /// T12 分类器基础判定：网络/超时/429/5xx → true；确定性失败 → false。
+    /// 用无参构造各异常类型（均有公共无参构造），ct 取未取消令牌。
+    /// </summary>
+    [Theory]
+    [InlineData(typeof(HttpRequestException), true)]      // 网络抖动 → 可重试
+    [InlineData(typeof(TimeoutException), true)]          // 超时 → 可重试
+    [InlineData(typeof(InvalidOperationException), false)] // 确定性失败 → 不重试
+    [InlineData(typeof(KeyNotFoundException), false)]     // 模型不存在 → 不落入分类器（T13 独立 catch 优先）
+    public void IsRetryableAgentFailure_ClassifiesByExceptionType(Type exceptionType, bool expected)
+    {
+        var ex = (Exception)Activator.CreateInstance(exceptionType)!;
+        Assert.Equal(expected, ChatEndpoints.IsRetryableAgentFailure(ex, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// T12 TaskCanceledException 语义：调用方 ct 未取消时视为 HttpClient 超时（内部超时触发）→ 可重试。
+    /// </summary>
+    [Fact]
+    public void IsRetryableAgentFailure_TaskCanceledWithoutCallerCancellation_IsTrue()
+    {
+        var ex = new TaskCanceledException();
+        Assert.True(ChatEndpoints.IsRetryableAgentFailure(ex, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// T12 TaskCanceledException 语义：调用方 ct 已取消时是调用方主动取消，非可重试失败 → false。
+    /// </summary>
+    [Fact]
+    public void IsRetryableAgentFailure_TaskCanceledByCallerToken_IsFalse()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var ex = new TaskCanceledException();
+        Assert.False(ChatEndpoints.IsRetryableAgentFailure(ex, cts.Token));
+    }
+
+    /// <summary>T12 OpenAI/Qwen 路径 ClientResultException：429（限流）→ 可重试。</summary>
+    [Fact]
+    public void IsRetryableAgentFailure_ClientResult429_IsTrue()
+    {
+        var ex = new ClientResultException(new StubPipelineResponse(429), null);
+        Assert.True(ChatEndpoints.IsRetryableAgentFailure(ex, CancellationToken.None));
+    }
+
+    /// <summary>T12 OpenAI/Qwen 路径 ClientResultException：5xx（服务端错误）→ 可重试。</summary>
+    [Fact]
+    public void IsRetryableAgentFailure_ClientResult503_IsTrue()
+    {
+        var ex = new ClientResultException(new StubPipelineResponse(503), null);
+        Assert.True(ChatEndpoints.IsRetryableAgentFailure(ex, CancellationToken.None));
+    }
+
+    /// <summary>T12 OpenAI/Qwen 路径 ClientResultException：4xx 非 429（如 400 请求错误）→ 不重试。</summary>
+    [Fact]
+    public void IsRetryableAgentFailure_ClientResult400_IsFalse()
+    {
+        var ex = new ClientResultException(new StubPipelineResponse(400), null);
+        Assert.False(ChatEndpoints.IsRetryableAgentFailure(ex, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// T12 测试辅助：构造 <see cref="ClientResultException"/> 所需的最小 <see cref="PipelineResponse"/> 桩。
+    /// 该版本的 ClientResultException 通过 PipelineResponse.Status 暴露状态码（无 (int, Response) 构造），
+    /// 用显式子类而非 NSubstitute（Headers 为 protected 抽象，mock 设置繁琐）。
+    /// </summary>
+    private sealed class StubPipelineResponse(int status) : PipelineResponse
+    {
+        public override int Status => status;
+        public override string ReasonPhrase => "";
+        public override Stream? ContentStream { get; set; }
+        public override BinaryData Content => BinaryData.Empty;
+        public override bool IsError => status >= 400;
+        public override void Dispose() { }
+        public override BinaryData BufferContent(CancellationToken cancellationToken = default) => BinaryData.Empty;
+        public override ValueTask<BinaryData> BufferContentAsync(CancellationToken cancellationToken = default) => new(BinaryData.Empty);
+        protected override PipelineResponseHeaders HeadersCore => new StubHeaders();
+        protected override bool IsErrorCore => status >= 400;
+
+        private sealed class StubHeaders : PipelineResponseHeaders
+        {
+            public override bool TryGetValue(string name, out string value) { value = ""; return false; }
+            public override bool TryGetValues(string name, out IEnumerable<string>? values) { values = null; return false; }
+            public override IEnumerator<KeyValuePair<string, string>> GetEnumerator() { yield break; }
+        }
     }
 
     private sealed record ProductsResponse(ProductDto[] products);

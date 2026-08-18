@@ -1,3 +1,4 @@
+using System.ClientModel;
 using System.Diagnostics;
 using AIShop.Api.Agents;
 using AIShop.Core.Entities;
@@ -331,6 +332,25 @@ public static class ChatEndpoints
         api.MapGet("/products", (IProductRepository products) =>
             Results.Ok(new { products = products.GetAll() }));
     }
+
+    /// <summary>
+    /// 判断 Agent 调用失败是否值得应用层重试（T12，方案 A 分类器）。
+    /// 网络抖动（<see cref="HttpRequestException"/>）/ 超时（<see cref="TimeoutException"/>）/
+    /// HttpClient 超时（<see cref="TaskCanceledException"/> 且调用方 ct 未取消）/
+    /// OpenAI·Qwen 路径的 429 与 5xx（<see cref="ClientResultException"/>）
+    /// 属临时性失败 → 值得重试；其余（含 <see cref="InvalidOperationException"/>、协议/解析类错误）
+    /// 为确定性失败 → 不重试。
+    /// <see cref="KeyNotFoundException"/> 不落入本分类器：T13 中由更前的独立 catch 优先处理（400「不支持的模型」），不重试。
+    /// </summary>
+    internal static bool IsRetryableAgentFailure(Exception ex, CancellationToken ct) =>
+        ex switch
+        {
+            HttpRequestException => true,                                    // 网络抖动
+            TimeoutException => true,                                        // 超时
+            TaskCanceledException when !ct.IsCancellationRequested => true,   // HttpClient 超时（调用方 ct 未取消）
+            ClientResultException cre => cre.Status is 429 or >= 500,         // OpenAI/Qwen 路径 429 或 5xx
+            _ => false,                                                      // 其余（含 InvalidOperationException、KeyNotFoundException）
+        };
 
     private static ProductDto ToDto(Product p) => new(p.Id, p.Name, p.Category, p.Tags, p.Price, p.Emoji);
 
