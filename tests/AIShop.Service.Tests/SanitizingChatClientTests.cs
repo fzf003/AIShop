@@ -1,7 +1,8 @@
 using System.Reflection;
 using AIShop.AgentTelemetry;
-using AIShop.Api.Agents;
-using AIShop.Api.Features.Chat;
+using AIShop.Service;
+using AIShop.Service.Clients;
+using AIShop.Service.Tools;
 using AIShop.Core.StaticData;
 using AIShop.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
@@ -10,7 +11,7 @@ using Microsoft.Extensions.DependencyInjection;
 using NSubstitute;
 using ChatMessage = Microsoft.Extensions.AI.ChatMessage;
 
-namespace AIShop.Api.Tests;
+namespace AIShop.Service.Tests;
 
 public sealed class SanitizingChatClientTests
 {

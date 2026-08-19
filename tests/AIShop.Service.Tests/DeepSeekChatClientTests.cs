@@ -1,9 +1,9 @@
-using AIShop.Api.Agents;
+using AIShop.Service.Clients;
 using Microsoft.Extensions.AI;
 using System.Diagnostics;
 using System.Net;
 
-namespace AIShop.Api.Tests;
+namespace AIShop.Service.Tests;
 
 /// <summary>
 /// R10/R10.1 — DeepSeekChatClient 实现 IChatClient.Metadata 并经 GetService 暴露：

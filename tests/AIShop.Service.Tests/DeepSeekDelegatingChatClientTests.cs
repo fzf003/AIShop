@@ -1,11 +1,11 @@
 using System.Reflection;
 using System.Diagnostics;
 using System.Net;
-using AIShop.Api.Agents;
+using AIShop.Service.Clients;
 using Microsoft.Extensions.AI;
 using NSubstitute;
 
-namespace AIShop.Api.Tests;
+namespace AIShop.Service.Tests;
 
 /// <summary>
 /// T31/T32：DeepSeek 直发路径 BuildApiMessages 的并行工具结果修复测试。

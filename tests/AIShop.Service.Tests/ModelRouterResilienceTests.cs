@@ -1,10 +1,11 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using AIShop.Api.Agents;
+using AIShop.Service;
+using AIShop.Service.Clients;
 using Microsoft.Extensions.Http.Resilience;
 
-namespace AIShop.Api.Tests;
+namespace AIShop.Service.Tests;
 
 /// <summary>
 /// T11T — ModelRouter.BuildChatHttpPipeline 标准弹性策略测试。

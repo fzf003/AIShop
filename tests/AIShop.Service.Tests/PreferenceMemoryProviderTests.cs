@@ -1,11 +1,11 @@
 #pragma warning disable MAAI001
 using System.Reflection;
-using AIShop.Api.Agents;
+using AIShop.Service.Providers;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using NSubstitute;
 
-namespace AIShop.Api.Tests;
+namespace AIShop.Service.Tests;
 
 public sealed class PreferenceMemoryProviderTests
 {
