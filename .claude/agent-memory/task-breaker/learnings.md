@@ -17,6 +17,7 @@
 | 2026-08-18 | chat-round-boundary（勾选回灌） | Step 4 完成 24 工单 + Step 5 清理工单 | - | - | - | 24 工单已实施（git log 24 commit + handoffs 24 文件），但 implementer 写 tasks.md 被 check_openspec_gate.py 拦截（tasks.md 仅 task-breaker 可写）→ 由 task-breaker 回灌勾选 [x]；Step 5 评审发现 ShoppingAssistantAgentRunTests.cs 第 6 行 unused using（CS8019）→ 新增 T-FIX-1（blockedBy: 无，独立最后跑）并同步 DAG |
 | 2026-08-18 | chat-round-boundary（追加 Phase 6） | 方案 A+C 追加拆解（7 工单：实现 3 + 测试 4） | 实现 26min（T11 10 + T12 6 + T13 10）/ 测试 38min（T11T 10 + T12T 8 + T13T1 10 + T13T2 10）合计约 64min | -（已实施，未逐项计时回填） | - | 基于 docs/design/agent-failure-handling-design.md §3 已定稿的 A/C 方案直接拆解，无需重新发现；A 按「分类器 → catch 重构」自然边界拆两个实现工单（分类判定与控制流可独立验收），C 保持单工单（设计文档标注"一行接线"）；T11 与 T12 不同文件（ModelRouter.cs vs ChatEndpoints.cs）无 blocking edge 可并行；方案 B 明确存档不实施，不占工单 |
 | 2026-08-18 | chat-round-boundary（追加 Phase 6 勾选回灌） | 7 工单已实施 + 回灌勾选 | -（沿用上文 64min 拆解预估） | -（未逐项计时） | - | 依据：git log 7 commit（T11/T11T/T12/T12T/T13/T13T1/T13T2）+ handoffs/ 7 handoff 文件齐全；implementer 勾选 tasks.md 被 check_gateway.py 规则 4 拦截（tasks.md 仅限 @task-breaker 编辑）→ 由 task-breaker 回灌 [x] 并更新实施状态行为「已全部实施完成（7 commit + 7 handoff 齐全）」；各 handoff 均报告 build 0 错 0 警 + 对应测试类全量通过（ChatEndpointsTests 32/32、ModelRouterResilienceTests 新增用例等），无阻塞遗留 |
+| 2026-08-19 | service-layer-extraction | 17 工单拆解（项目骨架/MAF 2 + 源文件迁移 5 + Api 清理 1 + 测试项目与测试迁移 7 + 全量验证 1 + 文档 1） | 147min | - | - | 迁移型变更拆解要点：迁移顺序按依赖逆序（Clients→Providers→Tools→根目录组）每步同步改 Api 侧剩余 using；Api 加 Service ProjectReference 先于 AgentChatResult 随迁；WAF 集成段与纯单元段按 design §7.2 拆类避免 Service.Tests→Api；MAF 1.18 API 兼容风险实际在迁移工单暴露 |
 
 ## 任务粒度经验
 
