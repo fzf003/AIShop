@@ -8,6 +8,7 @@ using AIShop.Api.Agents;
 using AIShop.Api.Features.Chat;
 using AIShop.Core.StaticData;
 using AIShop.Infrastructure.Data;
+using AIShop.Service;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;

@@ -1,4 +1,4 @@
-using AIShop.Api.Features.Chat;
+using AIShop.Service;
 using Microsoft.Agents.AI;
 
 namespace AIShop.Api.Agents;

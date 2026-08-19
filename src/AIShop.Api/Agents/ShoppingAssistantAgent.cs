@@ -1,7 +1,7 @@
 #pragma warning disable MAAI001
 using AIShop.AgentTelemetry;
-using AIShop.Api.Features.Chat;
 using AIShop.Infrastructure.Data;
+using AIShop.Service;
 using Microsoft.Agents.AI;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
