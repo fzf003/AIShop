@@ -5,6 +5,8 @@
     <ProjectReference Include="..\AIShop.Infrastructure\AIShop.Infrastructure.csproj" />
     <ProjectReference Include="..\AIShop.ServiceDefaults\AIShop.ServiceDefaults.csproj" />
     <ProjectReference Include="..\AIShop.AgentTelemetry\AIShop.AgentTelemetry.csproj" />
+    <!-- T1: Service 层抽取（Agent 逻辑随迁）。4 个 MAF/DeepSeek 包本工单不移除，T8 处理 -->
+    <ProjectReference Include="..\AIShop.Service\AIShop.Service.csproj" />
   </ItemGroup>
 
   <ItemGroup>

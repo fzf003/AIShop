@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\AIShop.Core\AIShop.Core.csproj" />
+    <ProjectReference Include="..\AIShop.Infrastructure\AIShop.Infrastructure.csproj" />
+    <ProjectReference Include="..\AIShop.AgentTelemetry\AIShop.AgentTelemetry.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- T1 随迁初始版本：MAF 升级到 1.18.0 由 T2 独立完成（D5）；DeepSeek.Agents.AI 1.0.4 保持不变 -->
+    <PackageReference Include="DeepSeek.Agents.AI" Version="1.0.4" />
+    <PackageReference Include="Microsoft.Agents.AI" Version="1.17.0" />
+    <PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.17.0" />
+    <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.17.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 测试缝：使 internal static ModelRouter.BuildChatHttpPipeline 等对 Service.Tests 可见。
+         （property 形式的 <InternalsVisibleTo> 不生成 friend 特性，必须用 item 形式 Include） -->
+    <InternalsVisibleTo Include="AIShop.Service.Tests" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>
