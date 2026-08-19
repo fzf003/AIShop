@@ -7,7 +7,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Agents.AI" Version="1.17.0" />
+    <PackageReference Include="Microsoft.Agents.AI" Version="1.18.0" />
     <!-- DebugTelemetry 扩展：FileSpanExporter（BaseExporter<Activity>）/ SimpleActivityExportProcessor / HttpClientInstrumentation EnrichWith 回调所需
          版本与 AIShop.ServiceDefaults 既有 OTel 版本对齐（顶层 OpenTelemetry 1.15.2），避免版本冲突 -->
     <PackageReference Include="OpenTelemetry" Version="1.15.2" />

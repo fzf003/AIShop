@@ -8,11 +8,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- T1 随迁初始版本：MAF 升级到 1.18.0 由 T2 独立完成（D5）；DeepSeek.Agents.AI 1.0.4 保持不变 -->
+    <!-- MAF 三包 1.18.0（T2 升级，D5）；DeepSeek.Agents.AI 1.0.4 保持不变（实测与 1.18 兼容） -->
     <PackageReference Include="DeepSeek.Agents.AI" Version="1.0.4" />
-    <PackageReference Include="Microsoft.Agents.AI" Version="1.17.0" />
-    <PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.17.0" />
-    <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.17.0" />
+    <PackageReference Include="Microsoft.Agents.AI" Version="1.18.0" />
+    <PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.18.0" />
+    <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.18.0" />
   </ItemGroup>
 
   <ItemGroup>

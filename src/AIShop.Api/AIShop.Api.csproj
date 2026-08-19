@@ -12,9 +12,10 @@
   <ItemGroup>
     <PackageReference Include="DeepSeek.Agents.AI" Version="1.0.4" />
     <PackageReference Include="DotNetEnv" Version="3.2.0" />
-    <PackageReference Include="Microsoft.Agents.AI" Version="1.17.0" />
-    <PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.17.0" />
-    <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.17.0" />
+    <!-- T2 MAF 升级联动：与 Service/AgentTelemetry 统一 1.18.0（避免 NU1605 包降级与双版本绑定冲突）；4 包移除仍归 T8 -->
+    <PackageReference Include="Microsoft.Agents.AI" Version="1.18.0" />
+    <PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.18.0" />
+    <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.18.0" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.11" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
