@@ -13,9 +13,13 @@ using Xunit.Sdk;
 namespace AIShop.Api.Tests;
 
 /// <summary>
-/// T14 测试集合定义：本类用 in-memory SQLite 共享连接直测 hosted service（worker 写 + 轮询读同一连接），
+/// T14 测试集合定义：本类用临时文件库直测 hosted service（worker 写 + 轮询读走独立连接），
 /// 置于 DisableParallelization 串行集合，避免全量并行时与其它测试类的连接/宿主竞争触发
 /// SqliteConnection 清理竞态（DisposeAsync 中 Close 抛 NRE）。
+/// 注（T16 全量验证修复）：原实现用 in-memory 共享 SqliteConnection（DataSource=:memory:），
+/// worker 后台线程与轮询主线程并发访问同一连接会触发 Microsoft.Data.Sqlite 单连接
+/// 非线程安全竞态（DisposeAsync/轮询 DbContext 偶发 NRE），改为临时文件库 + 各 context
+/// 独立连接后消除。
 /// </summary>
 [CollectionDefinition(nameof(PreferenceWriteHostedServiceTests), DisableParallelization = true)]
 public sealed class PreferenceWriteHostedServiceTestsCollection;
@@ -28,7 +32,7 @@ public sealed class PreferenceWriteHostedServiceTestsCollection;
 [Collection(nameof(PreferenceWriteHostedServiceTests))]
 public sealed class PreferenceWriteHostedServiceTests : IAsyncLifetime
 {
-    private readonly SqliteConnection _connection;
+    private readonly string _dbFile;
     private readonly TestDbContextFactory _dbFactory;
     private readonly PreferenceQueue _queue;
     private readonly ILogger<PreferenceWriteHostedService> _logger;
@@ -36,10 +40,11 @@ public sealed class PreferenceWriteHostedServiceTests : IAsyncLifetime
 
     public PreferenceWriteHostedServiceTests()
     {
-        _connection = new SqliteConnection("DataSource=:memory:");
-        _connection.Open();
+        // 临时文件库 + 各 DbContext 独立连接（而非 in-memory 共享连接），消除 worker 线程写与
+        // 轮询线程读并发访问同一 SqliteConnection 的非线程安全竞态（T16 全量验证修复）。
+        _dbFile = Path.Combine(Path.GetTempPath(), $"pref_{Guid.NewGuid():N}.db");
         var options = new DbContextOptionsBuilder<AppDbContext>()
-            .UseSqlite(_connection)
+            .UseSqlite($"Data Source={_dbFile}")
             .Options;
 
         using (var ctx = new AppDbContext(options))
@@ -65,7 +70,11 @@ public sealed class PreferenceWriteHostedServiceTests : IAsyncLifetime
             await _service.StopAsync(CancellationToken.None);
             _service.Dispose();
         }
-        await _connection.DisposeAsync();
+        SqliteConnection.ClearAllPools();
+        if (File.Exists(_dbFile))
+        {
+            File.Delete(_dbFile);
+        }
     }
 
     /// <summary>
@@ -221,8 +230,9 @@ public sealed class PreferenceWriteHostedServiceTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// 短生命周期上下文工厂：所有上下文共享同一 SqliteConnection（in-memory 库按连接隔离），
-    /// 供 hosted service 与轮询读取使用（模拟 IDbContextFactory 短生命周期语义）。
+    /// 短生命周期上下文工厂：各 DbContext 经 options 指向同一临时文件库（EF 每上下文自建连接，
+    /// Microsoft.Data.Sqlite 连接池复用），供 hosted service 与轮询读取使用
+    /// （模拟 IDbContextFactory 短生命周期语义）。
     /// </summary>
     private sealed class TestDbContextFactory(DbContextOptions<AppDbContext> options) : IDbContextFactory<AppDbContext>
     {
