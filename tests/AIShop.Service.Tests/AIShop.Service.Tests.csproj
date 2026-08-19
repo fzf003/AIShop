@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <!-- T10：迁入的 6 个 WAF 端点测试类（ChatPreference*/ChatRecommendation*/ChatReplySanitization）
+         用 WebApplicationFactory<Program>，须引 Mvc.Testing 包 + AIShop.Api（Program/Features.Chat DTO）。
+         说明：design §7.2 原约定 Service.Tests 不引 Api，但协调者 T10 指令明确这 6 个类整体迁入 Service.Tests
+         且「6 类全绿」为验收，故 Service.Tests → Api → Service 是必要支撑改动（无环），偏差见 handoff-T10。 -->
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.9" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="NSubstitute" Version="5.3.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\AIShop.Api\AIShop.Api.csproj" />
+    <ProjectReference Include="..\..\src\AIShop.Service\AIShop.Service.csproj" />
+    <ProjectReference Include="..\..\src\AIShop.Infrastructure\AIShop.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\AIShop.AgentTelemetry\AIShop.AgentTelemetry.csproj" />
+  </ItemGroup>
+
+</Project>

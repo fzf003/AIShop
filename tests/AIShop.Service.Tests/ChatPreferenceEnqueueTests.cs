@@ -2,7 +2,9 @@
 using System.Net.Http.Json;
 using System.Text.Json;
 using AIShop.AgentTelemetry;
-using AIShop.Api.Agents;
+using AIShop.Service;
+using AIShop.Service.Clients;
+using AIShop.Service.Tools;
 using AIShop.Api.Features.Chat;
 using AIShop.Core.Entities;
 using AIShop.Core.Interfaces;
@@ -17,7 +19,7 @@ using NSubstitute;
 using Xunit.Sdk;
 using Meai = Microsoft.Extensions.AI;
 
-namespace AIShop.Api.Tests;
+namespace AIShop.Service.Tests;
 
 /// <summary>
 /// T20 测试集合定义：串行执行，避免与 ServiceDefaultsDebugTests 等并行宿主竞争。

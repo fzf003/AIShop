@@ -2,7 +2,9 @@
 using System.Net.Http.Json;
 using System.Text.RegularExpressions;
 using AIShop.AgentTelemetry;
-using AIShop.Api.Agents;
+using AIShop.Service;
+using AIShop.Service.Clients;
+using AIShop.Service.Tools;
 using AIShop.Api.Features.Chat;
 using AIShop.Core.StaticData;
 using AIShop.Infrastructure.Data;
@@ -14,7 +16,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using NSubstitute;
 using Meai = Microsoft.Extensions.AI;
 
-namespace AIShop.Api.Tests;
+namespace AIShop.Service.Tests;
 
 /// <summary>
 /// R4 测试集合定义：串行执行，避免与 ServiceDefaultsDebugTests 等并行宿主竞争。
