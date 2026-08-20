@@ -1,7 +1,8 @@
 #pragma warning disable MAAI001
 using AIShop.AgentTelemetry;
 using AIShop.Infrastructure.Data;
-using AIShop.Service;
+using AIShop.Service.Providers;
+using AIShop.Service.Tools;
 using Microsoft.Agents.AI;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
@@ -10,7 +11,7 @@ using System.Diagnostics;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 
-namespace AIShop.Api.Agents;
+namespace AIShop.Service;
 
 public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 {

@@ -3,10 +3,12 @@ using AIShop.Core.Interfaces;
 using AIShop.Core.StaticData;
 using AIShop.Infrastructure;
 using AIShop.Infrastructure.Data;
-using AIShop.Api.Agents;
 using AIShop.Api.Features.Cart;
 using AIShop.Api.Features.Chat;
 using AIShop.Api.Middleware;
+using AIShop.Service;
+using AIShop.Service.Providers;
+using AIShop.Service.Tools;
 using Microsoft.EntityFrameworkCore;
 using System.ClientModel;
 using System.ClientModel.Primitives;
@@ -42,7 +44,7 @@ try
     builder.Services.AddSwaggerGen();
     builder.Services.AddInfrastructure();
 
-    // Register Agent definitions (Api/Agents/)
+    // Register Agent definitions (AIShop.Service/)
     builder.Services.AddScoped<SqliteChatHistoryProvider>();
     builder.Services.AddSingleton<CartToolProvider>();
     builder.Services.AddSingleton<ModelRouter>();

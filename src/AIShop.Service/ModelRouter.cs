@@ -1,8 +1,12 @@
 using AIShop.AgentTelemetry;
 using AIShop.Core.StaticData;
 using AIShop.Infrastructure.Data;
+using AIShop.Service.Clients;
+using AIShop.Service.Tools;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Http.Resilience;
 using OpenAI;
 using Polly;
@@ -12,7 +16,7 @@ using System.ClientModel.Primitives;
 using System.Collections.Concurrent;
 using System.Net.Sockets;
 
-namespace AIShop.Api.Agents;
+namespace AIShop.Service;
 
 public record ModelInfo(string Id, string Name, bool IsDefault);
 

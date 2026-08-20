@@ -4,7 +4,7 @@ using OpenAI.Chat;
 using Serilog;
 using ChatMessage = Microsoft.Extensions.AI.ChatMessage;
 
-namespace AIShop.Api.Agents;
+namespace AIShop.Service.Clients;
 
 /// <summary>
 /// 修复非 OpenAI 模型（Qwen/DeepSeek）的 FunctionCallContent 兼容性问题。

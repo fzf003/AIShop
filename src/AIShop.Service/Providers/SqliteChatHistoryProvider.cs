@@ -8,7 +8,7 @@ using AIShop.Infrastructure.Entities;
 using Serilog;
 using AgentChatMessage = Microsoft.Extensions.AI.ChatMessage;
 
-namespace AIShop.Api.Agents;
+namespace AIShop.Service.Providers;
 
 /// <summary>
 /// 基于 EF Core + SQLite 的 ChatHistoryProvider。

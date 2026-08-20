@@ -17,7 +17,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using NSubstitute;
 using Meai = Microsoft.Extensions.AI;
 
-namespace AIShop.Service.Tests;
+namespace AIShop.Api.Tests;
 
 /// <summary>
 /// R2 (P2-4) 测试集合定义：串行执行，避免与 ServiceDefaultsDebugTests 等并行宿主竞争。

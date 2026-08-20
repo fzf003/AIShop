@@ -1,7 +1,7 @@
 using System.Runtime.CompilerServices;
 using Microsoft.Extensions.AI;
 
-namespace AIShop.Api.Agents;
+namespace AIShop.Service.Clients;
 
 /// <summary>
 /// 发前清洗管线装饰器（IChatClient），在消息发给 LLM 前执行 4 步清洗：

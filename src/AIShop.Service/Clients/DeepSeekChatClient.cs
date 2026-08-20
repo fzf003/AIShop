@@ -4,7 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Diagnostics;
 using Microsoft.Extensions.AI;
 
-namespace AIShop.Api.Agents;
+namespace AIShop.Service.Clients;
 
 /// <summary>
 /// DeepSeek 专用 IChatClient，直接通过 HTTP API 调用，不经过 OpenAIChatClient。

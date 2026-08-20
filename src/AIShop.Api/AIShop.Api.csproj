@@ -5,17 +5,12 @@
     <ProjectReference Include="..\AIShop.Infrastructure\AIShop.Infrastructure.csproj" />
     <ProjectReference Include="..\AIShop.ServiceDefaults\AIShop.ServiceDefaults.csproj" />
     <ProjectReference Include="..\AIShop.AgentTelemetry\AIShop.AgentTelemetry.csproj" />
-    <!-- T1: Service 层抽取（Agent 逻辑随迁）。4 个 MAF/DeepSeek 包本工单不移除，T8 处理 -->
+    <!-- T1: Service 层抽取（Agent 逻辑随迁）。T8：MAF/DeepSeek 包移除，仅由 Service/AgentTelemetry 引用 -->
     <ProjectReference Include="..\AIShop.Service\AIShop.Service.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="DeepSeek.Agents.AI" Version="1.0.4" />
     <PackageReference Include="DotNetEnv" Version="3.2.0" />
-    <!-- T2 MAF 升级联动：与 Service/AgentTelemetry 统一 1.18.0（避免 NU1605 包降级与双版本绑定冲突）；4 包移除仍归 T8 -->
-    <PackageReference Include="Microsoft.Agents.AI" Version="1.18.0" />
-    <PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.18.0" />
-    <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.18.0" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.11" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>

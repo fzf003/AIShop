@@ -28,7 +28,7 @@ paths: src/**, tests/**
 - Core 零依赖：AIShop.Core 不引用其他项目，仅引用 Microsoft.Agents.Core
 - 垂直切片：新增功能在 Api/Features/{功能名}/ 下创建切片目录
 - 端点模式：扩展方法 static void Map{功能名}Endpoints(this WebApplication app)
-- Agent 分离：Agent 定义在 Api/Agents/，端点逻辑在 Features/
+- Agent 分离：Agent 定义在 AIShop.Service/，端点逻辑在 Api/Features/
 - DI 批量注册：Infrastructure 通过 AddInfrastructure() 扩展方法统一注册
 - 涉及 MAF 代码时，先调用 /maf-reference 获取准确 API 签名
 

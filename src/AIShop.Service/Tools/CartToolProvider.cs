@@ -1,7 +1,8 @@
 using System.ComponentModel;
 using AIShop.Core.Interfaces;
+using Microsoft.Extensions.DependencyInjection;
 
-namespace AIShop.Api.Agents;
+namespace AIShop.Service.Tools;
 
 /// <summary>
 /// 提供购物车操作工具函数，供 AI Agent 调用。

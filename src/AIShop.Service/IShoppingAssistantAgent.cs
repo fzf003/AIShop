@@ -1,7 +1,6 @@
-using AIShop.Service;
 using Microsoft.Agents.AI;
 
-namespace AIShop.Api.Agents;
+namespace AIShop.Service;
 
 public interface IShoppingAssistantAgent
 {

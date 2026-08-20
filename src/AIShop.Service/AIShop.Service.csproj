@@ -16,6 +16,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- T7 迁移 ModelRouter 到 Service：自建 HttpClient 管线（标准弹性策略）所需；
+         版本与 AIShop.ServiceDefaults 对齐（10.7.0），传递引入 Polly / Microsoft.Extensions.Configuration / DI 抽象 -->
+    <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="10.7.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- 测试缝：使 internal static ModelRouter.BuildChatHttpPipeline 等对 Service.Tests 可见。
          （property 形式的 <InternalsVisibleTo> 不生成 friend 特性，必须用 item 形式 Include） -->
     <InternalsVisibleTo Include="AIShop.Service.Tests" />

@@ -1,7 +1,7 @@
 using System.Text;
 using Serilog;
 
-namespace AIShop.Api.Agents;
+namespace AIShop.Service.Clients;
 
 /// <summary>
 /// 调试 Handler：拦截 MEAI 发给 LLM 的 HTTP 请求，打印完整请求/响应体。

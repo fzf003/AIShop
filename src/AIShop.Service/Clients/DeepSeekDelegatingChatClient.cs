@@ -4,7 +4,7 @@ using System.Diagnostics;
 using Microsoft.Extensions.AI;
 using Serilog;
 
-namespace AIShop.Api.Agents;
+namespace AIShop.Service.Clients;
 
 /// <summary>
 /// 统一 IChatClient 中间件，继承 DelegatingChatClient，所有模型共用。

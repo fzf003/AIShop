@@ -4,11 +4,12 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Diagnostics;
 using AIShop.AgentTelemetry;
-using AIShop.Api.Agents;
 using AIShop.Api.Features.Chat;
 using AIShop.Core.StaticData;
 using AIShop.Infrastructure.Data;
 using AIShop.Service;
+using AIShop.Service.Clients;
+using AIShop.Service.Tools;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -18,11 +19,11 @@ using Meai = Microsoft.Extensions.AI;
 
 namespace AIShop.Api.Tests;
 
-public sealed class ChatEndpointsTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<Program>>
 {
     private readonly WebApplicationFactory<Program> _factory;
 
-    public ChatEndpointsTests(WebApplicationFactory<Program> factory)
+    public ChatEndpointsWebTests(WebApplicationFactory<Program> factory)
     {
         WebApplicationFactory<Program>? newFactory = null;
 

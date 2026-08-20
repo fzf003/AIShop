@@ -2,7 +2,7 @@
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 
-namespace AIShop.Api.Agents;
+namespace AIShop.Service.Providers;
 
 /// <summary>
 /// 会话偏好记忆 Provider — 在同一会话中自动注入已记住的用户偏好。

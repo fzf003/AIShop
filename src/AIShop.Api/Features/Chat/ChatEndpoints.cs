@@ -1,6 +1,5 @@
 using System.ClientModel;
 using System.Diagnostics;
-using AIShop.Api.Agents;
 using AIShop.Core.Entities;
 using AIShop.Service;
 using AIShop.Core.Interfaces;
