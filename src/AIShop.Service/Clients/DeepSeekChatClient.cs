@@ -1,7 +1,9 @@
-using System.Text.Json;
-using System.Text.Json.Serialization;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.AI;
 
 namespace AIShop.Service.Clients;
@@ -49,133 +51,11 @@ public sealed class DeepSeekChatClient : IChatClient
         IEnumerable<ChatMessage> messages, ChatOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        var messagesList = messages.ToList();
-
-        // 1. 构建 DeepSeek API 请求体（原生 JSON，不依赖 SDK 序列化）
-        var apiMessages = new List<object>();
-
-        foreach (var msg in messagesList)
-        {
-            var role = msg.Role.ToString()?.ToLower() ?? "user";
-            var content = string.Join("", msg.Contents.OfType<TextContent>().Select(t => t.Text));
-
-            var apiMsg = new Dictionary<string, object?>
-            {
-                ["role"] = role,
-                ["content"] = string.IsNullOrEmpty(content) ? null : content,
-            };
-
-            // tool_calls：assistant 消息中的 FunctionCallContent
-            var fccs = msg.Contents.OfType<FunctionCallContent>().ToList();
-            if (fccs.Count > 0)
-            {
-                var toolCalls = fccs.Select(fcc => new
-                {
-                    id = fcc.CallId,
-                    type = "function",
-                    function = new
-                    {
-                        name = fcc.Name,
-                        arguments = fcc.Arguments is not null
-                            ? JsonSerializer.Serialize(fcc.Arguments, JsonOptions)
-                            : "{}"
-                    }
-                }).ToList();
-                apiMsg["tool_calls"] = toolCalls;
-            }
-
-            // tool_call_id：tool 消息中的 FunctionResultContent
-            var frc = msg.Contents.OfType<FunctionResultContent>().FirstOrDefault();
-            if (frc is not null)
-            {
-                apiMsg["tool_call_id"] = frc.CallId;
-                apiMsg["content"] = frc.Result?.ToString() ?? "";
-            }
-
-            // 去掉 content=null（tool 消息的 content 可以为空）
-            // content=null 时 DeepSeek 报 "missing field content"
-            if (!apiMsg.ContainsKey("content") || (apiMsg["content"] is null && role != "tool"))
-                apiMsg["content"] = "";
-
-            // 但 tool 消息必须保留 content 字段（可以空字符串）
-            // 已经统一在上面保证了 content 不为 null
-
-            // reasoning_content：从 TextReasoningContent 提取
-            var reasoning = string.Join("", msg.Contents.OfType<TextReasoningContent>().Select(t => t.Text));
-            if (!string.IsNullOrEmpty(reasoning))
-            {
-                apiMsg["reasoning_content"] = reasoning;
-            }
-            // 或者从历史记录匹配（FICC 可能重建了消息，丢了 TextReasoningContent）
-            else if (fccs.Count > 0)
-            {
-                var callId = fccs[0].CallId;
-                if (_reasoningByCallId.TryGetValue(callId, out var savedReasoning) && savedReasoning is not null)
-                    apiMsg["reasoning_content"] = savedReasoning;
-            }
-
-            // 如果是 tool 角色但前面有 assistant 带着 reasoning，把 reasoning 带到 tool 消息的前一条
-            // 因为 DeepSeek 检查的是 HISTORY 中 assistant 消息的 reasoning_content
-
-            // 去掉 null content
-            if (apiMsg["content"] is null && !apiMsg.ContainsKey("tool_calls"))
-                apiMsg.Remove("content");
-
-            apiMessages.Add(apiMsg);
-        }
-
-        // 构建完整请求
-        var toolsList = new List<object>();
-        if (options?.Tools is not null)
-        {
-            foreach (var tool in options.Tools)
-            {
-                if (tool is AIFunction aFunc)
-                {
-                    // 直接从 AIFunction.JsonSchema 获取原生 JSON Schema（object 类型）
-                    object? parameters = null;
-                    var schemaElement = aFunc.JsonSchema;
-                    // AIFunction.JsonSchema 返回的是 JsonElement，可直接序列化为 object
-                    var schemaJson = JsonSerializer.Serialize(schemaElement, JsonOptions);
-                    if (!string.IsNullOrEmpty(schemaJson))
-                    {
-                        try
-                        {
-                            // 反序列化为 Dictionary 确保 JSON 序列化为原生对象而非字符串
-                            var dict = JsonSerializer.Deserialize<Dictionary<string, object?>>(schemaJson, JsonOptions);
-                            parameters = dict;
-                        }
-                        catch
-                        {
-                            parameters = schemaJson;
-                        }
-                    }
-                    toolsList.Add(new
-                    {
-                        type = "function",
-                        function = new
-                        {
-                            name = aFunc.Name,
-                            description = aFunc.Description,
-                            parameters
-                        }
-                    });
-                }
-            }
-        }
-
-        var requestBody = new Dictionary<string, object?>
-        {
-            ["model"] = _modelName,
-            ["messages"] = apiMessages,
-            ["tools"] = toolsList.Count > 0 ? toolsList : null,
-            ["tool_choice"] = "auto",
-        };
-
+        var requestBody = BuildRequestBody(messages, options, stream: false);
         var json = JsonSerializer.Serialize(requestBody, JsonOptions);
         Log.Information("[DeepSeekDirect] 请求体: {Body}", json);
 
-        var httpContent = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
         var response = await _httpClient.PostAsync("", httpContent, cancellationToken);
         var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
 
@@ -185,8 +65,7 @@ public sealed class DeepSeekChatClient : IChatClient
         if (!response.IsSuccessStatusCode)
         {
             Log.Error("[DeepSeekDirect] API 错误: {StatusCode} {Body}", response.StatusCode, responseBody);
-            // R11：被吞的 API 错误进 OTel span——MEAI 埋点对抛异常只 SetStatus(Error) 不产生 exception 事件，
-            // 且此处是捕获后兜底返回（不抛异常），错误详情默认不可见；手动 SetStatus + AddEvent("exception")。
+            // R11：被吞的 API 错误进 OTel span
             Activity.Current?.SetStatus(ActivityStatusCode.Error,
                 $"DeepSeek API {(int)response.StatusCode}: {Truncate(responseBody, 200)}");
             Activity.Current?.AddEvent(new ActivityEvent("exception",
@@ -254,32 +133,230 @@ public sealed class DeepSeekChatClient : IChatClient
     }
 
     /// <summary>
-    /// Streaming 请求发送到 DeepSeek API，流式解析响应。
-    /// DeepSeek 的 streaming 模式会在每个 chunk 中携带完整的 reasoning_content。
-    /// 这里简单处理：收集所有 chunks 的 content 和 tool_calls，最后返回一个完整的结果。
-    /// 注意：由于 MAF 框架要求返回 IAsyncEnumerable，但 DeepSeekDirect 不支持增量流式输出，
-    /// 这里直接透传给下游（由 SanitizingChatClient 包装）。
-    /// 如果框架未使用 streaming，此方法不会被调用。
+    /// 真流式：调用 DeepSeek API 开启 stream=true，逐行解析 SSE 响应，
+    /// 每个 delta.content yield 为一个 ChatResponseUpdate。
     /// </summary>
     public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
         IEnumerable<ChatMessage> messages, ChatOptions? options = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        // 用非 streaming 方式获取完整响应，然后模拟流式输出
-        var response = await GetResponseAsync(messages, options, cancellationToken);
-        if (response is not null)
+        var requestBody = BuildRequestBody(messages, options, stream: true);
+        var json = JsonSerializer.Serialize(requestBody, JsonOptions);
+        Log.Information("[DeepSeekDirect][Stream] 请求体: {Body}", json);
+
+        var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
+
+        // ResponseHeadersRead：不缓冲完整响应体，响应头一到即返回，边读边用（真流式 TTFB 的前提）
+        var request = new HttpRequestMessage(HttpMethod.Post, "") { Content = httpContent };
+        var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
         {
-            foreach (var msg in response.Messages)
-            {
-                foreach (var content in msg.Contents)
+            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
+            Log.Error("[DeepSeekDirect][Stream] API 错误: {StatusCode} {Body}", response.StatusCode, errorBody);
+            Activity.Current?.SetStatus(ActivityStatusCode.Error,
+                $"DeepSeek API {(int)response.StatusCode}: {Truncate(errorBody, 200)}");
+            Activity.Current?.AddEvent(new ActivityEvent("exception",
+                tags: new ActivityTagsCollection
                 {
-                    if (content is TextContent tc)
+                    { "exception.type", "HttpRequestException" },
+                    { "exception.message", Truncate(errorBody, 200) },
+                }));
+            yield break;
+        }
+
+        using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+
+        // 真增量文本：每块 delta.content 解析成功后立即 yield，不收集到 List。
+        // CS1626（C# 禁止在含 catch 的 try 内 yield）由不 yield 的 ParseDelta helper 解决：
+        // try 内仅调用 ParseDelta（无 yield），yield 放在 try 外。
+        string? line;
+        while ((line = await reader.ReadLineAsync(cancellationToken)) is not null)
+        {
+            // SSE 格式：data: {...} 或 data: [DONE]
+            if (!line.StartsWith("data: ", StringComparison.Ordinal))
+                continue;
+
+            var data = line[6..]; // 去掉 "data: " 前缀
+
+            if (data == "[DONE]")
+                break;
+
+            ParsedDelta parsed;
+            try
+            {
+                parsed = ParseDelta(data);
+            }
+            catch (JsonException ex)
+            {
+                Log.Warning(ex, "[DeepSeekDirect][Stream] 解析 SSE 行失败: {Line}", line);
+                continue;
+            }
+
+            // 非空 content 立即 yield（工具轮 delta content 为空 → 自然不 yield，保持"工具调用不推前端"语义）
+            if (!string.IsNullOrEmpty(parsed.Content))
+                yield return new ChatResponseUpdate(ChatRole.Assistant, parsed.Content);
+
+            // reasoning_content 暂不累积回传（T6 实现 reasoningAccumulator 累积）
+        }
+    }
+
+    /// <summary>
+    /// 单条 SSE data 行解析结果：独立提取 content / reasoning_content。
+    /// tool_calls 第三路解析（T4）在此扩展。
+    /// </summary>
+    private sealed class ParsedDelta
+    {
+        public string? Content { get; init; }
+        public string? Reasoning { get; init; }
+    }
+
+    /// <summary>
+    /// 解析单条 SSE data 行（OpenAI 兼容流式）。
+    /// 不 yield（供循环内 try-catch 包裹以规避 CS1626），解析失败抛 JsonException。
+    /// </summary>
+    private static ParsedDelta ParseDelta(string data)
+    {
+        using var doc = JsonDocument.Parse(data);
+        var root = doc.RootElement;
+
+        var choices = root.GetProperty("choices");
+        if (choices.GetArrayLength() == 0)
+            return new ParsedDelta();
+
+        var choice = choices[0];
+        var delta = choice.GetProperty("delta");
+
+        // content：文本增量（tool-only delta 无此属性 → null → 主循环不 yield）
+        var content = delta.TryGetProperty("content", out var contentEl) && contentEl.ValueKind != JsonValueKind.Null
+            ? contentEl.GetString()
+            : null;
+
+        // reasoning_content：推理内容（仅服务端累积回传，不推前端；T2 先解析，T6 累积）
+        var reasoning = delta.TryGetProperty("reasoning_content", out var reasoningEl) && reasoningEl.ValueKind != JsonValueKind.Null
+            ? reasoningEl.GetString()
+            : null;
+
+        return new ParsedDelta { Content = content, Reasoning = reasoning };
+    }
+
+    /// <summary>
+    /// 构建 DeepSeek API 请求体（非流式/流式复用）。
+    /// </summary>
+    private Dictionary<string, object?> BuildRequestBody(
+        IEnumerable<ChatMessage> messages, ChatOptions? options, bool stream)
+    {
+        var messagesList = messages.ToList();
+        var apiMessages = new List<object>();
+
+        foreach (var msg in messagesList)
+        {
+            var role = msg.Role.ToString()?.ToLower() ?? "user";
+            var content = string.Join("", msg.Contents.OfType<TextContent>().Select(t => t.Text));
+
+            var apiMsg = new Dictionary<string, object?>
+            {
+                ["role"] = role,
+                ["content"] = string.IsNullOrEmpty(content) ? null : content,
+            };
+
+            // tool_calls：assistant 消息中的 FunctionCallContent
+            var fccs = msg.Contents.OfType<FunctionCallContent>().ToList();
+            if (fccs.Count > 0)
+            {
+                var toolCalls = fccs.Select(fcc => new
+                {
+                    id = fcc.CallId,
+                    type = "function",
+                    function = new
                     {
-                        yield return new ChatResponseUpdate(msg.Role, tc.Text);
+                        name = fcc.Name,
+                        arguments = fcc.Arguments is not null
+                            ? JsonSerializer.Serialize(fcc.Arguments, JsonOptions)
+                            : "{}"
                     }
+                }).ToList();
+                apiMsg["tool_calls"] = toolCalls;
+            }
+
+            // tool_call_id：tool 消息中的 FunctionResultContent
+            var frc = msg.Contents.OfType<FunctionResultContent>().FirstOrDefault();
+            if (frc is not null)
+            {
+                apiMsg["tool_call_id"] = frc.CallId;
+                apiMsg["content"] = frc.Result?.ToString() ?? "";
+            }
+
+            // content=null 时 DeepSeek 报 "missing field content"
+            if (!apiMsg.ContainsKey("content") || (apiMsg["content"] is null && role != "tool"))
+                apiMsg["content"] = "";
+
+            // reasoning_content：从 TextReasoningContent 提取
+            var reasoning = string.Join("", msg.Contents.OfType<TextReasoningContent>().Select(t => t.Text));
+            if (!string.IsNullOrEmpty(reasoning))
+            {
+                apiMsg["reasoning_content"] = reasoning;
+            }
+            else if (fccs.Count > 0)
+            {
+                var callId = fccs[0].CallId;
+                if (_reasoningByCallId.TryGetValue(callId, out var savedReasoning) && savedReasoning is not null)
+                    apiMsg["reasoning_content"] = savedReasoning;
+            }
+
+            if (apiMsg["content"] is null && !apiMsg.ContainsKey("tool_calls"))
+                apiMsg.Remove("content");
+
+            apiMessages.Add(apiMsg);
+        }
+
+        var toolsList = new List<object>();
+        if (options?.Tools is not null)
+        {
+            foreach (var tool in options.Tools)
+            {
+                if (tool is AIFunction aFunc)
+                {
+                    object? parameters = null;
+                    var schemaElement = aFunc.JsonSchema;
+                    var schemaJson = JsonSerializer.Serialize(schemaElement, JsonOptions);
+                    if (!string.IsNullOrEmpty(schemaJson))
+                    {
+                        try
+                        {
+                            var dict = JsonSerializer.Deserialize<Dictionary<string, object?>>(schemaJson, JsonOptions);
+                            parameters = dict;
+                        }
+                        catch
+                        {
+                            parameters = schemaJson;
+                        }
+                    }
+                    toolsList.Add(new
+                    {
+                        type = "function",
+                        function = new
+                        {
+                            name = aFunc.Name,
+                            description = aFunc.Description,
+                            parameters
+                        }
+                    });
                 }
             }
         }
+
+        var requestBody = new Dictionary<string, object?>
+        {
+            ["model"] = _modelName,
+            ["messages"] = apiMessages,
+            ["tools"] = toolsList.Count > 0 ? toolsList : null,
+            ["tool_choice"] = "auto",
+            ["stream"] = stream ? true : null,
+        };
+
+        return requestBody;
     }
 
     // R10.1：gen_ai.provider.name 由 MEAI 埋点从 IChatClient.GetService(typeof(ChatClientMetadata))
