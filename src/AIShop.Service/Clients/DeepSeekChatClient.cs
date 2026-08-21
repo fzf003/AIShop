@@ -171,6 +171,11 @@ public sealed class DeepSeekChatClient : IChatClient
         // 真增量文本：每块 delta.content 解析成功后立即 yield，不收集到 List。
         // CS1626（C# 禁止在含 catch 的 try 内 yield）由不 yield 的 ParseDelta helper 解决：
         // try 内仅调用 ParseDelta（无 yield），yield 放在 try 外。
+        //
+        // tool_calls 分片按 index 累积（流结束时拼装为完整 FunctionCallContent 逐个 yield，FICC 识别并执行工具）
+        var toolCallAccumulator = new Dictionary<int, AccumulatedToolCall>();
+        // reasoning_content 跨分块累积（仅服务端累积回传，不推前端）
+        var reasoningAccumulator = new StringBuilder();
         string? line;
         while ((line = await reader.ReadLineAsync(cancellationToken)) is not null)
         {
@@ -198,18 +203,99 @@ public sealed class DeepSeekChatClient : IChatClient
             if (!string.IsNullOrEmpty(parsed.Content))
                 yield return new ChatResponseUpdate(ChatRole.Assistant, parsed.Content);
 
-            // reasoning_content 暂不累积回传（T6 实现 reasoningAccumulator 累积）
+            // tool_calls 分片按 index 累积：首见分块 new、后续复用；arguments 无条件追加（流末统一拼装 yield）
+            if (parsed.ToolCallFragments is { Count: > 0 })
+                foreach (var frag in parsed.ToolCallFragments)
+                    AccumulateToolCall(toolCallAccumulator, frag);
+
+            // reasoning_content 逐块追加（旧实现只留最后一块，遗漏前面片段；此处拼接完整推理内容）
+            if (!string.IsNullOrEmpty(parsed.Reasoning))
+                reasoningAccumulator.Append(parsed.Reasoning);
+        }
+
+        // 流结束：按 Index 升序把完整 tool_calls 转为 FunctionCallContent 逐个 yield。
+        // 工具轮 updates 文本为空、仅含 FunctionCallContent，FICC 识别并执行工具，行为与非流式 GetResponseAsync 一致。
+        if (toolCallAccumulator.Count > 0)
+        {
+            // 完整推理内容（跨分块拼接），供 _reasoningByCallId 按 callId 回传（同 GetResponseAsync L96-110）
+            var fullReasoning = reasoningAccumulator.Length > 0 ? reasoningAccumulator.ToString() : null;
+
+            foreach (var call in toolCallAccumulator.OrderBy(kvp => kvp.Key).Select(kvp => kvp.Value))
+            {
+                if (string.IsNullOrEmpty(call.Id))
+                    continue;
+
+                // 只写不覆盖：同一 callId 仅记录首个完整推理内容
+                if (fullReasoning is not null && !_reasoningByCallId.ContainsKey(call.Id))
+                    _reasoningByCallId[call.Id] = fullReasoning;
+
+                Dictionary<string, object?>? args = null;
+                var argsText = call.Arguments.ToString();
+                if (!string.IsNullOrEmpty(argsText))
+                {
+                    try { args = JsonSerializer.Deserialize<Dictionary<string, object?>>(argsText); }
+                    catch { /* args 反序列化失败不影响 FCC 创建（同 GetResponseAsync L121-126） */ }
+                }
+
+                yield return new ChatResponseUpdate(ChatRole.Assistant,
+                    new AIContent[] { new FunctionCallContent(call.Id, call.Name ?? "", args) });
+            }
         }
     }
 
     /// <summary>
-    /// 单条 SSE data 行解析结果：独立提取 content / reasoning_content。
-    /// tool_calls 第三路解析（T4）在此扩展。
+    /// 单条 SSE data 行解析结果：独立提取 content / reasoning_content / tool_calls 三要素。
     /// </summary>
     private sealed class ParsedDelta
     {
         public string? Content { get; init; }
         public string? Reasoning { get; init; }
+        public List<ToolCallFragment>? ToolCallFragments { get; init; }
+    }
+
+    /// <summary>
+    /// delta.tool_calls 数组单个元素解析结果。
+    /// OpenAI 兼容流式下分片下发：首分片带 index/id/type/function.name + arguments 首段，
+    /// 后续分片仅带 index + function.arguments 续段（id/name 为 null）。
+    /// </summary>
+    private sealed class ToolCallFragment
+    {
+        public int Index { get; init; }
+        public string? Id { get; init; }
+        public string? Name { get; set; }
+        public string? Arguments { get; set; }
+    }
+
+    /// <summary>
+    /// 流式 tool_calls 增量拼装：按 index 累积分片，function.arguments 跨分块拼接。
+    /// </summary>
+    private sealed class AccumulatedToolCall
+    {
+        public int Index { get; init; }
+        public string? Id { get; set; }   // 首分片携带，非空才覆盖
+        public string? Name { get; set; } // 首分片携带，非空才覆盖
+        public StringBuilder Arguments { get; } = new();
+    }
+
+    /// <summary>
+    /// 按 index 累积 tool_call 分片：首见分块 new、后续复用；
+    /// id / function.name 非空才覆盖（仅首分片携带）；function.arguments 无条件追加（跨分块拼接）。
+    /// </summary>
+    private static void AccumulateToolCall(Dictionary<int, AccumulatedToolCall> accumulator, ToolCallFragment fragment)
+    {
+        if (!accumulator.TryGetValue(fragment.Index, out var call))
+        {
+            call = new AccumulatedToolCall { Index = fragment.Index };
+            accumulator[fragment.Index] = call;
+        }
+
+        if (!string.IsNullOrEmpty(fragment.Id))
+            call.Id = fragment.Id;
+
+        if (!string.IsNullOrEmpty(fragment.Name))
+            call.Name = fragment.Name;
+
+        call.Arguments.Append(fragment.Arguments); // StringBuilder.Append(null) 为 no-op，等价"无条件追加"
     }
 
     /// <summary>
@@ -238,7 +324,42 @@ public sealed class DeepSeekChatClient : IChatClient
             ? reasoningEl.GetString()
             : null;
 
-        return new ParsedDelta { Content = content, Reasoning = reasoning };
+        // tool_calls：分片下发，逐元素提取 index/id/function.name/function.arguments（第三路解析，T4）
+        List<ToolCallFragment>? toolCallFragments = null;
+        if (delta.TryGetProperty("tool_calls", out var toolCallsEl) && toolCallsEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var tc in toolCallsEl.EnumerateArray())
+            {
+                var fragment = new ToolCallFragment
+                {
+                    Index = tc.TryGetProperty("index", out var indexEl) && indexEl.ValueKind == JsonValueKind.Number
+                        ? indexEl.GetInt32()
+                        : 0,
+                    Id = tc.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String
+                        ? idEl.GetString()
+                        : null,
+                };
+
+                if (tc.TryGetProperty("function", out var funcEl) && funcEl.ValueKind == JsonValueKind.Object)
+                {
+                    fragment.Name = funcEl.TryGetProperty("name", out var nameEl) && nameEl.ValueKind == JsonValueKind.String
+                        ? nameEl.GetString()
+                        : null;
+                    fragment.Arguments = funcEl.TryGetProperty("arguments", out var argsEl) && argsEl.ValueKind == JsonValueKind.String
+                        ? argsEl.GetString()
+                        : null;
+                }
+
+                (toolCallFragments ??= new List<ToolCallFragment>()).Add(fragment);
+            }
+        }
+
+        return new ParsedDelta
+        {
+            Content = content,
+            Reasoning = reasoning,
+            ToolCallFragments = toolCallFragments,
+        };
     }
 
     /// <summary>
