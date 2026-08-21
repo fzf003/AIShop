@@ -1018,5 +1018,76 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
             Arg.Any<string?>(), Arg.Any<CancellationToken>());
     }
 
+    // ============ T16 已发 token 降级守卫测试 ============
+
+    /// <summary>
+    /// T16 — spec Requirement 6「已发 token 后异常只发 error 不重复回复」：
+    /// mock RunChatStreamAsync 先 yield 一个文本 chunk（端点发 token 事件、emittedAnyToken=true）、
+    /// 随后抛 HttpRequestException（IsRetryableAgentFailure→true）：
+    /// /api/chat/stream 只发 token + error 事件、不发 done 事件（无重复完整回复文本），
+    /// 且不降级调用 RunChatAsync（Received(0)，避免重复回复）。
+    /// </summary>
+    [Fact]
+    public async Task ShouldSendOnlyError_WhenStreamThrowsAfterEmittingToken()
+    {
+        IShoppingAssistantAgent? mockAgent = null;
+        WebApplicationFactory<Program>? f = null;
+        f = _factory.WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                ReplaceWithIsolatedDb(services, Guid.NewGuid().ToString("N"));
+                services.RemoveAll<ModelRouter>();
+
+                var agent = Substitute.For<IShoppingAssistantAgent>();
+                // 流式：先 yield 一个文本 chunk（已发 token），随后抛可重试异常
+                agent.RunChatStreamAsync(
+                        Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                    .Returns(StreamThenThrow());
+                // 降级目标 RunChatAsync 返回正常结果——但已发 token 后不得被调用（Received(0)）
+                agent.RunChatAsync(
+                        Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                    .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
+                        _ => Task.FromResult(
+                            (new AgentChatResult("完整回复", [], null),
+                             Substitute.For<Microsoft.Agents.AI.AgentSession>())));
+                mockAgent = agent;
+
+                var mockRouter = Substitute.For<ModelRouter>();
+                mockRouter.ActiveModel.Returns("qwen");
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(agent);
+                mockRouter.GetDefaultAgent().Returns(agent);
+                services.AddSingleton(mockRouter);
+            }));
+
+        using var client = f.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/chat/stream")
+        {
+            Content = JsonContent.Create(new ChatRequest("marla", "你好")),
+        };
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadAsStringAsync();
+
+        // 已发 token：响应含 token 事件（事件携带 text 字段——SSE 契约 event: token + data: { text }）
+        Assert.Contains("event: token", body);
+        Assert.Contains("\"text\":", body);
+        // 已发 token 后异常：只发 error、不发 done（无重复完整回复文本）
+        Assert.Contains("event: error", body);
+        Assert.DoesNotContain("event: done", body);
+        // 不降级调用 RunChatAsync
+        await mockAgent!.Received(0).RunChatAsync(
+            Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string?>(), Arg.Any<CancellationToken>());
+
+        // 迭代器辅助：先 yield 一个 chunk，随后抛可重试异常
+        static async IAsyncEnumerable<ChatStreamChunk> StreamThenThrow()
+        {
+            yield return new ChatStreamChunk { TextDelta = "部分文本", IsComplete = false };
+            throw new HttpRequestException("网络抖动");
+        }
+    }
+
     private sealed record ProductsResponse(ProductDto[] products);
 }
