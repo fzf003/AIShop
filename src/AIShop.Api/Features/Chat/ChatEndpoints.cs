@@ -5,6 +5,7 @@ using AIShop.Service;
 using AIShop.Core.Interfaces;
 using Microsoft.Extensions.Caching.Memory;
 using Serilog;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace AIShop.Api.Features.Chat;
@@ -171,100 +172,175 @@ public static class ChatEndpoints
             // 2. Save user message + assistant response to SQLite
             // 由 Agent 的 SqliteChatHistoryProvider.StoreChatHistoryAsync 自动处理，端点不再重复写入
 
-            // 3. 关键词匹配：从用户输入直接匹配（不依赖模型结构化输出）
-            // 匹配逻辑：消息中包含关键词 → 该关键词对应的所有标签相关产品都推荐
-            // 支持关键词、标签、类别、商品名的多维度匹配
-            var keywordSw = Stopwatch.StartNew();
+            // 3. 推荐计算（复用 BuildChatReply：关键词匹配 + 偏好合并 + SplitProducts + 缓存写入 + 偏好入队）
             var userMsg = req.Message ?? "";
-            var validKeywords = catalog.KeywordMap.Keys
-                .Where(k => userMsg.Contains(k, StringComparison.OrdinalIgnoreCase)
-                    || (catalog.KeywordMap.TryGetValue(k, out var tags)
-                        && tags.Any(tag => userMsg.Contains(tag, StringComparison.OrdinalIgnoreCase))))
-                .Distinct()
-                .Take(5)
-                .ToArray();
-
-            // 如果消息关键词匹配失败，尝试从 AgentChatResult.Keywords 回退
-            if (validKeywords.Length == 0 && result.Keywords is { Length: > 0 })
-            {
-                validKeywords = result.Keywords
-                    .Where(k => catalog.KeywordMap.ContainsKey(k))
-                    .Distinct()
-                    .Take(5)
-                    .ToArray();
-            }
-            keywordSw.Stop();
-
-            // 4. Build recommendation response
-            var productSw = Stopwatch.StartNew();
-            ChatReply chatReply;
-
-            // 推荐合并（design 4.3 / T17 RecommendationMerger）：当前消息关键词优先，
-            // 不足 3 个时用偏好权重 Top-N 补齐到 ≤5，按序数忽略大小写去重。
-            // 偏好词来自 DB，先经白名单过滤（P2-4），避免非法/空白偏好词合并后
-            // SplitProducts 返回空推荐却仍标记 HasRecommendation=true。
-            var prefKeywords = FilterValidPreferenceKeywords(prefs?.KeywordsJson, catalog);
-            var merged = RecommendationMerger.MergeKeywords(validKeywords, prefKeywords);
-
-            if (merged.Length == 0)
-            {
-                // 无当前关键词且无偏好 → All.Take(6) 兜底（HasRecommendation=false）
-                var fallback = catalog.All.Take(6).Select(ToDto).ToList();
-                chatReply = new ChatReply(SanitizeReply(result.Reply),
-                    RecommendedProducts: null,
-                    OtherProducts: fallback,
-                    "暂无特定推荐 — 浏览精选商品",
-                    HasRecommendation: false,
-                    MatchedCategories: null);
-            }
-            else
-            {
-                var (recommended, others) = catalog.SplitProducts(merged);
-                var recDtos = recommended.Select(ToDto).ToList();
-                var otherDtos = recommended.Length == 0
-                    ? catalog.All.Take(6).Select(ToDto).ToList()
-                    : others.Take(12).Select(ToDto).ToList();
-
-                chatReply = new ChatReply(SanitizeReply(result.Reply), recDtos, otherDtos,
-                    "根据您的兴趣，为您推荐：", HasRecommendation: true,
-                    recDtos.Select(p => p.Category).Distinct().ToArray());
-            }
-
-            productSw.Stop();
-
-            // R8：聊天产物联动推荐栏 — 写用户维度推荐快照缓存（推荐以聊天产物为准）。
-            // 先同步更新内存（/recommendations 立即读到最新推荐，与聊天 100% 一致），
-            // 偏好异步入队落库保持现状；TTL 10min，miss 时 /recommendations 走偏好/精选兜底。
-            cache.Set($"recommend_{req.Username}",
-                new RecommendationSnapshot(
-                    chatReply.RecommendedProducts,
-                    chatReply.OtherProducts,
-                    chatReply.MatchedCategories,
-                    chatReply.HasRecommendation,
-                    chatReply.RecMessage ?? ""),
-                TimeSpan.FromMinutes(10));
-
-            // 偏好异步写入：端点只入队轻量 UserPreferenceUpdate（权重累加在
-            // PreferenceWriteHostedService worker 侧串行读-改-写完成），立即返回不等待落库；
-            // DropOldest 语义下 TryEnqueue 仅在 channel 标记完成后才返回 false，此处 Warning 作为
-            // channel 完成兜底；队列满挤掉最旧的观测日志已内聚到 PreferenceQueue.TryEnqueue（P2-3）
-            if (result.Preferences is { Length: > 0 })
-            {
-                var update = new UserPreferenceUpdate(user.Id, result.Preferences);
-                if (!queue.TryEnqueue(update))
-                    Log.Warning("Preference queue completed, update dropped for {UserId}", user.Id);
-            }
+            var chatReply = BuildChatReply(result, userMsg, prefs, catalog, req.Username, user.Id, cache, queue);
 
             endpointSw.Stop();
             logger.Information(
-                "[Diagnose] /chat 总耗时 Total={TotalMs}ms Agent={AgentMs}ms " +
-                "KeywordMatch={KeywordMs}ms ProductMatch={ProductMs}ms " +
-                "SessionId={SessionId}",
+                "[Diagnose] /chat 总耗时 Total={TotalMs}ms Agent={AgentMs}ms SessionId={SessionId}",
                 endpointSw.ElapsedMilliseconds, agentSw.ElapsedMilliseconds,
-                keywordSw.ElapsedMilliseconds, productSw.ElapsedMilliseconds,
                 sid);
 
             return Results.Ok(chatReply);
+        });
+
+        // T21：SSE 流式端点 — 逐块推送 LLM 文本，结束后一次性发送推荐结果
+        api.MapPost("/chat/stream", async (
+            HttpContext httpContext,
+            ChatRequest req,
+            IUserRepository users,
+            ISessionRepository sessions,
+            IChatMessageRepository chatRepo,
+            IProductCatalogService catalog,
+            ModelRouter router,
+            IMemoryCache cache,
+            IPreferenceRepository prefRepo,
+            IPreferenceQueue queue,
+            CancellationToken ct) =>
+        {
+            var logger = Log.ForContext("SourceContext", "Diagnose");
+
+            if (string.IsNullOrWhiteSpace(req.Username))
+            {
+                httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
+                await httpContext.Response.WriteAsJsonAsync(new { detail = "用户名不能为空" }, ct);
+                return;
+            }
+
+            var user = await users.GetByUsernameAsync(req.Username, ct);
+            if (user is null)
+            {
+                httpContext.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return;
+            }
+
+            var sessionId = await sessions.GetOrCreateSessionIdAsync(user.Id, ct);
+            var sid = Guid.Parse(sessionId);
+
+            var prefs = await prefRepo.GetByUserIdAsync(user.Id, ct);
+            var preferencesText = string.Join("、", RecommendationMerger.GetTopPreferenceKeywords(prefs?.KeywordsJson, 5));
+
+            // 设置 SSE 响应头
+            httpContext.Response.StatusCode = StatusCodes.Status200OK;
+            httpContext.Response.ContentType = "text/event-stream";
+            httpContext.Response.Headers.CacheControl = "no-cache";
+            httpContext.Response.Headers.Connection = "keep-alive";
+
+            var writer = new StreamWriter(httpContext.Response.Body);
+
+            try
+            {
+                var modelId = req.Model ?? router.ActiveModel;
+
+                // 尝试流式调用
+                IAsyncEnumerable<ChatStreamChunk> streamChunks;
+                try
+                {
+                    var agent = router.GetAgent(modelId);
+                    streamChunks = agent.RunChatStreamAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, ct);
+                }
+                catch (KeyNotFoundException knf)
+                {
+                    Activity.Current?.SetStatus(ActivityStatusCode.Error, knf.Message);
+                    Activity.Current?.AddEvent(new ActivityEvent("exception",
+                        tags: new ActivityTagsCollection
+                        {
+                            { "exception.type", knf.GetType().FullName },
+                            { "exception.message", knf.Message },
+                        }));
+                    logger.Error(knf, "[Diagnose] KeyNotFoundException in /chat/stream: modelId={ModelId}", modelId);
+                    await WriteSseEventAsync(writer, "error", JsonSerializer.Serialize(new { message = "不支持的模型" }));
+                    return;
+                }
+                catch (Exception ex) when (IsRetryableAgentFailure(ex, ct))
+                {
+                    logger.Warning(ex,
+                        "[Diagnose] /chat/stream Agent调用失败，换默认模型重试一次 AgentCall SessionId={SessionId}", sid);
+                    try
+                    {
+                        var retryModel = router.ActiveModel;
+                        streamChunks = router.GetAgent(retryModel).RunChatStreamAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, ct);
+                    }
+                    catch (Exception retryEx)
+                    {
+                        Activity.Current?.SetStatus(ActivityStatusCode.Error, retryEx.Message);
+                        Activity.Current?.AddEvent(new ActivityEvent("exception",
+                            tags: new ActivityTagsCollection
+                            {
+                                { "exception.type", retryEx.GetType().FullName },
+                                { "exception.message", retryEx.Message },
+                            }));
+                        logger.Error(retryEx, "[Diagnose] /chat/stream 重试仍失败 SessionId={SessionId}", sid);
+                        await WriteSseEventAsync(writer, "error", JsonSerializer.Serialize(new { message = "抱歉，暂时无法处理您的请求，请重试。" }));
+                        return;
+                    }
+                }
+
+                // 消费流式 chunk，发送 token 事件
+                // T15：emittedAnyToken 守卫——已发出过 token 后发生可重试异常或流结束无完整结果时，
+                // 只发 error 不降级 RunChatAsync（避免重复回复，前端已收到部分文本）；
+                // 未发 token 时维持降级到 RunChatAsync（无内容输出，降级无副作用）
+                AgentChatResult? finalResult = null;
+                var emittedAnyToken = false;
+                try
+                {
+                    await foreach (var chunk in streamChunks.WithCancellation(ct))
+                    {
+                        if (!chunk.IsComplete)
+                        {
+                            await WriteSseEventAsync(writer, "token",
+                                JsonSerializer.Serialize(new { text = chunk.TextDelta }));
+                            emittedAnyToken = true;
+                        }
+                        else
+                        {
+                            finalResult = chunk.FullResult;
+                        }
+                    }
+                }
+                catch (Exception ex) when (IsRetryableAgentFailure(ex, ct))
+                {
+                    // 流式过程中的可重试异常
+                    logger.Warning(ex, "[Diagnose] /chat/stream 流式异常 SessionId={SessionId}", sid);
+                    if (emittedAnyToken)
+                    {
+                        // 已发 token：只发 error，不降级 RunChatAsync（避免重复回复）
+                        await WriteSseEventAsync(writer, "error", JsonSerializer.Serialize(new { message = "抱歉，暂时无法处理您的请求，请重试。" }));
+                        return;
+                    }
+                    // 未发 token：维持降级到 RunChatAsync
+                    var agent = router.GetAgent(modelId);
+                    var (result, _) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, ct);
+                    finalResult = result;
+                }
+
+                if (finalResult is null)
+                {
+                    // 流式未返回完整结果
+                    logger.Warning("[Diagnose] /chat/stream 无完整结果 SessionId={SessionId}", sid);
+                    if (emittedAnyToken)
+                    {
+                        // 已发 token 但无 complete chunk：只发 error，不降级 RunChatAsync
+                        await WriteSseEventAsync(writer, "error", JsonSerializer.Serialize(new { message = "抱歉，暂时无法处理您的请求，请重试。" }));
+                        return;
+                    }
+                    // 未发 token：维持降级到 RunChatAsync
+                    var agent = router.GetAgent(modelId);
+                    var (result, _) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, ct);
+                    finalResult = result;
+                }
+
+                // 发送 done 事件（完整 ChatReply JSON）
+                var userMsg = req.Message ?? "";
+                var chatReply = BuildChatReply(finalResult, userMsg, prefs, catalog, req.Username, user.Id, cache, queue);
+                await WriteSseEventAsync(writer, "done", JsonSerializer.Serialize(chatReply));
+            }
+            catch (Exception ex)
+            {
+                logger.Error(ex, "[Diagnose] /chat/stream 未处理异常 SessionId={SessionId}", sid);
+                await WriteSseEventAsync(writer, "error", JsonSerializer.Serialize(new { message = "抱歉，暂时无法处理您的请求，请重试。" }));
+            }
         });
 
         api.MapPost("/recommendations", async (
@@ -442,5 +518,100 @@ public static class ChatEndpoints
                 && (catalog.KeywordMap.ContainsKey(kw) || productTags.Contains(kw)))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    /// <summary>
+    /// 构建 ChatReply（T21 提取复用）：关键词匹配 + 偏好合并 + 推荐结果 + 缓存写入 + 偏好入队。
+    /// /api/chat 与 /api/chat/stream 共用此方法，保证推荐结果一致。
+    /// </summary>
+    private static ChatReply BuildChatReply(
+        AgentChatResult result, string userMsg, UserPreferences? prefs,
+        IProductCatalogService catalog, string username, Guid userId,
+        IMemoryCache cache, IPreferenceQueue queue)
+    {
+        // 关键词匹配：从用户输入直接匹配（不依赖模型结构化输出）
+        var validKeywords = catalog.KeywordMap.Keys
+            .Where(k => userMsg.Contains(k, StringComparison.OrdinalIgnoreCase)
+                || (catalog.KeywordMap.TryGetValue(k, out var tags)
+                    && tags.Any(tag => userMsg.Contains(tag, StringComparison.OrdinalIgnoreCase))))
+            .Distinct()
+            .Take(5)
+            .ToArray();
+
+        // 如果消息关键词匹配失败，尝试从 AgentChatResult.Keywords 回退
+        if (validKeywords.Length == 0 && result.Keywords is { Length: > 0 })
+        {
+            validKeywords = result.Keywords
+                .Where(k => catalog.KeywordMap.ContainsKey(k))
+                .Distinct()
+                .Take(5)
+                .ToArray();
+        }
+
+        // 推荐合并（design 4.3 / T17 RecommendationMerger）：当前消息关键词优先，
+        // 不足 3 个时用偏好权重 Top-N 补齐到 ≤5，按序数忽略大小写去重。
+        // 偏好词来自 DB，先经白名单过滤（P2-4），避免非法/空白偏好词合并后
+        // SplitProducts 返回空推荐却仍标记 HasRecommendation=true。
+        var prefKeywords = FilterValidPreferenceKeywords(prefs?.KeywordsJson, catalog);
+        var merged = RecommendationMerger.MergeKeywords(validKeywords, prefKeywords);
+
+        ChatReply chatReply;
+        if (merged.Length == 0)
+        {
+            // 无当前关键词且无偏好 → All.Take(6) 兜底（HasRecommendation=false）
+            var fallback = catalog.All.Take(6).Select(ToDto).ToList();
+            chatReply = new ChatReply(SanitizeReply(result.Reply),
+                RecommendedProducts: null,
+                OtherProducts: fallback,
+                "暂无特定推荐 — 浏览精选商品",
+                HasRecommendation: false,
+                MatchedCategories: null);
+        }
+        else
+        {
+            var (recommended, others) = catalog.SplitProducts(merged);
+            var recDtos = recommended.Select(ToDto).ToList();
+            var otherDtos = recommended.Length == 0
+                ? catalog.All.Take(6).Select(ToDto).ToList()
+                : others.Take(12).Select(ToDto).ToList();
+
+            chatReply = new ChatReply(SanitizeReply(result.Reply), recDtos, otherDtos,
+                "根据您的兴趣，为您推荐：", HasRecommendation: true,
+                recDtos.Select(p => p.Category).Distinct().ToArray());
+        }
+
+        // R8：聊天产物联动推荐栏 — 写用户维度推荐快照缓存（推荐以聊天产物为准）。
+        // 先同步更新内存（/recommendations 立即读到最新推荐，与聊天 100% 一致），
+        // 偏好异步入队落库保持现状；TTL 10min，miss 时 /recommendations 走偏好/精选兜底。
+        cache.Set($"recommend_{username}",
+            new RecommendationSnapshot(
+                chatReply.RecommendedProducts,
+                chatReply.OtherProducts,
+                chatReply.MatchedCategories,
+                chatReply.HasRecommendation,
+                chatReply.RecMessage ?? ""),
+            TimeSpan.FromMinutes(10));
+
+        // 偏好异步写入：端点只入队轻量 UserPreferenceUpdate（权重累加在
+        // PreferenceWriteHostedService worker 侧串行读-改-写完成），立即返回不等待落库；
+        // DropOldest 语义下 TryEnqueue 仅在 channel 标记完成后才返回 false，此处 Warning 作为
+        // channel 完成兜底；队列满挤掉最旧的观测日志已内聚到 PreferenceQueue.TryEnqueue（P2-3）
+        if (result.Preferences is { Length: > 0 })
+        {
+            var update = new UserPreferenceUpdate(userId, result.Preferences);
+            if (!queue.TryEnqueue(update))
+                Log.Warning("Preference queue completed, update dropped for {UserId}", userId);
+        }
+
+        return chatReply;
+    }
+
+    /// <summary>
+    /// 写 SSE 事件到流（T21）：格式为 "event: {eventName}\ndata: {data}\n\n"。
+    /// </summary>
+    private static async Task WriteSseEventAsync(StreamWriter writer, string eventName, string data)
+    {
+        await writer.WriteAsync($"event: {eventName}\ndata: {data}\n\n");
+        await writer.FlushAsync();
     }
 }
