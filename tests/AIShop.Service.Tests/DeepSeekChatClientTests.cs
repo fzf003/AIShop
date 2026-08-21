@@ -146,6 +146,93 @@ public sealed class DeepSeekChatClientTests
     }
 
     /// <summary>
+    /// T3 — spec Requirement 1「首块内容到达即产生首个 token」：真流式 TTFB 逻辑验证——
+    /// 首个 SSE 分块（含部分 content）下发后，首个 MoveNextAsync 立即返回首个 ChatResponseUpdate，
+    /// 不等完整响应生成（此时后续分块未下发、流未结束）。限时 2s 兜底：若实现退化为
+    /// "收集完整响应后批量 yield"（伪流式），首个 MoveNextAsync 将挂起等待流结束 → 超时失败，
+    /// 即本用例兼作伪流式回归守卫。
+    /// </summary>
+    [Fact]
+    public async Task GetStreamingResponseAsync_FirstChunkImmediatelyYieldsFirstToken()
+    {
+        using var stream = new ChunkedDelayedStream();
+        using var handler = new ChunkedDelayedHttpMessageHandler(stream);
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://api.deepseek.example") };
+        using var client = new DeepSeekChatClient(httpClient, "deepseek-v4-flash");
+
+        // 首块含部分 content；后续分块（含剩余 content）暂不写就、流未结束——模拟 LLM 首块已到、余块未出
+        stream.WriteChunk("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你\"}}]}\n\n");
+
+        await using var enumerator =
+            client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "hi")]).GetAsyncEnumerator();
+
+        // 首个 MoveNextAsync 在首块下发后立即返回（此时流未结束、后续块未下发，即"不等完整响应"）
+        try
+        {
+            var firstMove = await MoveNextWithinAsync(enumerator, TimeSpan.FromSeconds(2));
+            Assert.True(firstMove, "首个 MoveNextAsync 应在首块 content 到达后立即返回首个 token（不等完整响应）");
+            Assert.Equal("你", enumerator.Current.Text);
+        }
+        catch (TimeoutException)
+        {
+            Assert.Fail("首个 MoveNextAsync 超时未返回：疑似伪流式回归（收集完整响应后才批量 yield）");
+        }
+
+        // 下发剩余 content 分块，按到达顺序取得第二个 token
+        stream.WriteChunk("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"好\"}}]}\n\n");
+        Assert.True(await MoveNextWithinAsync(enumerator, TimeSpan.FromSeconds(2)),
+            "第二个 content 分块下发后应继续 yield 后续 token");
+        Assert.Equal("好", enumerator.Current.Text);
+
+        // 流结束：[DONE] 后迭代器正常结束（无更多 token）
+        stream.WriteChunk("data: [DONE]\n\n");
+        stream.Complete();
+        Assert.False(await MoveNextWithinAsync(enumerator, TimeSpan.FromSeconds(2)),
+            "流结束（[DONE]）后不应再产生 token");
+    }
+
+    /// <summary>
+    /// 消费 MoveNextAsync 返回的 ValueTask&lt;bool&gt; 并限时等待（TTFB 回归守卫：
+    /// 伪流式"收集完整响应后再 yield"时首个 MoveNextAsync 会挂起等待流结束 → 超时抛 TimeoutException）。
+    /// 先取出 ValueTask 再调用 AsTask，规避 Sonar S5034 对 identifier.Call().AsTask() 链的已知误报；
+    /// ValueTask 仍恰好消费一次（经 AsTask 转为 Task 后仅限时等待）。
+    /// </summary>
+    private static async Task<bool> MoveNextWithinAsync(
+        IAsyncEnumerator<ChatResponseUpdate> enumerator, TimeSpan timeout)
+    {
+        var move = enumerator.MoveNextAsync();
+        return await move.AsTask().WaitAsync(timeout);
+    }
+
+    /// <summary>
+    /// T3 — spec Requirement 1「多内容分块按到达顺序逐个 yield」：
+    /// 多个 delta.content 分块按 SSE 到达顺序逐个 yield，文本片段顺序与 delta.content 一致。
+    /// </summary>
+    [Fact]
+    public async Task GetStreamingResponseAsync_MultipleContentChunksYieldedInOrder()
+    {
+        using var stream = new ChunkedDelayedStream();
+        using var handler = new ChunkedDelayedHttpMessageHandler(stream);
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://api.deepseek.example") };
+        using var client = new DeepSeekChatClient(httpClient, "deepseek-v4-flash");
+
+        // 多个 content 分块按到达顺序写入，随后结束流
+        stream.WriteChunk("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你\"}}]}\n\n");
+        stream.WriteChunk("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"好\"}}]}\n\n");
+        stream.WriteChunk("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"世\"}}]}\n\n");
+        stream.WriteChunk("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"界\"}}]}\n\n");
+        stream.WriteChunk("data: [DONE]\n\n");
+        stream.Complete();
+
+        var texts = new List<string>();
+        await foreach (var update in client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "hi")]))
+            texts.Add(update.Text);
+
+        // yield 顺序与 SSE 到达顺序一致
+        Assert.Equal(new[] { "你", "好", "世", "界" }, texts);
+    }
+
+    /// <summary>
     /// 固定响应 handler：返回指定状态码 + body，供 DeepSeekChatClient 非 2xx 分支测试。
     /// </summary>
     private sealed class StubHttpMessageHandler(HttpStatusCode statusCode, string body) : HttpMessageHandler
