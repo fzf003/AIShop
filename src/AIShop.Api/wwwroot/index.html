@@ -1034,7 +1034,10 @@
                         } else if (eventType === 'done') {
                             // 流式结束，显示完整回复 + 推荐
                             typing.remove();
-                            addMessage('assistant', data.response || fullText);
+                            const displayText = data.response || fullText;
+                            // 兜底：若回退文本是 JSON 外壳（以 { 开头），不裸露原始 JSON，显示友好提示
+                            const isJsonShell = displayText.trim().startsWith('{');
+                            addMessage('assistant', isJsonShell ? '抱歉，回复格式异常。' : displayText);
                             renderRecommendationPanel(data);
                             fetchCart();
                         } else if (eventType === 'error') {

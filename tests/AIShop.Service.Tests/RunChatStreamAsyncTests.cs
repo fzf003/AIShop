@@ -298,4 +298,61 @@ public sealed class RunChatStreamAsyncTests : IDisposable
             return base.CreateSessionCoreAsync(cancellationToken);
         }
     }
+
+    /// <summary>
+    /// 回归：删 ID 后价格符号前的残留标点（「（商品Id:4，¥249.99）」→「（¥249.99）」）。
+    /// 用户报告「（，¥249.99）」显示异常——PricePunctuationPattern 只删价格前标点，
+    /// 不影响「为您推荐，现在」这类正常句子逗号（T12 语义保留）。
+    /// </summary>
+    [Fact]
+    public async Task RunChatStreamAsync_CleansPunctuationBeforePrice()
+    {
+        var mockClient = Substitute.For<Meai.IChatClient>();
+        mockClient.GetStreamingResponseAsync(
+                Arg.Any<IEnumerable<Meai.ChatMessage>>(), Arg.Any<Meai.ChatOptions?>(), Arg.Any<CancellationToken>())
+            .Returns(StreamingTextUpdatesAsync(Task.CompletedTask, "推荐无线降噪耳机（商品Id:4，¥249.99）"));
+        mockClient.GetResponseAsync(
+                Arg.Any<IEnumerable<Meai.ChatMessage>>(), Arg.Any<Meai.ChatOptions?>(), Arg.Any<CancellationToken>())
+            .Returns(new Meai.ChatResponse(new Meai.ChatMessage(Meai.ChatRole.Assistant, "模拟回复")));
+
+        var agent = CreateAgent(mockClient);
+        var sessionId = Guid.NewGuid();
+
+        var textDeltas = new List<string>();
+        await foreach (var chunk in agent.RunChatStreamAsync(sessionId, "推荐耳机", "t-punct"))
+            if (!chunk.IsComplete) textDeltas.Add(chunk.TextDelta);
+
+        var joined = string.Concat(textDeltas);
+        Assert.DoesNotContain("商品Id", joined, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("（，", joined);
+        Assert.Contains("（¥249.99）", joined);
+    }
+
+    /// <summary>
+    /// 回归：LLM 格式漂移（输出 content/keywords/shopping cart 而非 Reply/Keywords/Preferences）时，
+    /// 解析回退提取 content 作为 Reply——前端 done 显示文本而非原始 JSON 外壳。
+    /// </summary>
+    [Fact]
+    public async Task RunChatStreamAsync_ParsesContentWhenReplyFormatDrifts()
+    {
+        var json = """{"content":"客官，推荐您无线降噪耳机。","keywords":["耳机"],"preferences":[],"shopping cart":[]}""";
+        var mockClient = Substitute.For<Meai.IChatClient>();
+        mockClient.GetStreamingResponseAsync(
+                Arg.Any<IEnumerable<Meai.ChatMessage>>(), Arg.Any<Meai.ChatOptions?>(), Arg.Any<CancellationToken>())
+            .Returns(StreamingTextUpdatesAsync(Task.CompletedTask, json));
+        mockClient.GetResponseAsync(
+                Arg.Any<IEnumerable<Meai.ChatMessage>>(), Arg.Any<Meai.ChatOptions?>(), Arg.Any<CancellationToken>())
+            .Returns(new Meai.ChatResponse(new Meai.ChatMessage(Meai.ChatRole.Assistant, "模拟回复")));
+
+        var agent = CreateAgent(mockClient);
+        var sessionId = Guid.NewGuid();
+
+        ChatStreamChunk? complete = null;
+        await foreach (var chunk in agent.RunChatStreamAsync(sessionId, "推荐耳机", "t-json"))
+            if (chunk.IsComplete) complete = chunk;
+
+        Assert.NotNull(complete);
+        Assert.NotNull(complete!.FullResult);
+        Assert.Equal("客官，推荐您无线降噪耳机。", complete.FullResult.Reply);
+    }
 }

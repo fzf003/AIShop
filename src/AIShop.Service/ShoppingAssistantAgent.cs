@@ -37,6 +37,9 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         new(@"商品Id[:：]\d+", RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
     private static readonly Regex ProductIdLabelPattern =
         new(@"商品ID[\s:：为是]*\d+", RegexOptions.None, TimeSpan.FromSeconds(1));
+    // 删 ID 后括号内可能残留「（，¥249.99）」：仅删除价格符号前的标点（不影响「为您推荐，现在」这类正常句子逗号）
+    private static readonly Regex PricePunctuationPattern =
+        new(@"[，,、;；]+\s*(?=[¥￥$])", RegexOptions.None, TimeSpan.FromSeconds(1));
     private const int MinProductId = 1;
     private const int MaxProductId = 18;
 
@@ -433,9 +436,26 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         var json = text[jsonStart..(jsonEnd + 1)];
         try
         {
-            return JsonSerializer.Deserialize<AgentChatResult>(json,
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
-                ?? new AgentChatResult(text, [], null);
+            var result = JsonSerializer.Deserialize<AgentChatResult>(json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (result is null)
+                return new AgentChatResult(text, [], null);
+
+            // LLM 格式漂移容错：标准 JSON 是 {Reply, Keywords, Preferences}，但 LLM 偶尔输出
+            // {content, keywords, preferences, shopping cart} 等变体——Reply 缺失时回退提取
+            // content 字段作为 Reply，避免前端回退显示原始 JSON 外壳
+            if (string.IsNullOrEmpty(result.Reply))
+            {
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.TryGetProperty("content", out var contentEl) &&
+                    contentEl.ValueKind == JsonValueKind.String)
+                {
+                    var content = contentEl.GetString()?.Trim();
+                    if (!string.IsNullOrEmpty(content))
+                        return result with { Reply = content };
+                }
+            }
+            return result;
         }
         catch (JsonException ex)
         {
@@ -490,6 +510,8 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         text = HashIdPattern.Replace(text, static match =>
             IsProductId(match.Groups["id"].Value) ? "" : match.Value);
         text = ProductIdLabelPattern.Replace(text, "");
+        // 删 ID 后清理价格符号前的残留标点（「（，¥249.99）」→「（¥249.99）」）
+        text = PricePunctuationPattern.Replace(text, "");
         return text;
     }
 
