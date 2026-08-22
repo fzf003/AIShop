@@ -45,7 +45,6 @@ try
     builder.Services.AddInfrastructure();
 
     // Register Agent definitions (AIShop.Service/)
-    builder.Services.AddScoped<SqliteChatHistoryProvider>();
     builder.Services.AddSingleton<CartToolProvider>();
     builder.Services.AddSingleton<ModelRouter>();
 

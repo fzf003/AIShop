@@ -1,11 +1,12 @@
-using System.Diagnostics;
-using System.Text.Json;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.AI;
-using Microsoft.Agents.AI;
 using AIShop.Infrastructure.Data;
 using AIShop.Infrastructure.Entities;
+using Microsoft.Agents.AI;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.AI;
 using Serilog;
+using System.Diagnostics;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using AgentChatMessage = Microsoft.Extensions.AI.ChatMessage;
 
 namespace AIShop.Service.Providers;
@@ -20,17 +21,43 @@ namespace AIShop.Service.Providers;
 ///   → 不再依赖 AIContentListConverter 的 ContentsJson 序列化
 /// - **reasoning 独立列**：TextReasoningContent 仅存于 reasoning 列，Provide 时不重建
 /// </summary>
-public sealed class SqliteChatHistoryProvider(
-    IDbContextFactory<AppDbContext> dbFactory) : ChatHistoryProvider()
+public sealed class SqliteChatHistoryProvider : ChatHistoryProvider
 {
+    private readonly ProviderSessionState<State> _sessionState;
+    private readonly IDbContextFactory<AppDbContext> dbFactory;
+    public SqliteChatHistoryProvider(IDbContextFactory<AppDbContext> _dbFactory, Func<AgentSession?, State>? stateInitializer = null,
+            string? stateKey = null)
+    {
+        this._sessionState = new ProviderSessionState<State>(
+                stateInitializer ?? (_ => new State()),
+                stateKey ?? this.GetType().Name);
+
+        this.dbFactory = _dbFactory;
+    }
+
+    public override IReadOnlyList<string> StateKeys => new[] { _sessionState.StateKey };
+
 
     protected override ValueTask<IEnumerable<AgentChatMessage>> InvokingCoreAsync(InvokingContext context, CancellationToken cancellationToken = default)
     {
+        var state = this._sessionState.GetOrInitializeState(context.Session);
+        if(state is not null)
+        {
+            Console.WriteLine(state.Messages.Count);
+        }
+
+
+
         return base.InvokingCoreAsync(context, cancellationToken);
     }
 
     protected override ValueTask InvokedCoreAsync(InvokedContext context, CancellationToken cancellationToken = default)
     {
+        var state = this._sessionState.GetOrInitializeState(context.Session);
+        if (state is not null)
+        {
+            Console.WriteLine(state.Messages.Count);
+        }
         return base.InvokedCoreAsync(context, cancellationToken);
     }
 
@@ -61,6 +88,14 @@ public sealed class SqliteChatHistoryProvider(
         ChatHistoryProvider.InvokingContext context,
         CancellationToken cancellationToken = default)
     {
+
+        var state = this._sessionState.GetOrInitializeState(context.Session);
+        if (state is not null)
+        {
+            Console.WriteLine(state.Messages.Count);
+        }
+
+
         var sw = Stopwatch.StartNew();
         var sessionId = GetSessionId(context.Session!);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -228,6 +263,14 @@ public sealed class SqliteChatHistoryProvider(
             Logger.Debug("StoreChatHistory: 无消息可存 Session={SessionId}", sessionId);
             return;
         }
+
+        var state = this._sessionState.GetOrInitializeState(context.Session);
+        if (state is not null)
+        {
+            Console.WriteLine(state.Messages.Count);
+        }
+
+ 
 
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
 
@@ -587,5 +630,11 @@ public sealed class SqliteChatHistoryProvider(
     {
         public string Id { get; set; } = string.Empty;
         public string Result { get; set; } = string.Empty;
+    }
+
+    public sealed class State
+    {
+        [JsonPropertyName("messages")]
+        public List<ChatMessage> Messages { get; set; } = [];
     }
 }

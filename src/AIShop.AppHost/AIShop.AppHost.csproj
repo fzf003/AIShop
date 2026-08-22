@@ -1,4 +1,4 @@
-<Project Sdk="Aspire.AppHost.Sdk/13.4.6">
+<Project Sdk="Aspire.AppHost.Sdk/13.5.1">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -7,6 +7,8 @@
     <Nullable>enable</Nullable>
     <UserSecretsId>06a40fab-d330-4f05-81a9-77699d35b693</UserSecretsId>
     <NoWarn>$(NoWarn);NU1903</NoWarn>
+    <!-- ASPIRE010（Aspire 13.5.1 新增诊断）：纯 .NET AppHost 未启用 CLI bundle 特性，抑制以免阻塞 build（TreatWarningsAsErrors 会提升为 error） -->
+    <MSBuildWarningsAsMessages>$(MSBuildWarningsAsMessages);ASPIRE010</MSBuildWarningsAsMessages>
   </PropertyGroup>
 
   <ItemGroup>
