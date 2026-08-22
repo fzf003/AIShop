@@ -1089,5 +1089,75 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
         }
     }
 
+    // ============ T18 已发 token 但无完整结果降级守卫测试 ============
+
+    /// <summary>
+    /// T18 — spec Requirement 6「已发 token 但无完整结果」：
+    /// mock RunChatStreamAsync 只 yield 文本 chunk、不 yield complete chunk（finalResult 保持 null）：
+    /// /api/chat/stream 消费循环正常结束但无完整结果 → 只发 token + error 事件、不发 done 事件，
+    /// 且不降级调用 RunChatAsync（Received(0)，避免重复完整回复文本）。
+    /// </summary>
+    [Fact]
+    public async Task ShouldSendOnlyError_WhenStreamEmitsTokenButNoCompleteChunk()
+    {
+        IShoppingAssistantAgent? mockAgent = null;
+        WebApplicationFactory<Program>? f = null;
+        f = _factory.WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                ReplaceWithIsolatedDb(services, Guid.NewGuid().ToString("N"));
+                services.RemoveAll<ModelRouter>();
+
+                var agent = Substitute.For<IShoppingAssistantAgent>();
+                // 流式：只 yield 文本 chunk（已发 token）、不 yield complete chunk（无完整结果）
+                agent.RunChatStreamAsync(
+                        Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                    .Returns(OnlyTextChunks());
+                // 降级目标 RunChatAsync 返回正常结果——但已发 token 后不得被调用（Received(0)）
+                agent.RunChatAsync(
+                        Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                    .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
+                        _ => Task.FromResult(
+                            (new AgentChatResult("完整回复", [], null),
+                             Substitute.For<Microsoft.Agents.AI.AgentSession>())));
+                mockAgent = agent;
+
+                var mockRouter = Substitute.For<ModelRouter>();
+                mockRouter.ActiveModel.Returns("qwen");
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(agent);
+                mockRouter.GetDefaultAgent().Returns(agent);
+                services.AddSingleton(mockRouter);
+            }));
+
+        using var client = f.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/chat/stream")
+        {
+            Content = JsonContent.Create(new ChatRequest("marla", "你好")),
+        };
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadAsStringAsync();
+
+        // 已发 token：响应含 token 事件（SSE 契约 event: token + data: { text }）
+        Assert.Contains("event: token", body);
+        Assert.Contains("\"text\":", body);
+        // 已发 token 但无完整结果：只发 error、不发 done（无重复完整回复文本）
+        Assert.Contains("event: error", body);
+        Assert.DoesNotContain("event: done", body);
+        // 不降级调用 RunChatAsync
+        await mockAgent!.Received(0).RunChatAsync(
+            Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string?>(), Arg.Any<CancellationToken>());
+
+        // 迭代器辅助：只 yield 文本 chunk、不 yield complete chunk（无完整结果，流正常结束）
+        static async IAsyncEnumerable<ChatStreamChunk> OnlyTextChunks()
+        {
+            yield return new ChatStreamChunk { TextDelta = "部分文本", IsComplete = false };
+            await Task.CompletedTask;
+        }
+    }
+
     private sealed record ProductsResponse(ProductDto[] products);
 }

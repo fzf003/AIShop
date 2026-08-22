@@ -162,7 +162,9 @@ public sealed class DeepSeekChatClient : IChatClient
                     { "exception.type", "HttpRequestException" },
                     { "exception.message", Truncate(errorBody, 200) },
                 }));
-            yield break;
+            // 非 2xx 抛异常而非静默 yield break：yield break 产生空流会让 FICC 误判正常结束，
+            // 抛 HttpRequestException 命中上层 IsRetryableAgentFailure（网络/超时/429/5xx 分类器）→ 重试或降级（design §4.4）
+            throw new HttpRequestException($"DeepSeek API {(int)response.StatusCode}: {Truncate(errorBody, 200)}");
         }
 
         using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
