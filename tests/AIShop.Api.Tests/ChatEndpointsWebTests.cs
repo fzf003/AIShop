@@ -1149,7 +1149,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
         // done 事件内容为 RunChatAsync 的降级结果（经 BuildChatReply 构造完整 ChatReply JSON）
         var doneData = ParseSseEventData(body, "done");
         Assert.NotNull(doneData);
-        var reply = JsonSerializer.Deserialize<ChatReply>(doneData);
+        var reply = JsonSerializer.Deserialize<ChatReply>(doneData, JsonSerializerOptions.Web);
         Assert.NotNull(reply);
         Assert.Contains("降级回复", reply!.Response);
 

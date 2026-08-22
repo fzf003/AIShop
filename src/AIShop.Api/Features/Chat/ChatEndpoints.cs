@@ -334,7 +334,10 @@ public static class ChatEndpoints
                 // 发送 done 事件（完整 ChatReply JSON）
                 var userMsg = req.Message ?? "";
                 var chatReply = BuildChatReply(finalResult, userMsg, prefs, catalog, req.Username, user.Id, cache, queue);
-                await WriteSseEventAsync(writer, "done", JsonSerializer.Serialize(chatReply));
+                // done 事件用 camelCase 序列化（JsonSerializerOptions.Web），与 token/error 事件及
+                // cart/products 等端点的 camelCase 契约一致——前端统一按 camelCase 读取。
+                // 此前裸 Serialize 输出 PascalCase（record 属性名），前端 data.Response 等读取失败（修复）。
+                await WriteSseEventAsync(writer, "done", JsonSerializer.Serialize(chatReply, JsonSerializerOptions.Web));
             }
             catch (Exception ex)
             {

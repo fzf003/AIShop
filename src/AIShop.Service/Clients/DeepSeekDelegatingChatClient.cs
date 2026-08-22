@@ -78,6 +78,26 @@ public sealed class DeepSeekDelegatingChatClient : DelegatingChatClient
         return await base.GetResponseAsync(list, options, cancellationToken);
     }
 
+    /// <summary>
+    /// 流式路径同样执行发前清洗（与 GetResponseAsync 对齐）。
+    /// 此前未 override → 透传 inner 无清洗：历史消息含"assistant 带 tool_calls 但无配对
+    /// tool 响应"的不完整对时，DeepSeek 返回 400（design §4.6 遗留风险），流式失败降级。
+    /// </summary>
+    public override IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+        IEnumerable<ChatMessage> messages, ChatOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        options ??= new ChatOptions();
+        options.ModelId ??= _modelName;
+
+        var list = messages.ToList();
+        list = RemoveEmptyToolCalls(list);
+        list = FillMissingToolResults(list);
+        list = MergeConsecutiveSameRole(list);
+
+        return base.GetStreamingResponseAsync(list, options, cancellationToken);
+    }
+
     private bool IsDeepSeek => _modelName.Contains("deepseek", StringComparison.OrdinalIgnoreCase);
 
     // =================================================================
@@ -311,17 +331,40 @@ public sealed class DeepSeekDelegatingChatClient : DelegatingChatClient
                 var fccList = msg.Contents.OfType<FunctionCallContent>().ToList();
                 if (fccList.Count > 0)
                 {
-                    result.Add(msg);
-
                     // 收集紧邻的 tool 消息，原样保留（只保留有 FunctionResultContent 的）
                     int j = i + 1;
+                    var toolMsgs = new List<ChatMessage>();
                     while (j < messages.Count && messages[j].Role == ChatRole.Tool)
                     {
                         if (messages[j].Contents.OfType<FunctionResultContent>().Any())
-                            result.Add(messages[j]);
+                            toolMsgs.Add(messages[j]);
                         j++;
                     }
 
+                    // 孤儿 FCC：assistant 声明了 tool_calls 但无任何配对 tool 结果
+                    // （旧伪流式跳过 tool_calls 的历史遗留）。DeepSeek 校验要求 tool_calls 后必须
+                    // 紧跟 tool 响应，否则 400。无文本 → 整体丢弃（孤儿声明无上下文价值）；
+                    // 有文本 → 移除 FCC 保留文本（消息语义仍成立）。
+                    if (toolMsgs.Count == 0)
+                    {
+                        var hasText = msg.Contents.OfType<TextContent>().Any(t => !string.IsNullOrEmpty(t.Text));
+                        if (hasText)
+                        {
+                            result.Add(new ChatMessage
+                            {
+                                Role = msg.Role,
+                                Contents = msg.Contents.Where(c => c is not FunctionCallContent).ToList(),
+                                AdditionalProperties = msg.AdditionalProperties,
+                                AuthorName = msg.AuthorName,
+                                RawRepresentation = msg.RawRepresentation
+                            });
+                        }
+                        i = j;
+                        continue;
+                    }
+
+                    result.Add(msg);
+                    result.AddRange(toolMsgs);
                     i = j;
                     continue;
                 }
