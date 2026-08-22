@@ -1089,6 +1089,100 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
         }
     }
 
+    // ============ T17 未发 token 降级守卫测试 ============
+
+    /// <summary>
+    /// T17 — spec Requirement 6「未发 token 异常维持降级」：
+    /// mock RunChatStreamAsync 在首个 MoveNext 即抛 HttpRequestException（未发任何 token，emittedAnyToken=false）：
+    /// /api/chat/stream 维持降级调用 RunChatAsync（恰被调用一次），响应含 done 事件且内容为 RunChatAsync 的降级结果
+    /// （无 token 事件、无 error 事件——降级路径正常，无重复完整回复）。
+    /// </summary>
+    [Fact]
+    public async Task ShouldFallbackToRunChatAsync_WhenStreamThrowsBeforeEmittingToken()
+    {
+        IShoppingAssistantAgent? mockAgent = null;
+        WebApplicationFactory<Program>? f = null;
+        f = _factory.WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                ReplaceWithIsolatedDb(services, Guid.NewGuid().ToString("N"));
+                services.RemoveAll<ModelRouter>();
+
+                var agent = Substitute.For<IShoppingAssistantAgent>();
+                // 流式：首个 MoveNext 即抛可重试异常（未发任何 token）。必须用真迭代器——若同步调用即抛，
+                // 会落入 L256「获取流失败重试」分支而非消费循环的降级分支，RunChatAsync 不会被调用
+                agent.RunChatStreamAsync(
+                        Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                    .Returns(ThrowImmediately());
+                // 降级目标 RunChatAsync 返回正常结果——未发 token 时须被调用一次
+                agent.RunChatAsync(
+                        Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                    .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
+                        _ => Task.FromResult(
+                            (new AgentChatResult("降级回复", [], null),
+                             Substitute.For<Microsoft.Agents.AI.AgentSession>())));
+                mockAgent = agent;
+
+                var mockRouter = Substitute.For<ModelRouter>();
+                mockRouter.ActiveModel.Returns("qwen");
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(agent);
+                mockRouter.GetDefaultAgent().Returns(agent);
+                services.AddSingleton(mockRouter);
+            }));
+
+        using var client = f.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/chat/stream")
+        {
+            Content = JsonContent.Create(new ChatRequest("marla", "你好")),
+        };
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadAsStringAsync();
+
+        // 未发 token：无 token 事件、无 error 事件，降级路径只发 done 事件
+        Assert.DoesNotContain("event: token", body);
+        Assert.DoesNotContain("event: error", body);
+        Assert.Contains("event: done", body);
+
+        // done 事件内容为 RunChatAsync 的降级结果（经 BuildChatReply 构造完整 ChatReply JSON）
+        var doneData = ParseSseEventData(body, "done");
+        Assert.NotNull(doneData);
+        var reply = JsonSerializer.Deserialize<ChatReply>(doneData);
+        Assert.NotNull(reply);
+        Assert.Contains("降级回复", reply!.Response);
+
+        // 降级路径：RunChatAsync 恰被调用一次（未发 token 时维持降级，不重试）
+        await mockAgent!.Received(1).RunChatAsync(
+            Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string?>(), Arg.Any<CancellationToken>());
+
+        // 迭代器辅助：首个 MoveNextAsync 即抛可重试异常（不 yield 任何 chunk，未发 token）。
+        // 用 await Task.FromException 而非直接 throw 后跟 yield break——后者在迭代器内 throw 后紧跟
+        // 语句不可达，触发 CS0162 告警（warnaserror 下即错误）；await 后 yield break 编译器视为可达
+        static async IAsyncEnumerable<ChatStreamChunk> ThrowImmediately()
+        {
+            await Task.FromException(new HttpRequestException("网络抖动"));
+            yield break;
+        }
+
+        // SSE 解析辅助：提取指定事件名（event: {name}）的 data 行内容；找不到返回 null
+        static string? ParseSseEventData(string body, string name)
+        {
+            foreach (var block in body.Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
+            {
+                var lines = block.Split('\n');
+                if (lines.Any(l => l.StartsWith($"event: {name}", StringComparison.Ordinal)))
+                {
+                    var dataLine = lines.FirstOrDefault(l => l.StartsWith("data: ", StringComparison.Ordinal));
+                    return dataLine?[6..];
+                }
+            }
+            return null;
+        }
+    }
+
     // ============ T18 已发 token 但无完整结果降级守卫测试 ============
 
     /// <summary>
