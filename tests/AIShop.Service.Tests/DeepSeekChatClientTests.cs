@@ -1,9 +1,11 @@
 using AIShop.Service.Clients;
 using Microsoft.Extensions.AI;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO.Pipelines;
 using System.Net;
 using System.Text;
+using System.Text.Json;
 
 namespace AIShop.Service.Tests;
 
@@ -233,12 +235,305 @@ public sealed class DeepSeekChatClientTests
     }
 
     /// <summary>
+    /// T5 — spec Requirement 2「分片 tool_calls 拼装为完整 FunctionCallContent」：
+    /// 同一 tool_call 的多个分片（首分片带 id/type/function.name + arguments 首段，
+    /// 后续分片带 arguments 续段）消费完整流后 yield 出完整 FunctionCallContent——
+    /// CallId/Name/Arguments（反序列化后）拼装正确；工具轮 updates 文本为空（不推前端）、
+    /// 仅含 FunctionCallContent。
+    /// </summary>
+    [Fact]
+    public async Task GetStreamingResponseAsync_SplitToolCall_AssemblesCompleteFunctionCallContent()
+    {
+        using var stream = new ChunkedDelayedStream();
+        using var handler = new ChunkedDelayedHttpMessageHandler(stream);
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://api.deepseek.example") };
+        using var client = new DeepSeekChatClient(httpClient, "deepseek-v4-flash");
+
+        // 同一 tool_call（index=0）分片下发：首分片带 id/name + arguments 首段，续分片带 arguments 续段
+        stream.WriteChunk(ToolCallSseChunk(new object[]
+        {
+            new { index = 0, id = "call_add", type = "function", function = new { name = "add_to_cart", arguments = "{\"productId\":" } }
+        }));
+        stream.WriteChunk(ToolCallSseChunk(new object[]
+        {
+            new { index = 0, function = new { arguments = "4,\"quantity\":1}" } }
+        }));
+        stream.WriteChunk("data: [DONE]\n\n");
+        stream.Complete();
+
+        var updates = new List<ChatResponseUpdate>();
+        await foreach (var update in client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "hi")]))
+            updates.Add(update);
+
+        // 工具轮 updates 文本为空、仅含 FunctionCallContent
+        var fccUpdate = Assert.Single(updates);
+        Assert.True(string.IsNullOrEmpty(fccUpdate.Text), "工具轮 updates 文本应为空（不推前端）");
+        var fcc = Assert.Single(fccUpdate.Contents.OfType<FunctionCallContent>());
+
+        // CallId/Name/Arguments（反序列化后）拼装正确
+        Assert.Equal("call_add", fcc.CallId);
+        Assert.Equal("add_to_cart", fcc.Name);
+        Assert.NotNull(fcc.Arguments);
+        Assert.Equal(4, GetArgumentInt(fcc.Arguments!, "productId"));
+        Assert.Equal(1, GetArgumentInt(fcc.Arguments!, "quantity"));
+    }
+
+    /// <summary>
+    /// T5 — spec Requirement 2「多 index 的 tool_calls 独立拼装」：
+    /// index 不同的多个 tool_call 分片交错下发，每个 index 独立累积，
+    /// 流末 yield 顺序按 index 升序（与分片到达顺序无关）。
+    /// </summary>
+    [Fact]
+    public async Task GetStreamingResponseAsync_MultiIndexToolCalls_YieldedInIndexAscendingOrder()
+    {
+        using var stream = new ChunkedDelayedStream();
+        using var handler = new ChunkedDelayedHttpMessageHandler(stream);
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://api.deepseek.example") };
+        using var client = new DeepSeekChatClient(httpClient, "deepseek-v4-flash");
+
+        // 交错下发 index=0 / index=1 分片：先各自首分片、再各自续段（模拟真实交错到达）
+        stream.WriteChunk(ToolCallSseChunk(new object[]
+        {
+            new { index = 0, id = "call_0", type = "function", function = new { name = "search_product", arguments = "{\"query\":" } }
+        }));
+        stream.WriteChunk(ToolCallSseChunk(new object[]
+        {
+            new { index = 1, id = "call_1", type = "function", function = new { name = "add_to_cart", arguments = "{\"productId\":" } }
+        }));
+        stream.WriteChunk(ToolCallSseChunk(new object[]
+        {
+            new { index = 0, function = new { arguments = "\"耳机\"}" } }
+        }));
+        stream.WriteChunk(ToolCallSseChunk(new object[]
+        {
+            new { index = 1, function = new { arguments = "4,\"quantity\":2}" } }
+        }));
+        stream.WriteChunk("data: [DONE]\n\n");
+        stream.Complete();
+
+        var updates = new List<ChatResponseUpdate>();
+        await foreach (var update in client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "hi")]))
+            updates.Add(update);
+
+        // 两个 index 独立累积并各自 yield 完整 FCC，顺序按 index 升序（index 0 先于 index 1）
+        var fccs = updates.Select(u => Assert.Single(u.Contents.OfType<FunctionCallContent>())).ToList();
+        Assert.Equal(2, fccs.Count);
+        Assert.All(updates, u => Assert.True(string.IsNullOrEmpty(u.Text), "工具轮 updates 文本应为空（不推前端）"));
+
+        var search = fccs[0];
+        Assert.Equal("call_0", search.CallId);
+        Assert.Equal("search_product", search.Name);
+        Assert.Equal("耳机", GetArgumentString(search.Arguments!, "query"));
+
+        var add = fccs[1];
+        Assert.Equal("call_1", add.CallId);
+        Assert.Equal("add_to_cart", add.Name);
+        Assert.Equal(4, GetArgumentInt(add.Arguments!, "productId"));
+        Assert.Equal(2, GetArgumentInt(add.Arguments!, "quantity"));
+    }
+
+    /// <summary>
+    /// T7 — spec Requirement 3「分块 reasoning 累积并经 callId 回传」：
+    /// 流式下多个 reasoning_content 分块被拼接累积（完整推理内容 = 全部分块，非仅最后一块），
+    /// 流末 tool_calls 将完整推理内容写入 _reasoningByCallId[callId]；
+    /// 后续 GetResponseAsync 请求体中同一 call_id 的 assistant 消息经 BuildRequestBody
+    /// 回传完整 reasoning_content（与 GetResponseAsync L96-110 行为一致）。
+    /// 同时断言推理内容未被 yield 到前端（消费流时无 reasoning 文本 chunk，仅 FCC 更新）。
+    /// </summary>
+    [Fact]
+    public async Task GetStreamingResponseAsync_ReasoningAccumulatedAndPassedBackByCallId()
+    {
+        // 首响应：分块延迟流（流式，SSE）；次响应：常规 JSON（非流式 GetResponseAsync 读响应体）
+        using var stream = new ChunkedDelayedStream();
+        using var handler = new SequencedHttpMessageHandler(
+            new HttpResponseMessage(HttpStatusCode.OK) { Content = new ChunkedDelayedHttpContent(stream) },
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}"),
+            });
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://api.deepseek.example") };
+        using var client = new DeepSeekChatClient(httpClient, "deepseek-v4-flash");
+
+        // 多个 reasoning_content 分块 + 流末 tool_calls（完整推理内容 = "推理第一段" + "，推理第二段"）
+        stream.WriteChunk("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"推理第一段\"}}]}\n\n");
+        stream.WriteChunk("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"，推理第二段\"}}]}\n\n");
+        stream.WriteChunk(ToolCallSseChunk(new object[]
+        {
+            new { index = 0, id = "call_r1", type = "function", function = new { name = "add_to_cart", arguments = "{\"productId\":4}" } }
+        }));
+        stream.WriteChunk("data: [DONE]\n\n");
+        stream.Complete();
+
+        // 消费完整流：推理内容不 yield（工具轮仅 FCC 更新，文本为空 → 不推前端）
+        var updates = new List<ChatResponseUpdate>();
+        await foreach (var update in client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "hi")]))
+            updates.Add(update);
+
+        var fccUpdate = Assert.Single(updates);
+        Assert.True(string.IsNullOrEmpty(fccUpdate.Text), "推理内容不应被 yield 到前端（工具轮 updates 文本为空）");
+        var fcc = Assert.Single(fccUpdate.Contents.OfType<FunctionCallContent>());
+        Assert.Equal("call_r1", fcc.CallId);
+        Assert.Equal("add_to_cart", fcc.Name);
+        Assert.Equal(4, GetArgumentInt(fcc.Arguments!, "productId"));
+
+        // 后续请求：携带同一 call_id 的 assistant 消息（无 TextReasoningContent），
+        // BuildRequestBody 经 _reasoningByCallId 回传完整推理内容
+        var assistantMsg = new ChatMessage { Role = ChatRole.Assistant };
+        assistantMsg.Contents.Add(new FunctionCallContent("call_r1", "add_to_cart",
+            new Dictionary<string, object?> { ["productId"] = 4 }));
+        await client.GetResponseAsync([new ChatMessage(ChatRole.User, "hi"), assistantMsg]);
+
+        // 请求体携带完整拼接的推理内容（非仅最后一块——若退化"只留最后一块"则此处缺失"推理第一段"）。
+        // 注：System.Text.Json 默认编码器将非 ASCII 字符转义为 \uXXXX，故经 JsonDocument 解析取值断言（对转义鲁棒）。
+        Assert.NotNull(handler.LastRequestBody);
+        using var bodyDoc = JsonDocument.Parse(handler.LastRequestBody!);
+        var reasoningMsg = bodyDoc.RootElement.GetProperty("messages").EnumerateArray()
+            .First(m => m.TryGetProperty("role", out var role) && role.GetString() == "assistant");
+        Assert.True(reasoningMsg.TryGetProperty("reasoning_content", out var reasoningEl),
+            "后续请求体应携带同一 call_id 对应的 reasoning_content 字段");
+        Assert.Equal("推理第一段，推理第二段", reasoningEl.GetString());
+    }
+
+    /// <summary>
+    /// T9 — spec Requirement 4「非 2xx 响应抛 HttpRequestException」：
+    /// HTTP 400 → 枚举 GetStreamingResponseAsync 时抛 HttpRequestException（不再静默空流），
+    /// 异常消息携带状态码与截断错误体（"DeepSeek API 400" + "bad request detail"）。
+    /// 抛出的异常类型即 HttpRequestException，命中上层 IsRetryableAgentFailure 分类器
+    /// （HttpRequestException => true，已由 AIShop.Api.Tests 既有
+    /// IsRetryableAgentFailure_ClassifiesByExceptionType 谓词测试覆盖）→ 进入重试/降级路径。
+    /// </summary>
+    [Fact]
+    public async Task GetStreamingResponseAsync_OnHttp400_ThrowsHttpRequestException()
+    {
+        using var httpClient = new HttpClient(new StubHttpMessageHandler(HttpStatusCode.BadRequest, "bad request detail"))
+        {
+            BaseAddress = new Uri("https://api.deepseek.example"),
+        };
+        using var client = new DeepSeekChatClient(httpClient, "deepseek-v4-flash");
+
+        // 枚举流时（首个 MoveNextAsync）非 2xx 分支抛 HttpRequestException，而非静默 yield break 返回空流
+        await using var enumerator = client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "hi")])
+            .GetAsyncEnumerator();
+        var move = enumerator.MoveNextAsync(); // 先取出 ValueTask 再 AsTask，规避 Sonar S5034 误报
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() => move.AsTask());
+
+        // 异常消息含状态码与截断错误体（与 OTel span 状态文案一致）
+        Assert.Contains("DeepSeek API 400", ex.Message);
+        Assert.Contains("bad request detail", ex.Message);
+    }
+
+    /// <summary>
+    /// T9 — spec Requirement 4 / R11 语义保留：流式非 2xx 抛异常时，
+    /// span 仍置 Error + StatusDescription 含状态码与截断错误体 + 产生 "exception" 事件
+    /// （与既有非流式 GetResponseAsync_OnHttp400_SetsActivityErrorAndExceptionEvent 遥测行为对称，
+    /// 抛异常不丢被吞 API 错误进 OTel span 的语义）。
+    /// </summary>
+    [Fact]
+    public async Task GetStreamingResponseAsync_OnHttp400_StillSetsActivityErrorAndExceptionEvent()
+    {
+        using var httpClient = new HttpClient(new StubHttpMessageHandler(HttpStatusCode.BadRequest, "bad request detail"))
+        {
+            BaseAddress = new Uri("https://api.deepseek.example"),
+        };
+        using var client = new DeepSeekChatClient(httpClient, "deepseek-v4-flash");
+
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = _ => true,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+        };
+        ActivitySource.AddActivityListener(listener);
+        try
+        {
+            using var source = new ActivitySource("R4.DeepSeekChatClientStreamTests");
+            using var activity = source.StartActivity("deepseek.stream.request", ActivityKind.Client);
+
+            // 首个 MoveNextAsync 抛 HttpRequestException（迭代器在非 2xx 分支 throw，先取 ValueTask 规避 S5034）
+            await using var enumerator = client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "hi")])
+                .GetAsyncEnumerator();
+            var move = enumerator.MoveNextAsync();
+            await Assert.ThrowsAsync<HttpRequestException>(() => move.AsTask());
+
+            // span 置 Error + StatusDescription 含状态码与截断详情
+            Assert.Equal(ActivityStatusCode.Error, activity!.Status);
+            Assert.Contains("DeepSeek API 400", activity.StatusDescription);
+            // "exception" 事件带 type/message tag
+            var excEvent = Assert.Single(activity.Events, e => e.Name == "exception");
+            Assert.Equal("HttpRequestException", (string)excEvent.Tags.First(t => t.Key == "exception.type").Value!);
+            Assert.Contains("bad request detail",
+                (string)excEvent.Tags.First(t => t.Key == "exception.message").Value!);
+        }
+        finally
+        {
+            listener.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// T5 — 构造 OpenAI 兼容 tool_calls 分片 SSE 行（data: {...}）：
+    /// 经 JsonSerializer 序列化保证嵌套 arguments 转义正确（避免手工拼 JSON 转义出错）。
+    /// </summary>
+    private static string ToolCallSseChunk(IEnumerable<object> fragments)
+    {
+        var json = JsonSerializer.Serialize(fragments);
+        return $"data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":{json}}}}}]}}\n\n";
+    }
+
+    /// <summary>
+    /// T5 — 从 tool_call arguments 字典读取整数值。
+    /// 反序列化 `Dictionary&lt;string, object?&gt;` 后，JSON 数字被表示为 JsonElement（非原生 long/int），
+    /// Convert.ToInt32(JsonElement) 会抛 InvalidCastException，故统一经 GetInt32 提取。
+    /// </summary>
+    private static int GetArgumentInt(IDictionary<string, object?> args, string key)
+    {
+        var value = args[key];
+        if (value is JsonElement element && element.ValueKind == JsonValueKind.Number)
+            return element.GetInt32();
+        return Convert.ToInt32(value, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// T5 — 从 tool_call arguments 字典读取字符串值。
+    /// JSON 字符串反序列化为 JsonElement（String 类型），经 GetString 提取。
+    /// </summary>
+    private static string GetArgumentString(IDictionary<string, object?> args, string key)
+    {
+        var value = args[key];
+        if (value is JsonElement element && element.ValueKind == JsonValueKind.String)
+            return element.GetString() ?? "";
+        return value?.ToString() ?? "";
+    }
+
+    /// <summary>
     /// 固定响应 handler：返回指定状态码 + body，供 DeepSeekChatClient 非 2xx 分支测试。
     /// </summary>
     private sealed class StubHttpMessageHandler(HttpStatusCode statusCode, string body) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
             => Task.FromResult(new HttpResponseMessage(statusCode) { Content = new StringContent(body) });
+    }
+
+    /// <summary>
+    /// T7 — 顺序响应 + 记录请求体 handler：按调用次数依次返回预设响应，
+    /// 并记录最近一次请求体（供断言 _reasoningByCallId 经后续请求体回传）。
+    /// 首响应为分块延迟流（流式 GetStreamingResponseAsync），次响应为常规 JSON
+    /// （非流式 GetResponseAsync 读响应体）；两个调用共享同一 client 实例（_reasoningByCallId 为实例字段）。
+    /// </summary>
+    private sealed class SequencedHttpMessageHandler(params HttpResponseMessage[] responses) : HttpMessageHandler
+    {
+        private readonly HttpResponseMessage[] _responses = responses;
+        private int _callIndex;
+        public string? LastRequestBody { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.Content is not null)
+                LastRequestBody = await request.Content.ReadAsStringAsync(cancellationToken);
+            var response = _responses[_callIndex];
+            _callIndex++;
+            return response;
+        }
     }
 
     /// <summary>
