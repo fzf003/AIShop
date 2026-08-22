@@ -8,13 +8,17 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 using Serilog;
 using System.Diagnostics;
+using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace AIShop.Service;
 
 public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 {
+    // _agent readonly：T13 测试缝——internal 构造在 public 构造委托后包装 _agent
+    // （见 internal 构造，agentWrapper 参数），readonly 允许构造器内多次赋值；字段仅在构造期赋值
     private readonly AIAgent _agent;
     private readonly SqliteChatHistoryProvider _provider;
     private readonly bool _isOpenAI;
@@ -24,6 +28,30 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         model.StartsWith("gpt-", StringComparison.OrdinalIgnoreCase) ||
         model.StartsWith("o1-", StringComparison.OrdinalIgnoreCase) ||
         model.StartsWith("o3-", StringComparison.OrdinalIgnoreCase);
+
+    // R4/R5/R9：清洗 LLM 回复中的商品 ID 展示（#5、商品Id:4、商品ID为4 等）
+    // 与 ChatEndpoints.cs 中的正则一致，用于流式增量清洗
+    private static readonly Regex HashIdPattern =
+        new(@"#(?<id>\d+)", RegexOptions.None, TimeSpan.FromSeconds(1));
+    private static readonly Regex FixedIdPattern =
+        new(@"商品Id[:：]\d+", RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
+    private static readonly Regex ProductIdLabelPattern =
+        new(@"商品ID[\s:：为是]*\d+", RegexOptions.None, TimeSpan.FromSeconds(1));
+    private const int MinProductId = 1;
+    private const int MaxProductId = 18;
+
+    /// <summary>
+    /// 清洗 LLM 回复文本（R4/R5/R9）：去除商品 ID 展示，只清洗 Reply 字符串。
+    /// </summary>
+    private static string SanitizeReply(string? reply)
+    {
+        // T14：委托 ApplySanitizePatterns（三路替换）后 Trim。
+        // 收敛为复用而非内联，使 ApplySanitizePatterns 保持存活（tasks.md T14：方法本身保留），行为与内联零变化
+        return ApplySanitizePatterns(reply ?? "").Trim();
+    }
+
+    private static bool IsProductId(string idText) =>
+        int.TryParse(idText, out var id) && id is >= MinProductId and <= MaxProductId;
 
     private static string BuildInstructions(IReadOnlyDictionary<string, string[]> keywordMap)
     {
@@ -130,7 +158,16 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 
         // T10：Provider 存为字段（不只内联传给 ChatHistoryProvider）——
         // RunChatAsync 在 Run 正常返回后需调用 _provider.MarkRoundFinalAsync(runId) 兜底补标本轮终点
-        _provider = new SqliteChatHistoryProvider(dbFactory);
+        _provider = new SqliteChatHistoryProvider(dbFactory, (session) => {
+
+            if (session!.TryGetInMemoryChatHistory(out var chatHistory) && chatHistory is { Count: > 0 }) 
+            {
+                return new SqliteChatHistoryProvider.State() { Messages = chatHistory };
+            }
+
+            return new SqliteChatHistoryProvider.State();
+
+        }, stateKey: "ShoppingAssistant");
 
         var options = new HarnessAgentOptions
         {
@@ -168,6 +205,22 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             _agent,
             telemetryOptions.SourceName,
             telemetryOptions.Level);
+    }
+
+    /// <summary>
+    /// T13 测试缝（internal，经 InternalsVisibleTo 对测试项目可见）：比 public 构造多一个
+    /// <paramref name="agentWrapper"/> 参数，让测试可包装真实 _agent（如首次 CreateSessionAsync 抛异常），
+    /// 验证 RunChatStreamAsync 会话创建失败降级到 RunChatAsync 路径。
+    /// public 构造委托本构造并传 null，行为与接口契约零变化（spec Requirement 7：RunChatStreamAsync 签名不变）。
+    /// </summary>
+    internal ShoppingAssistantAgent(
+        IChatClient chatClient, IDbContextFactory<AppDbContext> dbFactory,
+        IReadOnlyDictionary<string, string[]> keywordMap, CartToolProvider cartTools, bool isOpenAI,
+        AgentTelemetryOptions telemetryOptions, Func<AIAgent, AIAgent>? agentWrapper)
+        : this(chatClient, dbFactory, keywordMap, cartTools, isOpenAI, telemetryOptions)
+    {
+        if (agentWrapper is not null)
+            _agent = agentWrapper(_agent);
     }
 
     /// <summary>
@@ -273,5 +326,190 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         await _provider.MarkRoundFinalAsync(runId, ct);
 
         return (result ?? new AgentChatResult(rawText ?? "", [], null), session);
+    }
+
+    /// <summary>
+    /// 执行一次 Agent 对话（流式版本）。
+    /// 调用 MAF RunStreamingAsync 获取 IAsyncEnumerable&lt;AgentResponseUpdate&gt;，
+    /// 以原生流式迭代器内联边收边 yield：对每个 text delta 执行增量 SanitizeReplyIncremental 清洗后
+    /// 立即 yield 为 ChatStreamChunk{TextDelta, IsComplete=false}，不收集到 List（真流式）。
+    /// 流结束后冲洗缓冲残留文本、解析完整文本提取 JSON 得到 AgentChatResult，
+    /// yield 最终完整结果 chunk，最后调用 _provider.MarkRoundFinalAsync 兜底补标。
+    ///
+    /// 异常语义：会话创建阶段 try-catch（失败降级到 RunChatAsync 返回单个 chunk）；
+    /// 迭代循环不 try-catch——异常自然传播给端点 catch 处理（降级/重试），
+    /// MarkRoundFinalAsync 不执行 → 该轮视为未完成，与 RunChatAsync 异常语义一致。
+    /// 流式过程中不执行工具调用（FICC 内部处理，文本增量只含最终回复）。
+    /// </summary>
+    public async IAsyncEnumerable<ChatStreamChunk> RunChatStreamAsync(
+        Guid sessionId, string userMessage, string username,
+        string? preferences = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+        CartToolProvider.SetCurrentUser(username);
+
+        // 会话创建（失败直接降级，无需 MarkRoundFinal）
+        AgentSession? session = null;
+        try
+        {
+            session = await _agent.CreateSessionAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            Logger.Warning(ex, "创建流式会话失败，降级到非流式");
+        }
+
+        if (session is null)
+        {
+            var (fallbackResult, _) = await RunChatAsync(sessionId, userMessage, username, preferences, ct);
+            yield return new ChatStreamChunk { TextDelta = fallbackResult.Reply, IsComplete = false };
+            yield return new ChatStreamChunk { TextDelta = "", IsComplete = true, FullResult = fallbackResult };
+            yield break;
+        }
+
+        session.StateBag.SetValue("SessionId", sessionId.ToString());
+        var runId = Guid.NewGuid();
+        session.StateBag.SetValue("RunId", runId.ToString());
+        if (!string.IsNullOrWhiteSpace(preferences))
+            session.StateBag.SetValue("Preferences", preferences);
+
+        // 原生流式：内联迭代循环，边收边 yield（不收集到 List）。
+        // 迭代循环不 try-catch——异常自然传播给端点 catch 处理，MarkRoundFinalAsync 不执行 → 该轮视为未完成
+        var sw = Stopwatch.StartNew();
+        var unflushed = "";
+        // 累积完整原始文本：原生流式下增量文本不写回 session history，
+        // 流结束的完整结果须从累积文本解析（T11 修复：ParseFinalResult(session) 在此返回空）
+        var fullTextBuilder = new StringBuilder();
+        await foreach (var text in _agent
+            .RunStreamingAsync(userMessage, session, cancellationToken: ct)
+            .Select(u => u.Text))
+        {
+            if (string.IsNullOrEmpty(text))
+                continue;
+
+            fullTextBuilder.Append(text);
+
+            var (cleaned, remaining) = SanitizeReplyIncremental(text, unflushed);
+            unflushed = remaining;
+
+            if (!string.IsNullOrEmpty(cleaned))
+                yield return new ChatStreamChunk { TextDelta = cleaned, IsComplete = false };
+        }
+        sw.Stop();
+
+        Logger.Information("[Diagnose] 流式Agent调用总耗时 AgentCall={ElapsedMs}ms SessionId={SessionId}",
+            sw.ElapsedMilliseconds, sessionId);
+
+        // 流结束：冲洗缓冲区中残留的已清洗文本
+        if (!string.IsNullOrEmpty(unflushed))
+        {
+            var finalCleaned = SanitizeReply(unflushed);
+            if (!string.IsNullOrEmpty(finalCleaned))
+                yield return new ChatStreamChunk { TextDelta = finalCleaned, IsComplete = false };
+        }
+
+        // 流结束后：从累积的完整原始文本解析 AgentChatResult
+        // （原生流式路径下增量文本不写回 session history，改用累积文本解析）
+        var finalResult = ParseFinalResultFromText(fullTextBuilder.ToString());
+        yield return new ChatStreamChunk { TextDelta = "", IsComplete = true, FullResult = finalResult };
+
+        await _provider.MarkRoundFinalAsync(runId, ct);
+    }
+
+    /// <summary>
+    /// 从流式累积的完整原始文本中提取 JSON 解析 AgentChatResult。
+    /// 解析失败返回空结果（Reply 兜底为原始文本）。
+    /// </summary>
+    private static AgentChatResult ParseFinalResultFromText(string rawText)
+    {
+        var text = rawText.Trim();
+        if (string.IsNullOrEmpty(text))
+            return new AgentChatResult(text, [], null);
+
+        var jsonStart = text.IndexOf('{');
+        var jsonEnd = text.LastIndexOf('}');
+        if (jsonStart < 0 || jsonEnd <= jsonStart)
+            return new AgentChatResult(text, [], null);
+
+        var json = text[jsonStart..(jsonEnd + 1)];
+        try
+        {
+            return JsonSerializer.Deserialize<AgentChatResult>(json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                ?? new AgentChatResult(text, [], null);
+        }
+        catch (JsonException ex)
+        {
+            Logger.Warning(ex, "流式 Agent 回复 JSON 解析失败");
+            return new AgentChatResult(text, [], null);
+        }
+    }
+
+    /// <summary>
+    /// 增量清洗：将新文本追加到缓冲区，尝试去除商品 ID 模式，
+    /// 返回安全可发送的前缀和剩余缓冲。
+    /// 处理跨 chunk 的模式（如 "#5" 在一个 chunk、"无线" 在下一个 chunk）。
+    /// </summary>
+    private static (string safeToEmit, string remaining) SanitizeReplyIncremental(string newText, string buffer)
+    {
+        var fullText = buffer + newText;
+
+        // 逐模式尝试匹配，取最早匹配位置作为安全边界
+        int safePos = fullText.Length;
+
+        var fixedMatch = FixedIdPattern.Match(fullText);
+        if (fixedMatch.Success && fixedMatch.Index < safePos)
+            safePos = fixedMatch.Index;
+
+        var hashMatch = HashIdPattern.Match(fullText);
+        if (hashMatch.Success && hashMatch.Index < safePos)
+            safePos = hashMatch.Index;
+
+        var labelMatch = ProductIdLabelPattern.Match(fullText);
+        if (labelMatch.Success && labelMatch.Index < safePos)
+            safePos = labelMatch.Index;
+
+        if (safePos == fullText.Length)
+        {
+            // 无匹配，检查尾部是否可能是模式前缀（如以 "商品Id" 结尾）
+            if (!EndsWithPatternPrefix(fullText))
+                return (fullText, "");
+            return ("", fullText);
+        }
+
+        // 有匹配：safePos 之前的部分已清洗（无模式），安全发送
+        var safe = fullText[..safePos];
+        // 从 safePos 开始是可能包含模式的区域，保留到下一轮
+        var remaining = fullText[safePos..];
+
+        return (safe, remaining);
+    }
+
+    private static string ApplySanitizePatterns(string text)
+    {
+        text = FixedIdPattern.Replace(text, "");
+        text = HashIdPattern.Replace(text, static match =>
+            IsProductId(match.Groups["id"].Value) ? "" : match.Value);
+        text = ProductIdLabelPattern.Replace(text, "");
+        return text;
+    }
+
+    /// <summary>
+    /// 检查文本尾部是否可能是某个清洗模式的前缀。
+    /// 如果是，则不能安全 flush，需要等待更多文本。
+    /// </summary>
+    private static bool EndsWithPatternPrefix(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return false;
+        var tail = text.Length > 10 ? text[^10..] : text;
+
+        // # 后可能跟数字
+        if (tail.EndsWith('#')) return true;
+
+        // 商品Id 后可能跟 :N
+        if (tail.Contains("商品Id", StringComparison.OrdinalIgnoreCase) ||
+            tail.Contains("商品ID", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return false;
     }
 }
