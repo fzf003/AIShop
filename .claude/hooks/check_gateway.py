@@ -6,13 +6,13 @@ PreToolUse hook: 强制流程顺序，同时支持三种 flow-mode：
       exploration.md -> proposal.md -> design.md + specs/{domain}/spec.md
       -> tasks.md -> implementation -> test-report.md
 
-  matt-pocock (matt-pocock-flow skill 使用)
+  matt-pocock (matt-workflow skill 使用)
       grill 记录（可直接写进 design.md 头部，无需独立文件）
       -> design.md + specs/{domain}/spec.md -> tasks.md
       -> implementation -> test-report.md
       不要求 exploration.md / proposal.md
 
-  quick (轻量改动快速通道，见 matt-pocock-flow SKILL.md "快速路径判定")
+  quick (轻量改动快速通道，见 matt-workflow SKILL.md "快速路径判定")
       不要求任何规划产出物，但实现代码仍必须来自 @implementer，
       且仍然拦截 git commit / openspec archive（见 check_commit_gate.py /
       check_archive_gate.py），避免"跳过规划"被滥用成"跳过质量门槛"。
@@ -232,21 +232,33 @@ def main():
             sys.exit(2)
         sys.exit(0)
 
-    # 规则 4：写 tasks.md 前，必须先有 design.md 和至少一个 delta spec，调用方必须是 @task-breaker
-    # （quick 模式也要求，工单拆解不是重量级步骤，跳过它没有实际收益，反而丢失 blocking edges 信息）
+    # 规则 4：tasks.md 编辑权限分层
+    #   - @task-breaker：完全权限（创建、修改工单、勾选 checkbox）
+    #   - @implementer：仅允许勾选 checkbox（将 `- [ ]` 改为 `- [x]`）
+    #   - 其他调用方：拦截
+    # 前置条件：写 tasks.md 前必须先有 design.md 和至少一个 delta spec
     if rel_path == tasks_path:
-        missing = []
-        if not os.path.exists(design_path):
-            missing.append(design_path)
-        if not has_any_delta_spec(base):
-            missing.append(f"{base}/specs/{{domain}}/spec.md（至少一个）")
-        if missing:
-            print(f"BLOCKED: 缺少 {missing}，必须先完成设计与规范阶段", file=sys.stderr)
+        agent_type = data.get("agent_type")
+        if agent_type not in ("task-breaker", "implementer"):
+            who = agent_type or "主对话（未委派给任何 subagent）"
+            print(
+                f"BLOCKED: {rel_path} 必须由 @task-breaker 或 @implementer 完成，"
+                f"检测到实际调用方是 {who}",
+                file=sys.stderr,
+            )
             sys.exit(2)
-        reason = check_agent_identity(data, rel_path, EXPECTED_AGENT["tasks.md"])
-        if reason:
-            print(reason, file=sys.stderr)
-            sys.exit(2)
+
+        # 前置条件检查（仅 @task-breaker 创建时需要）
+        if agent_type == "task-breaker":
+            missing = []
+            if not os.path.exists(design_path):
+                missing.append(design_path)
+            if not has_any_delta_spec(base):
+                missing.append(f"{base}/specs/{{domain}}/spec.md（至少一个）")
+            if missing:
+                print(f"BLOCKED: 缺少 {missing}，必须先完成设计与规范阶段", file=sys.stderr)
+                sys.exit(2)
+
         sys.exit(0)
 
     # 规则 5：写 test-report.md 前，tasks.md 必须全部完成，调用方必须是 @tester

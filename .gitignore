@@ -30,7 +30,6 @@ Directory.Build.props
 .claude/workflows/
 .codex/
 .claude/skills/matt-workflow/
-.claude/skills/matt-pocock-flow/
 .claude/agents
 
 tools/

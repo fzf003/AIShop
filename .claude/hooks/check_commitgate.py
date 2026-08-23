@@ -3,7 +3,7 @@
 PreToolUse hook（matcher: Bash）：拦截 `git commit`，commit 前强制跑
 `dotnet build` + `dotnet test`，任一失败则 BLOCKED，不允许 commit。
 
-背景：matt-pocock-flow / development-flow.md 里都写了"提交前确保 dotnet build
+背景：matt-workflow / development-flow.md 里都写了"提交前确保 dotnet build
 0 错误 + 测试通过"，但这只是文字要求，之前没有任何 hook 校验，agent 完全可能
 谎报或跳过。原有 PostToolUse 只挂了 `dotnet format --verify-no-changes`，
 且允许失败不阻断（`|| exit 0`），起不到质量门槛的作用。
