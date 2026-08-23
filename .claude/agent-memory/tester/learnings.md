@@ -106,3 +106,27 @@
 - **T13 重试语义**：重试一次、`router.ActiveModel` 换默认模型；首次失败仅 Warning 不置 Activity Error；重试成功不污染 span。断言口径 `Received(2)`（重试路径）vs `Received(1)`（非重试/KeyNotFoundException）。
 - **遗留清理项**：`ModelRouter.cs` 的 `using System.Net.Sockets;` 为 CS8019 历史遗留（非 Phase 6 引入），MSBuild 未拦截，待清理。
 - **test-report 写入**：本次用临时文件 + Python 定点插入（在 `## 结论` 前插入 `## 13. Phase 6 追加实施` 章节、替换结论）成功，写后 Read 回读验证 282 行无损坏；元数据 272 按「只增不改」保留，Phase 6 章节内注明全量 287。
+
+## tester 会话：service-layer-extraction 出 test-report（2026-08-20）
+
+- **当前全量测试数 287/287**（AIShop.Service.Tests 108 + AIShop.Api.Tests 168 + AIShop.McpServer.Tests 11，全绿、0 跳过）；与迁移前（chat-round-boundary 末态 Api 276 + McpServer 11 = 287）总数守恒，仅文件归属调整。
+- **构建命令**：`dotnet build -warnaserror`（git bash 单横线）0 错误 0 警告，11 项目全构建约 6 分钟（后台跑，`| tail -30` 管道会在全部输出后才落盘，进度文件为空属正常）。
+- **分项目权威计数**：solution 级 `dotnet test --no-build` 日志抓三项目独立汇总（行号 615/4082/10749 附近：McpServer 11 / Service 108 / Api 168）；按类统计用 `grep "已通过 AIShop.Service.Tests\." 日志 | sed 's/.*\.\([A-Za-z]*\).*/\1/' | sort | uniq -c`。
+- **Service.Tests 108 = 107 定义 + 1 参数化展开**：107 个 [Fact]/[Theory] 中 AgentTelemetryTests 有 1 个 [Theory] 带 2 个 InlineData（Metadata / MetadataAndContent）→ 实际 108。数定义数时别忘 [Theory] 展开。
+- **本变更测试类归属核对**：Service.Tests 10 类（Sqlite 40 + Sanitizing 26 + AgentTelemetry 18 + PrefMemory 5 + DSDC 5 + DSCC 4 + RunChat 3 + ModelRouter 3 + RunChatPref 2 + ModelRouterResilience 2）；Api.Tests 29 类（ChatEndpointsWeb 32 + CartEndpoints 13 + ChatRecsMerge 13 + RecMerge 12 + ...）。6 个 WAF 端点集成类（ChatPreferenceBackfill/Enqueue/Filter、ChatRecommendationMerge、ChatRecommendationsMerge、ChatReplySanitization）移回 Api.Tests，Service.Tests 无 Api 引用。
+- **T16 flaky 已根治**：PreferenceWriteHostedServiceTests 从「in-memory 共享连接并发竞态」改为「临时文件库 + 独立连接」，隔离连续 5 次 4/4 绿；本次全量未复现。ServiceDefaultsDebugTests 本次也未复现。
+- **MAF 版本核对**：全仓库 csproj grep `Microsoft.Agents` 仅 Service（三包 1.18.0）+ AgentTelemetry（1 包 1.18.0），无 1.17.0、Api 零 MAF 包。
+- **test-report 写入**：无 Write/Edit 工具，用三块 `cat > / >>` heredoc（引号分隔符，各 47/63/56 行 <100）写 openspec 路径成功，写后 Read 回读 165 行无损坏；tasks.md 全勾选，check_gateway 放行。
+- **协调者 QA 证据采信**：API 自测（/api/models 3 模型、/api/chat 真实 LLM 完整 ChatReply）+ UI 截图 `.gstack/qa-reports/screenshots/home.png`（43KB）作为 §4/§7 证据引用而非重跑。
+
+## tester 会话：stream-true-streaming 出 test-report（2026-08-22）
+
+- **当前全量测试数 303/303**（AIShop.Service.Tests 121 + AIShop.Api.Tests 171 + AIShop.McpServer.Tests 11，全绿、0 跳过）；基线 287（service-layer-extraction 归档时），本次新增 16 例：DeepSeekChatClientTests +9、RunChatStreamAsyncTests（新建）+4、ChatEndpointsWebTests +3。
+- **新增流式测试类与方法**（均为真实断言，非形式测试）：
+  - `DeepSeekChatClientTests`：T1 设施 2（ChunkedDelayedStream_FirstChunkImmediatelyReadable_SubsequentWaitsForSignal / ChunkedDelayedHttpMessageHandler_ReturnsOkAndExposesChunkedStream）、T3 2（FirstChunkImmediatelyYieldsFirstToken / MultipleContentChunksYieldedInOrder）、T5 2（SplitToolCall_AssemblesCompleteFunctionCallContent / MultiIndexToolCalls_YieldedInIndexAscendingOrder）、T7 1（ReasoningAccumulatedAndPassedBackByCallId）、T9 2（OnHttp400_ThrowsHttpRequestException / OnHttp400_StillSetsActivityErrorAndExceptionEvent）
+  - `RunChatStreamAsyncTests`：YieldsIncrementalTextInArrivalOrder / CompleteChunkCarriesFullResultAndRoundMarkedFinal / SanitizesProductIdSplitAcrossChunks / FallsBackToRunChatAsyncWhenSessionCreationFails
+  - `ChatEndpointsWebTests`：ShouldSendOnlyError_WhenStreamThrowsAfterEmittingToken / ShouldFallbackToRunChatAsync_WhenStreamThrowsBeforeEmittingToken / ShouldSendOnlyError_WhenStreamEmitsTokenButNoCompleteChunk
+- **handoff-T19 记录的 2 失败已修复**：T10 `ParseFinalResult(session)` 恒空（TryGetInMemoryChatHistory 在 SqliteChatHistoryProvider 全链路下恒 false）→ 已按建议 A 改 `RunChatStreamAsync` 内 StringBuilder 累积原始文本 + 流末 `ParseFinalResultFromText(fullTextBuilder.ToString())` 抠 JSON 解析。tester 隔离重跑 RunChatStreamAsyncTests 4/4 绿确认。
+- **QA 修复 3 项（本变更实现外，QA 全程补的）**：① `DeepSeekDelegatingChatClient` 新增 override `GetStreamingResponseAsync`（发前清洗 RemoveEmptyToolCalls/FillMissingToolResults/MergeConsecutiveSameRole，修流式孤儿 FCC → DeepSeek 400 降级丢 token）；② done 事件改 `JsonSerializer.Serialize(chatReply, JsonSerializerOptions.Web)`（camelCase，修前端 data.response 读取失败）；③ 推荐面板字段随 #2 解决。
+- **计数口径**：solution 级 `dotnet test` tail 只显示最后一个项目汇总，303 需三项目相加；本次 tester 只隔离重跑 RunChatStreamAsyncTests（约 2s），未跑全量（协调者已手动全量验证 303）。
+- **无 flaky 记录**：ServiceDefaultsDebugTests 本次未跑（未在全量中复现），延续既有判断。

@@ -2,6 +2,14 @@
 
 > 每次完成实现后自动追加。启动时读取，指导本次实现。
 
+## T16 全量验证 + flaky 修复笔记（service-layer-extraction）
+
+- **T16 全量验证最终态：build 0 错误 0 警告 + test 全绿（McpServer 11 + Service 140 + Api 136 = 287）**；复核三项全过：grep 全解决方案 `AIShop.Api.Agents` 无匹配、`dotnet list package` 无 MAF 1.17.0（Service 三包 1.18.0 + DeepSeek 1.0.4、AgentTelemetry 单包 1.18.0、Api 零 MAF/DeepSeek 顶级包）、`src/AIShop.Api/Agents/` 目录不存在。迁移阶段（T4-T9 源文件 + T10-T15 测试文件 + T17 文档）全部收口后全量绿。
+- **既有 flaky `PreferenceWriteHostedServiceTests`（in-memory SQLite 共享连接 + worker 并发）T16 根治**：根因 = `TestDbContextFactory` 所有 DbContext 共享同一 `SqliteConnection("DataSource=:memory:")`，hosted service 后台线程写 + 测试主线程轮询读并发访问同一连接，Microsoft.Data.Sqlite 单连接非线程安全 → 偶发 NRE（`SqliteConnection.Close()` DisposeAsync 或轮询 DbContext `InternalServiceProvider`）。全量失败集合不稳定（ShouldTruncateToTop20/ShouldMergeMultipleEnqueues/ShouldContinue 轮换），隔离 filter 也偶发失败——learnings R1/T2/T3 记录了「串行集合」解法但未根治（串行集合只消跨类竞争，不消类内 worker 线程 + 主线程并发）。
+- **根治方案 = 临时文件库替代 in-memory 共享连接**（T7/T15/T23-pre 同款模式）：`_dbFile = Path.Combine(Path.GetTempPath(), $"pref_{Guid.NewGuid():N}.db")` + `UseSqlite($"Data Source={_dbFile}")`，`TestDbContextFactory` 各 context 独立连接（EF 连接池复用文件库）；`DisposeAsync` 改 `SqliteConnection.ClearAllPools()` + `File.Delete(_dbFile)`。worker 写 + 轮询读走不同连接，文件库多连接并发安全。改后隔离连续 5 次全过 + 全量 136/136 绿。**做「hosted service + 轮询读」测试，直接上临时文件库，不要用 in-memory 共享连接（微软文档已声明 SqliteConnection 非线程安全）**。
+- **T16 提交 `0abe0c9`**：pathspec `git commit -o -m -- <单路径>` 精确隔离（index 混有并行 T4-T9 的 12 rename + 7 M staged 在制品），commitgate 全量 build+test 一次通过（修复后 287 全绿）；`git show --stat HEAD` 复核恰 1 文件。
+- **tasks.md checkbox 依旧被 check_gateway.py 规则 4 拦截**（implementer Edit BLOCK 实测历史），handoff 注明待 @task-breaker 勾选。
+
 ## 编码约定
 
 <!-- 每次发现新的项目约定时追加 -->
@@ -341,4 +349,204 @@
 
 - **移除 EF DbSet 前先全链 grep「接口契约 + 调用点 + 既有库孤儿表」**：删除 `DbSet<ChatMessage> ChatMessages` 后，`IChatMessageRepository.Add(ChatMessage)`（写 db.ChatMessages）与 `ISessionRepository.GetSessionHistoryAsync`（读 db.ChatMessages）成为唯一的废弃表引用；两者均无调用点（聊天历史由 SqliteChatHistoryProvider 写 chat_messages、/login 走 IChatMessageRepository 读 ChatMessageRecords），故从接口 + 实现一并移除。Core 实体 `ChatMessage` 保留（仍被 GetSessionHistoryAsync/GetLastUserMessageAsync 返回类型与映射使用）。
 - **既有库孤儿表不会自动消失**：`EnsureCreated` 只在新库建表；移除 DbSet 后既有 `aishop.db` 的 `ChatMessages` 表残留（无害但脏）。`src/AIShop.Api/aishop.db` 被 `.gitignore`（`*.db`）忽略——drop 表是本地清理，不随 commit。用 `python sqlite3` 执行 `DROP TABLE IF EXISTS "ChatMessages"`（注意表名 PascalCase，SQLite 大小写不敏感但 EF 元数据按此存），只动废弃表、不动 `chat_messages`。
-- **双表历史**：AppDbContext 有 `ChatMessage`（DbSet→表 `ChatMessages`，废弃）与 `ChatMessageRecord`（DbSet→ToTable "chat_messages"，在用）；ChatMessageRecord 的 OnModelCreating 配置在文件里重复了两遍（L43-59 与 L78-98），清理时按「不重构本次范围外」保留不动。
+- **双表历史**：AppDbContext 有 `ChatMessage`（DbSet→表 `ChatMessages`，废弃）与 `ChatMessageRecord`（DbSet→ToTable "chat_messages"，在用）；ChatMessageRecord 的 OnModelCreating 配置在文件里重复了两遍（L43-59 与 L78-98），清理时按「不重构本次范围外」保留不动
+
+## T1 新建 AIShop.Service 项目笔记（service-layer-extraction）
+
+- **`dotnet sln add <csproj> --solution-folder src` 一次性完成全部 sln 变更**：自动生成项目条目（新 GUID）+ `ProjectConfigurationPlatforms` 全部 6 组构建项（Debug/Release × Any CPU/x64/x86）+ `NestedProjects` 挂 src 组，无需手动补任何条目（本任务曾以为要手写，实测 CLI 全包）。
+- **OpenSpec change 目录整体 gitignore 且未跟踪**：`openspec/` 在 .gitignore，`git ls-files openspec/changes/` 为空（tasks.md/design.md/handoffs 都不在 index），仅历史 multi-model-agent handoffs 被 force-add 过。新增 handoff 文件不 commit（保持 gitignored），git commit 只含源码文件；check-ignore 验证即可。
+- **Service 项目空壳期双引用同版本 MAF 无冲突**：Api 与 Service 同时 `PackageReference Microsoft.Agents.AI 1.17.0` 等，NuGet 统一为单版本，`dotnet build` 0 警告；T2 升 1.18 时须同步 AgentTelemetry（`Microsoft.Agents.AI`）避免程序集绑定冲突。
+- **tasks.md checkbox 依旧被 check_gateway.py 规则 4 拦截**：implementer Edit tasks.md 标 `[x]` 直接 BLOCK（「必须由 @task-breaker 完成」），与既有记忆一致；T1 实测 commit `b9e90ca` 成功（gate 全量 build+test 一次通过，287/287 绿）。
+- **commit 隔离仍用 `git add <3 文件>` + `git commit -o -m -- <3 路径>`**：staged 集核对（`git diff --cached --name-status`）恰 3 文件（AIShop.sln / Api.csproj / 新 Service.csproj），`.vs/` 与 openspec/ 均不卷入；commit 后 `git show --stat HEAD` 复核。
+
+## T2 MAF 升级 1.18.0 笔记（service-layer-extraction）
+
+- **NU1605「包降级」是 MAF 升 1.18 时的第一道墙**：T1 笔记「双引用同版本 MAF 无冲突」只对同版本成立。T2 把 Service/AgentTelemetry 升到 1.18.0 后，Api.csproj 的**直接引用** 1.17.0 在 NuGet nearest-wins 规则下胜出，对传递要求的 1.18.0 报 **NU1605「检测到包降级」**（TreatWarningsAsErrors 下 restore/build 直接 error）。修复 = 把 Api 三个 MAF 直接引用**也升到 1.18.0**（纯版本号、零逻辑改动，移除仍归 T8）；`NoWarn NU1605` 会静默保留双版本并存，正是 D5 要避免的程序集绑定冲突，不可取。即：**「只改 2 个文件」的 T2 计划忽略了 Api 直接引用锁定版本号**，tasks.md 需随 T8 描述一起把 1.17.0 更新为 1.18.0
+- **MAF 1.18.0 对 AgentTelemetry 零 API 变更警告**：`AIAgent` / `AsBuilder()` / `UseOpenTelemetry` / `EnableSensitiveData` 在 1.18.0 下编译 0 警告（AgentTelemetry 独立 build 实测）。design 预判「1.18 API 变更/废弃警告在后续迁移工单暴露」成立（Service 此时无代码）
+- **并行 T3 的中间态会让全量 build 连环 CS0246**：`AgentChatResult` 从 `AIShop.Api.Features.Chat` 迁到 `AIShop.Service` 后，所有仍经 `using AIShop.Api.Features.Chat;` 解析它的文件炸（Api：IShoppingAssistantAgent/ShoppingAssistantAgent；Api.Tests：ChatEndpointsTests）。T3 的 design 范围不含这些文件的修复（属 T5/T7/T13），**故 T3 落地到 T7 之间全量 build 恒红，T2/T3 的 commit 都被 gate 拦截**——迁移阶段的「中间态构建红」是预期，需协调者排 T3-T7 串行收口，不越权修他人文件
+- **验证路径分层**：T2 验收「build 0 错误 0 警告」被并行 T3 阻塞时，退而求其次 = ① `dotnet list package` 确认两项目 MAF 1.18.0 + `grep -rn "1\.17\.0" src/ tests/ --include=*.csproj` 空；② 自己负责的项目独立 `dotnet build -warnaserror`（Service/AgentTelemetry 0 错误 0 警告）；③ 全量 build 错误集合精确归类为他人文件（`dotnet build AIShop.sln -warnaserror 2>&1 | grep -E "error|warning"` 逐条看归属）。三条证据齐备即可如实上报「实现完成、commit 被并行在制品阻塞」，不盲目烧 gate 循环
+- **T2 最终提交 `7ed5534`（2026-08-19）**：并行 T3 agent 补齐 `using AIShop.Service;` 恢复构建（其 commit `5e13beb` 先行落库），随后 commitgate 连续 2 次被已知 flaky `PreferenceWriteHostedServiceTests`（`SqliteConnection.RemoveCommand` ArgumentOutOfRangeException / DisposeAsync NRE，in-memory SQLite 共享连接 + worker 并发）拦截。处置 = 隔离 `--filter` 4/4 通过 + 全量重跑 276/276 绿 → 立即 `git commit -o -m -- <3 路径>` 第 3 次成功（与既有「flaky 拦截 → 全量重跑绿 → 立即重试 commit」先例一致，不 `--no-verify`）。**该 flaky 当前出现频率偏高（约半数跑会失败），后续工单 commit 可能反复被拦，属既有问题非本变更引入**
+
+## T3 AgentChatResult 随迁笔记（service-layer-extraction）
+
+- **「record/类型跨项目移动」必须先 `grep -rln <TypeName> src/ tests/` 找全所有引用点**：T3 把 `AgentChatResult` 从 `AIShop.Api.Features.Chat` 迁到 `AIShop.Service`，tasks.md 字面文件清单只有 ChatEndpoints.cs + 新文件，但 3 个引用方经 `using AIShop.Api.Features.Chat;` 解析该类型会 CS0246：`IShoppingAssistantAgent.cs`/`ShoppingAssistantAgent.cs`（删原 using 换 `using AIShop.Service;`——两文件只用该 record，原 using 成孤儿须删防 S1128）、`ChatEndpointsTests.cs`（保留 Features.Chat 另加 `using AIShop.Service;`——仍大量用 ChatRequest/ChatReply 等）。**T2 笔记「T3 落地后到 T7 全量 build 恒红」的预判被本工单推翻**：T3 自己的完成判据「dotnet build 0 错误」强制这些引用同步，补齐后构建即恢复绿
+- **注释里的类型名不算引用**：`SqliteChatHistoryProvider.cs` grep 命中 "AgentChatResult" 但只在注释（L528），无代码引用，无需加 using
+- **并行 T2 升 MAF 1.18 会让全量 build NU1605 error（与 T3 协同解除）**：T2 把 Service/AgentTelemetry/Api 三项目 MAF 统一 1.18.0（其 Api.csproj 联动升 1.18 是必要偏差）。本工单补 3 个引用方后，CS0246 与 NU1605 一并消失，全量 build 恢复绿，T2/T3 均可提交——**并行工单的中间态阻塞靠各自补齐解除，不越权改他人文件**
+- **全量测试 flaky 判定用「失败集合逐轮变化 + 隔离 filter 全过」双证据**：本轮 3 次全量各失败 2/2/1 项（PreferenceWriteHostedServiceTests 的 ShouldContinue/ShouldMergeMultiple 与 ShouldTruncateToTop20/ShouldContinue 轮换、ServiceDefaultsDebugTests.ShouldNotProduceTracesLogOrCaptureBody_WhenDebugFalse），失败集合每次不同；隔离 filter 下 PreferenceWriteHostedServiceTests 2/2 通过、ServiceDefaultsDebugTests 3/3 通过 → 判定 flaky 零耦合。注意 PreferenceWriteHostedServiceTests **隔离 4 项中也偶发 2 项失败**（in-memory SQLite + worker 轮询超时固有 flaky），非仅全量
+- **`git commit -o -m ... -- <paths>` 在 index 混入并行 agent 已暂存文件时依旧安全（再次实证）**：T2 的 3 个 csproj 已暂存（`M ` 首列），我 `git add` 我的 5 文件后 index 混合 8 个；`git commit -o` 只提交 pathspec 指定的 5 个，`git show --stat HEAD` 复核精确，T2 文件仍留在暂存区
+- **本次提交 gate 一次通过**（全量 build 0 警告 + test 276/276 + 11/11 全绿），印证「手动全量绿 → 立即提交」；全量复跑偶发 CS2012（AIShop.Core.dll 被 MSBuild node 占用）重试即恢复，无需杀进程
+- **tasks.md checkbox 依旧被 check_gateway.py 规则 4 拦截**（implementer Edit BLOCK），handoff 注明待 @task-breaker 勾选
+
+## T4 迁移 Clients 组 5 文件笔记（service-layer-extraction）
+
+- **「纯移动 + 命名空间变更」迁移的纯净性验证用 `git diff`**：5 文件 `git mv` + 改 namespace 后，`git diff` 确认每文件只 diff 一行 `namespace AIShop.Api.Agents;` → `namespace AIShop.Service.Clients;`，方法体/签名/using 零变化——这是 D3「逻辑零改动」的可复核证据，比口头声明强
+- **预存在的未使用 using（`using Serilog;` / `using System.Text;`）不是「因迁移产生的孤儿 using」**：DeepSeekDelegatingChatClient/QwenToolCallFixClient/DebugHandler 的字段用全限定 `Serilog.ILogger Log = Serilog.Log.ForContext<...>()`，`using Serilog;` 实际未被解析；但它们是历史遗留、非迁移产物，按 D3「不清理看似无用的成员」保留（CS8019 非 MSBuild 错误，0 警告达成不受影响）
+- **迁走 4 个 Client 类型 → 波及 Api.Tests 的 11 个测试文件编译失败（53 处 CS0103/CS0246）**：这些文件全部出现在 T10/T11/T13 迁移清单（T10：ChatPreference*/ChatRecommendationsMerge/ChatReplySanitization；T11：DeepSeekChatClient/DeepSeekDelegatingChatClient/ModelRouterResilience/SanitizingChatClient Tests；T13：ChatEndpointsTests）。缺失类型实测仅 4 个（DeepSeekChatClient / DeepSeekDelegatingChatClient / SanitizingChatClient / DebugHandler），修复 = 每文件加一行 `using AIShop.Service.Clients;`
+- **「中间态构建红」的处置决策点：T3 先例 vs 范围纪律**：T3 迁移 AgentChatResult 时同步了 3 个引用方（含测试文件 ChatEndpointsTests.cs）恢复构建（其 handoff 记为 D3 最小适配）；但 T4 波及 11 个、且是 T10-T13 整个测试迁移阶段的文件——修复 = 提前实现他人工单内容。按「不要扩大范围到本工单未列出的文件」+「完成判据（Api 侧 ModelRouter 仍编译）已达成」双证据，T4 选择不越权、staged 待提交 + handoff ⚠️ 如实上报，给协调者三个选项（A 加 using build-restore 小工单 / B 重排测试迁移提前 / C 批量收口）
+- **commit gate 实测确认：`git commit` 被 check_commitgate BLOCKED（staged 含 .cs → 全量 build → Api.Tests 编译失败即拦，未跑 test）**。判定 commit 是否可过：只要 `dotnet build AIShop.sln` 红，任何 commit 都被拦，与改动内容无关。T4-T9（源迁移）期间若无人修 11 个测试文件，后续工单 commit 全被连坐拦——协调者需尽早排 build-restore 或重排测试迁移
+- **Service 项目编译 5 个 Client 文件零缺依赖**：DeepSeekChatClient/QwenToolCallFixClient 用 Microsoft.Agents.AI（含 MEAI 类型）+ Microsoft.Agents.AI.OpenAI（OpenAI.Chat）——Service.csproj 已引（T1）；Serilog 经 Infrastructure → Service 传递引用；无需新增包
+
+## T5 迁移 Providers 组 2 文件笔记（service-layer-extraction）
+
+- **「纯移动 + 命名空间变更」的纯净性验证用 `diff <(git show HEAD:旧路径) 新文件 --strip-trailing-cr`**：git 对象库存 LF、工作树是 CRLF（`core.autocrlf=true`），直接 `diff git-show-output 工作树文件` 会因换行符显示"每行都变"；加 `--strip-trailing-cr` 后只剩 namespace 一行变化，D3 纯净性可复核。注意 `git diff HEAD -M` 对重命名文件显示成整文件 add（不友好），用上述逐文件 diff 更准
+- **T5 迁走 2 个 Provider 类型 → 波及 Api.Tests 恰好 2 个测试文件编译失败（CS0246 各 1 处）**：`PreferenceMemoryProviderTests.cs(12,22)`（T11 清单）+ `SqliteChatHistoryProviderTests.cs(20,22)`（T12 清单），均经 `using AIShop.Api.Agents;` 解析。tasks.md 测试迁移工单（T10-T15）blockedBy T9（←T7），T5 按「不越权」原则不动测试文件，与 T4 处置一致
+- **当前 Api.Tests 全量错误数从 T4 handoff 的 53 处降为 2 处**：T4 记录的 11 个测试文件 Clients 错误（53 处）在当前 build 全消失，只剩 Provider 2 处。疑因 ModelRouter.cs 补 `using AIShop.Service.Clients;` 后 Api 恢复编译，级联错误消失；另一未解现象——`DeepSeekChatClientTests.cs`（using AIShop.Api.Agents + new DeepSeekChatClient）在真实 test 项目 build 0 错误，但独立 probe 复现（同 using + 同 namespace + 同 ProjectReference 集）必然 CS0246，机制未查清（可能是 Roslyn build server 陈旧缓存）。不影响 T5 交付，仅记录供后续排查
+- **commit gate 判定不变**：全量 `dotnet build AIShop.sln` 红（2 处测试错误）→ 任何 commit 被 check_commitgate BLOCKED，与改动内容无关。T5 的 4 文件 + T4 的 6 文件累积在暂存区，协调者需先排 T11/T12 迁移或 build-restore（给 2 个测试文件加 `using AIShop.Service.Providers;`）才能放行
+- **`git commit -o -m -- <精确路径>` 隔离提交在 index 混入并行 staged 时依旧安全（再次实证）**：staged 集 = T4 6 文件 + T5 4 文件，`git commit -o -- <我的 4 路径>` 只提交 pathspec 指定文件，gate BLOCK 后文件仍留在暂存区（commit 未发生、HEAD 未动）
+- **tasks.md checkbox 依旧被 check_gateway.py 规则 4 拦截**（implementer Edit BLOCK 实测），handoff 注明待 @task-breaker 勾选
+
+## T6 迁移 Tools 组 CartToolProvider 笔记（service-layer-extraction）
+
+- **库项目（Microsoft.NET.Sdk）隐式 using 不含 `Microsoft.Extensions.DependencyInjection`/`Microsoft.Extensions.Configuration`**：Web Sdk（Api）自动注入 DI 全局 using，库 Sdk（Service）只有 System.* 标准集。从 Api 迁文件到 Service 时，凡用 `IServiceScopeFactory`/`scope.ServiceProvider.GetRequiredService<T>()`/`IConfiguration` 的文件必须补显式 using，否则 CS0246（CartToolProvider 补了 `using Microsoft.Extensions.DependencyInjection;`，属迁移必需最小适配非行为变更）。**T7 迁根目录组时 ModelRouter.cs 需补 `using Microsoft.Extensions.Configuration;`（构造参 IConfiguration）+ `using Microsoft.Extensions.DependencyInjection;`（3 处 `_sp.GetRequiredService<T>()`）**，ShoppingAssistantAgent/IShoppingAssistantAgent 目前未见 DI 类型直用（EF/MAF/Serilog 均有显式 using）
+- **`.gitignore` 行 36 `tools/` 规则匹配 `src/AIShop.Service/Tools/`**：`git mv` 的 rename 照常入库（tracked 文件绕过 ignore），但迁入文件后续 `git add` 会被 ignore 拦（报 "paths are ignored"），需 `git add -f <path>` 才能暂存编辑后的内容
+- **T6 迁移新增 1 处测试编译错误（全量 2→3 处）**：迁走 CartToolProvider 后 `AgentTelemetryTests.cs(475,26)`（`ShoppingAssistantAgentFixture` 字段 `_cartTools`）CS0246，属 T14 拆分迁移清单；与 T5 遗留的 2 个 Provider 测试错误（T11/T12）同为 out-of-scope，按 T4/T5 先例不越权修，staged 待协调者 build-restore 或批量收口
+- **commit 判定不变**：全量 build 红（3 处测试文件错误）→ 任何 commit 被 check_commitgate BLOCKED。T4+T5+T6 文件累积 staged，其中 3 个 Api 文件（ShoppingAssistantAgent/ModelRouter/Program.cs）T5 与 T6 在同一路径混合，文件粒度无法分开提交，建议整批收口
+- **diff 纯净性验证仍用 `--strip-trailing-cr`**：`diff <(git show HEAD:旧路径) 新文件 --strip-trailing-cr` 确认仅 namespace 行 + 迁移必需 using 变化，方法体/AsyncLocal 行为零改动
+
+## T7 迁移根目录组 3 文件笔记（service-layer-extraction）
+
+- **Program.cs 的 `using AIShop.Api.Agents;` 是「替换为 `using AIShop.Service;`」而非纯删除**：tasks.md 字面只写「删除行 6 using」，但删后 `AddSingleton<ModelRouter>()`（行 50）无解析来源（ModelRouter 已迁 `AIShop.Service`）→ 编译失败。design §10 行 196 明确「行 6 using → using AIShop.Service;」。**做「删 using」类工单先查该 using 提供哪些类型是否已另寻解析，必要时补新 using**
+- **`ModelRouter.cs` 迁库项目需补 3 类依赖（T6 预告兑现 + 新发现包级缺口）**：① `using Microsoft.Extensions.Configuration;`（构造参 `IConfiguration`）② `using Microsoft.Extensions.DependencyInjection;`（3 处 `_sp.GetRequiredService<T>()`）——T6 已预告；③ **新发现 `Microsoft.Extensions.Http.Resilience` 包缺口**：`BuildChatHttpPipeline` 用 `ResiliencePipelineBuilder`/`HttpRetryStrategyOptions`/`HttpCircuitBreakerStrategyOptions`/`ResilienceHandler`，该包原本经 Api → ServiceDefaults 传递（10.7.0），Service 独立后必须**在 Service.csproj 直接声明 `Microsoft.Extensions.Http.Resilience` 10.7.0**（版本与 ServiceDefaults 对齐，传递引入 Polly 8.4.x，无 NU1605）。「补 using」还不够，还要核对 using 所在程序集是否被项目引用
+- **`GetRequiredService` 在首轮 build 未报 CS1061（级联截断现象）**：`IConfiguration`（构造参）CS0246 失败后，编译器未继续报方法体内 3 处 `_sp.GetRequiredService<T>()` 的扩展方法缺失——首轮 3 错误（Http/Polly/IConfiguration）即完整集合，补 package + 2 using 后 0 错误 0 警告。**迁文件时先修「类型级」错误（构造参/字段/签名），方法体级错误可能被级联隐藏**
+- **孤儿 using 移除随命名空间迁移**：ShoppingAssistantAgent/IShoppingAssistantAgent 迁入 `AIShop.Service` 后，`using AIShop.Service;`（T3 为解析 AgentChatResult 所加）变冗余（同命名空间自动解析）→ S1128 风险，须删。**「纯移动 + 命名空间变更」后要重新审视 using 集合：原用于解析同层类型的 using 会变孤儿**
+- **全量 build 错误数 T6 的 3 处 → T7 后 23 处（全在 Api.Tests，17 个测试文件 `using AIShop.Api.Agents;` CS0234）**：根目录组是最后迁移的源文件，迁完 `AIShop.Api.Agents` 命名空间整体消失 → 所有仍引用它的测试文件炸。**「命名空间整体消失」类工单的受影响测试文件数 = grep 到 using 的文件全量（本次 17 个），不是个别引用点**；均归 T10-T15，不越权修（与 T4/T5/T6 处置一致）
+- **`git mv` 对 staged-modified 文件直接可用**：T5/T6 已 staged 的 ShoppingAssistantAgent/ModelRouter 上再 `git mv`，索引正常记录 R（rename）+ 工作树 M（我的后续编辑）；`git status` 显示 `RM`。批量收口时 T4-T7 的 11 个源重命名同批 staged，无法文件粒度拆分
+- **`rmdir src/AIShop.Api/Agents` 成功**：空壳目录未被并行会话 cwd 锁定（本变更期间无 implementer 停留在该目录），T7 判据「目录不再存在」直接物理达成（git 不跟踪空目录）
+- **commit 判定不变**：全量 build 红（23 处测试文件错误）→ 任何 commit 被 check_commitgate BLOCKED。T4+T5+T6+T7 全部源迁移文件累积 staged，协调者需排 T10-T15 测试迁移或 build-restore 后批量收口
+- **tasks.md checkbox 依旧被 check_gateway.py 规则 4 拦截**（implementer Edit BLOCK 实测历史），handoff 注明待 @task-breaker 勾选
+
+## T17 文档工单笔记（service-layer-extraction）
+
+- **纯文档工单（只改 .md）在共享工作树迁移中态下 commit 也被 gate 拦**：`check_commitgate.py` 的 `staged_has_code_files()` 看的是**整个 index**（`git diff --cached --name-only`），不是本次 pathspec。index 里有并行 agent 已暂存的 .cs 源迁移文件（ChatEndpoints.cs/Program.cs/Service.csproj + 11 个 R 重命名）时，即使 `git commit -o -m -- <纯 .md 路径>` 也会触发全量 `dotnet build` → Api.Tests 编译失败（T9-T15 未迁移，17 文件仍 `using AIShop.Api.Agents;`）→ BLOCKED。**`-o -- <paths>` 只隔离 commit 内容，不绕过 gate 的 index 全局判定**。解除路径 = 协调者先完成 T9-T15（build 恢复绿）再重试；不 `--no-verify`（PreToolUse hook 无效）
+- **文档工单的验证就是 grep 本身**：`grep -n "新约定" .claude/rules/dotnet.md`（命中）+ `grep "旧表述" .claude/rules/dotnet.md`（无匹配）即完成判据，无需跑测试；src 侧健康检查（`dotnet build src/AIShop.Api` 0 错误 0 警告）仅作佐证，全量 sln 红（23 错误全在 Api.Tests 待迁移文件）与文档工单零耦合
+- **handoff 标注「commit 被 gate BLOCKED」的完整要素**：改动已 staged（`git diff --cached --name-only` 验证）、HEAD 未动、block 根因（index 含并行 .cs 文件 + Api.Tests 待迁移）、解除路径、checkbox 待 @task-breaker
+
+## T9 新建 Service.Tests 测试项目笔记（service-layer-extraction）
+
+- **T9 完成判定「`dotnet build tests/AIShop.Service.Tests` 0 错误」的验证路径是隔离链 build，不受 Api.Tests 红影响**：`dotnet build tests/AIShop.Service.Tests/AIShop.Service.Tests.csproj -warnaserror` 只构建 Service/Infrastructure/AgentTelemetry/Service.Tests 依赖链（5 项目），即便全量 sln 因 Api.Tests 迁移未完成而红（23 错误），隔离 build 仍 0 错误 0 警告达成完成判定——迁移阶段「验证自己的依赖链 + 全量红与他人文件零耦合」的分层验证法在测试项目上同样适用
+- **Service.Tests 不引 `Microsoft.AspNetCore.Mvc.Testing`**：design §7.2 约定 `WebApplicationFactory<Program>` 集成段全部留 Api.Tests，Service.Tests 只承载纯单元段（直接 new Agent / 调 ModelRouter / 各 ChatClient）→ 不需要该包，保持 `Service.Tests → Service` 单向干净依赖；csproj 只需 xunit/runner/Test.Sdk/NSubstitute/coverlet 5 包 + Using Xunit + 复制 xunit.runner.json（全串行配置与 Api.Tests 一致，防未来 in-memory SQLite 并行冲突）
+- **`dotnet sln add <csproj> --solution-folder tests` 对测试项目同样全包**：自动写 Project 条目（新 GUID）+ ProjectConfigurationPlatforms 12 项（6 配置 × ActiveCfg/Build.0）+ NestedProjects 挂 tests 组（`{新GUID} = {0AB3BF05...}`），无需手写；验证用 `grep -c <GUID> AIShop.sln` 应为 14（1 条目 + 12 构建项 + 1 嵌套组）
+- **空测试项目 `dotnet test --no-build` 返回「没有可用测试」是正常态**（非错误退出码），证明 testhost/runner 装配正常；测试在 T10-T15 迁入后才开始有用例
+- **T9 commit 依旧被 check_commitgate BLOCKED（全量 build 红，23 错误全在 Api.Tests 17 个文件 CS0234/CS0246）**：与 T4-T7 同一收口点——协调者排 T10-T15 迁移或 build-restore 后，T9 的 3 个 staged 文件用 `git commit -o -m -- <3 路径>` 即可提交（pathspec 隔离不卷入 T4-T7 已 staged 的 11 个 rename 文件）；T9 文件停留暂存区、HEAD 仍为 T2（7ed5534）
+- **tasks.md checkbox 依旧被 check_gateway.py 规则 4 拦截**（implementer Edit BLOCK 实测历史），handoff 注明待 @task-breaker 勾选
+
+## T14 拆类 AgentTelemetryTests 笔记（service-layer-extraction）
+
+- **拆类边界 = 「是否依赖 WebApplicationFactory<Program>」一刀切**：AgentTelemetryTests 内 2 个 Options DI 集成用例（走 Program.cs 真实 DI 注册）留 Api.Tests（新文件 `AgentTelemetryWebTests`，命名对齐 T13 `ChatEndpointsWebTests` 先例），其余 17 个纯单元用例（Instrument 包装/EnableSensitiveData/配置绑定/Debug/EnrichWith/Agent 接入）迁 Service.Tests（沿用 `AgentTelemetryTests` 类名）。`Service.Tests → Service → AgentTelemetry` 单向依赖，不引 `Microsoft.AspNetCore.Mvc.Testing`。
+- **namespace 迁移的 using 变化：`AIShop.Service.Tests` 命名空间外层查找能解析 `AIShop.Service` 顶层类型（ShoppingAssistantAgent/AgentChatResult），但子命名空间 `AIShop.Service.Tools`（CartToolProvider）仍需显式 `using AIShop.Service.Tools;`**。用命名空间外层查找规则判断哪些 using 可删、哪些必须补，而不是盲抄。
+- **`using AIShop.AgentTelemetry;` 与别名 `using AgentTelemetryHelper = AIShop.AgentTelemetry.AgentTelemetry;` 共存**（命名空间与静态类同名遮蔽）：别名原样保留即可，纯单元段直接调 `AgentTelemetryHelper.Instrument`，无需额外处理。
+- **两项目各自的构建错误可精确归类验证自己的文件干净**：Service.Tests build 0 错误（仅 2 个并行 T11 文件 CS0234 报错）→ 我的文件编译干净；Api.Tests build 14 个错误全在 T10/T12/T13/T15 未迁移文件 → 我的 `AgentTelemetryWebTests.cs` 干净。「错误集合精确归类为他人文件」即文件级验证通过，测试运行等并行收口（与 T2/T8/T9 分层验证一致）。
+- **并行 T11 agent 已 `git mv` 5 个测试文件入 Service.Tests 但命名空间未改完（仍是 `using AIShop.Api.Agents;` + `namespace AIShop.Api.Tests;`）**：git status 显示 `R`（staged rename），工作树内容仍是旧命名空间，Service.Tests 项目整体编译失败（CS0234×2），阻塞 Service.Tests 的任何 `dotnet test`。判定并行活跃 = 文件 mtime 变化（DeepSeekChatClientTests.cs 从 21:57 变为 02:51）+ 大量 dotnet 进程。不越权修，等并行收口。
+- **commit 判定不变**：全量 `dotnet build AIShop.sln` 红（Api.Tests 14 + Service.Tests 2 处测试文件错误）→ 任何 commit 被 check_commitgate BLOCKED。T10-T15 全部完成全量绿后，用 `git commit -o -m -- <3 路径>` 隔离提交（删除的旧 AgentTelemetryTests.cs + 2 个新文件）。
+- **tasks.md checkbox 依旧被 check_gateway.py 规则 4 拦截**（implementer Edit BLOCK 实测历史），handoff 注明待 @task-breaker 勾选。
+
+## T13 拆类 ChatEndpointsTests 笔记（service-layer-extraction）
+
+- **design §7.2 的「Agent 单元用例→Service.Tests」列对 ChatEndpointsTests 无实际内容**：该文件 29 个测试全部是 WebApplicationFactory 端点集成（基 fixture `_factory.CreateClient()` 12 个 + `WithWebHostBuilder` 派生 12 个）或 Api 内部 `ChatEndpoints.IsRetryableAgentFailure` 直测（5 个，含 `StubPipelineResponse` 私有桩）。文件内的 `new ShoppingAssistantAgent(...)` 全在 WAF ConfigureServices 的 mock router lambda（请求时从完整 SP 解析），属端点集成装配而非独立单元用例。Agent 纯单元用例由 T12 的 `ShoppingAssistantAgentRunTests` 承担。结论：ChatEndpointsTests.cs **整体**变 `ChatEndpointsWebTests.cs`（类名同步改），Service.Tests 从本工单无文件迁入，不重复建设
+- **迁移测试文件的 usings 替换清单（ChatEndpoints 先例）**：删 `using AIShop.Api.Agents;`（T7 后命名空间整体消失）→ 加 `using AIShop.Service.Clients;`（DeepSeekDelegatingChatClient）+ `using AIShop.Service.Tools;`（CartToolProvider）；`ModelRouter`/`ShoppingAssistantAgent`/`IShoppingAssistantAgent`/`AgentChatResult`/`ModelInfo` 由 `using AIShop.Service;` 解析；`Microsoft.Agents.AI.AgentSession` 全限定经 Api→Service 传递引用（T2 升 1.18）解析；`System.ClientModel`（ClientResultException/PipelineResponse）经 Api 的 `Microsoft.Extensions.AI.OpenAI` 传递解析——**迁移测试文件先列全类型→新命名空间映射，再改 using**
+- **`git add` 删旧+建新文件会自动识别为 R099 rename**：内容 99% 相似的「删除+新建」直接 `git add` 即可，git 自动标 R，无需先 `git mv`；`git diff --cached` 复核相似度
+- **迁移阶段「全量红 + 自己的文件零错误」判定法再次实证**：`dotnet build tests/AIShop.Api.Tests` 报错全部精确归类为他人文件（T10 6 文件 CS0234 → 随后 T10 并行 agent 迁移后消失；T15 `ModelRouterWebTests.cs` CS0246 OpenTelemetryAgent 在制品）。并行 agent 活跃期文件清单分钟级变化（2 分钟内 T10 的 6 文件从 Api.Tests 消失迁入 Service.Tests、ModelRouterTests.cs 被删、ModelRouterWebTests.cs 新建），build 错误集合也随之变化——**不要对并行在制品的错误做任何处置，只看自己的文件是否零错误**
+- **「T15 ModelRouterWebTests.cs CS0246 OpenTelemetryAgent」判定**：OpenTelemetryAgent 属 AgentTelemetry（T14 迁 Service.Tests 的单元段），出现在 Api.Tests 的 ModelRouterWebTests.cs L120-121 疑似 T15 agent 误放入或缺 using——归 T15 工单范围，不越权修
+
+## T8 清理 Api.csproj 包引用笔记（service-layer-extraction）
+
+- **移除包的版本以当前 csproj 实际值为准，不照抄 tasks.md 的旧版本号**：T8 任务文字写「移除 Microsoft.Agents.AI 1.17.0 等」，但 T2（commit 7ed5534）已把 Api 三包联动升到 1.18.0，实测移除时按 1.18.0 移除——spec Req3 的「无 1.17.0 残留」是最终口径，与 T2 handoff「4 包移除仍归 T8」一致
+- **「InternalsVisibleTo 去留」的确认点先 grep 内部暴露再决定**：design §5.5 留了「若无 internal 暴露给 Api.Tests 则删」的确认项；实测 `ChatEndpoints.IsRetryableAgentFailure` 为 `internal static`（ChatEndpoints.cs L374）且 Api.Tests 的 ChatEndpointsTests 端点段（T13）要用 → **保留** `<InternalsVisibleTo Include="AIShop.Api.Tests" />`。判断该 item 去留的通用做法 = grep `internal static` + 确认 Api 侧仍暴露哪些给测试
+- **`dotnet list <csproj> package` 带 grep 过滤可能输出空（中文 locale 下输出「顶级包」非 Top-level）**：`dotnet list src/AIShop.Api/AIShop.Api.csproj package 2>&1 | grep -iE "Agents|DeepSeek"` 输出为空是因为包名不含这些字样（已移除），不能作为唯一证据；要看完整输出确认无 MAF/DeepSeek 顶级包 + MEAI 三包保留
+- **csproj 注释与动作同步清理**：移除 4 个包时，T1 的「4 个 MAF/DeepSeek 包本工单不移除，T8 处理」与 T2 的「4 包移除仍归 T8」两条占位注释都指向已完成的动作，需一并更新/删除，否则留下指向过期状态的注释
+- **T8 commit 依旧被 check_commitgate BLOCKED（全量 build 红，23 错误全在 Api.Tests，T10-T15 范围）**：与 T4-T7/T9 同一收口点；Api.csproj 改动已 staged，`git commit -o -m -- <精确路径>` 隔离提交待协调者解除 build 阻塞后执行
+- **T8 验证分层与 T2 一致**：① `dotnet list package` 无 MAF/DeepSeek + `grep -rn "1.17.0" src/ tests/ --include=*.csproj` 空 + `grep -rn -E "Agents\.AI|DeepSeek" src/ --include=*.csproj` 确认三包 1.18.0 仅在 Service（+AgentTelemetry 仅 Microsoft.Agents.AI）、DeepSeek 1.0.4 仅在 Service；② Api 项目隔离 `dotnet build -warnaserror` 0 错误 0 警告；③ 全量红错误集合精确归类为他人文件、零 NU* 错误（证明移除包没破坏 NuGet 图）
+- **tasks.md checkbox 依旧被 check_gateway.py 规则 4 拦截**（implementer Edit T8 行 BLOCK 实测），handoff 注明待 @task-breaker 勾选
+
+## T11 迁移纯单元测试组 B 笔记（service-layer-extraction）
+
+- **迁移测试文件到新测试项目后 SonarAnalyzer 规则会「新暴露」**：Api.Tests 有 `GlobalSuppressions.cs`（模块级抑制 S8969 冗余 `!` / S3358），T9 新建的 Service.Tests 没有 → 迁入的未改动测试文件里 `Assert.NotNull(x)` 后的 `x!.` 全部触发 **S8969 error**（TreatWarningsAsErrors，SonarAnalyzer 10.32.0）。这是「项目级配置缺口」不是逻辑问题。两条解路：① 逐文件删冗余 `!`（T10 agent 采用）；② 补 GlobalSuppressions.cs（与 Api.Tests 同约定，本项目最终采用）。**做测试迁移工单先检查目标测试项目的 suppression 基线是否齐**（GlobalSuppressions.cs / .editorconfig / 规则级别），否则 migrate 后 build 会拦
+- **「断言逻辑不改」的纯净性验证用 `diff <(git show HEAD:旧路径) 新文件 --strip-trailing-cr`**（T5 已记），迁移后还应重新审视 using：`using AIShop.Api.Features.Chat;` 在 SanitizingChatClientTests 里是**孤儿 using**（文件未用任一 Features.Chat 类型），迁入不引 Api 的 Service.Tests 后 `AIShop.Api.*` 整体不可解析 → 必须删（D3「删迁移产生的孤儿 using」）。判定孤儿用「grep 文件是否引用该命名空间定义的类型」，不靠猜
+- **命名空间引用按类型归属拆分**：一个测试文件引用 Service 多个子命名空间时各自加 using（ModelRouterResilienceTests 加 `AIShop.Service` + `AIShop.Service.Clients`；SanitizingChatClientTests 加 `Service` + `Clients` + `Tools`），不合并平铺。文件已用同层类型时 `using AIShop.Service;` 会自动解析根命名空间类型
+- **T10 协调者指令把 6 个 WAF 端点测试类整体迁入 Service.Tests**（design §7.2 原约定 WAF 集成段留 Api.Tests）：T10 在 Service.Tests.csproj 加 `Microsoft.AspNetCore.Mvc.Testing 10.0.9` + `AIShop.Api` ProjectReference（csproj 注释记录偏差）。**Service.Tests → Api → Service 依赖链成立**（无环）。后续 T11 的 5 个纯单元类不依赖 Api，纯移动即可
+- **commit gate 期间全量测试 287/287 绿**：T10 的 `ChatRecommendationsMergeTests.ShouldUseCachedSnapshot_EvenWhenDbLatestMessageDiffers`（WAF CreateClient）首轮全量偶发失败、隔离 filter 1/1 通过 → WebApplicationFactory 并行宿主竞争 flaky（T18-T21 先例），与 T11 零耦合，重跑全量即绿
+- **git rename 的 pathspec 提交要同时给新旧两侧路径**：`git commit -o -m -- <旧路径> <新路径>` 才能把 rename 的两半（删旧+增新）都提交；只给新路径会遗留旧路径的删除在暂存区。本次 `git commit -o -m -- <5 旧路径> <5 新路径>` 一次成功（`d3304e0`，gate 通过），`git show --stat HEAD` 复核恰 5 rename
+- **并行 agent 的 S8969 处置与本工单的 verbatim 冲突**：T10 逐文件删 `!`，另有 agent 补 GlobalSuppressions.cs；我临时删 `!` 后又还原（因为 GlobalSuppressions.cs 已覆盖）。**教训：并行 worktree 里「规则门禁的处置方式」存在多解，先观察其他 agent 采用哪条路再动手，避免做重复功；最终以能达成 0 错误 0 警告且不改断言语义的方案为准**
+
+## T15 拆类 ModelRouterTests 笔记（service-layer-extraction）
+
+- **`OpenTelemetryAgent` 是 MAF 类型（`Microsoft.Agents.AI` 命名空间），不是本仓 AgentTelemetry 的类型**：`src/AIShop.AgentTelemetry/AgentTelemetry.cs` 里 grep 到 `OpenTelemetryAgent` 全在 XML 注释（`<c>`/`<see cref>`），无类型定义。拆分测试文件时凡用 `OpenTelemetryAgent`/`EnableSensitiveData` 的集成段必须保留 `using Microsoft.Agents.AI;`（首轮拆分误删 → CS0246 `OpenTelemetryAgent`，补回即过）。**做拆类迁移先 `grep -rn` 目标类型确认归属项目/命名空间，再定 using 集**
+- **.NET 10 的 `AddInMemoryCollection` 已并入 `Microsoft.Extensions.Configuration` 主包**（`MemoryConfigurationBuilderExtensions` 就在 `Microsoft.Extensions.Configuration.dll` 内，非独立 `Microsoft.Extensions.Configuration.Memory` 程序集），测试项目经传递依赖即可用，**不需要**单独加 Memory 包引用。判定某 API 在哪个程序集 = 查 NuGet 缓存包 `lib/<tf>/` 下的 `.xml` 文档 `grep M:<namespace>.*<MethodName>` + 核对 `project.assets.json` 的 compile 目标——别凭旧知识猜
+- **S8969 迁移系统性根因（Api.Tests 有压制、Service.Tests 没有）**：`tests/AIShop.Api.Tests/GlobalSuppressions.cs` 模块级 `SuppressMessage("CodeQuality", "S8969", Scope="module")` + S3358；Service.Tests 无该文件 → 迁移测试普遍存在的 `Assert.NotNull(x); x!.Foo` 模式（原 Api.Tests 被压制）在 Service.Tests 触发大量 S8969（TreatWarningsAsErrors 即 error，实测 T10 5 文件 122 处）。**迁移测试文件到 Service.Tests 时先评估：该文件/项目是否需要 GlobalSuppressions.cs，或删冗余 `!`（删 `!` 不改语义，属最小适配）**。我的 ModelRouterTests.cs 纯单元段不用 `!` 零受影响；Web 段 `GetInternalAgent` 的 `value!` 留在 Api.Tests（仍被压制）
+- **`AIShop.Service.Tests` 命名空间外层查找可解析 `AIShop.Service` 顶层类型（ModelRouter/ModelInfo/ShoppingAssistantAgent），无需 `using AIShop.Service;`**（与 T14 约定一致）；但 Api.Tests 侧（`AIShop.Api.Tests` 非 `AIShop.Service` 外层）必须显式 `using AIShop.Service;` 解析同一批类型
+- **拆类后 git 的 rename 识别**：删除 Api.Tests 的 `ModelRouterTests.cs` + 新建 `ModelRouterWebTests.cs` 被 `git add` 识别为 **R060 rename**（60% 相似，集成段 4/7 方法相同）；Service.Tests 的 `ModelRouterTests.cs` 是独立 A。`git diff --cached --name-status` 复核即可，不影响提交语义
+- **纯净性验证用「按方法名逐体 diff」**：`git show HEAD:旧文件 > tmp`（注意 GBK 控制台编码，须重定向到文件再以 utf-8 读），`re.split(r'    \[Fact\]\n')` 按方法拆分后 `diff` 每个方法体——原 7 方法全部 IDENTICAL，仅文件归属 + using/namespace/类名变化，是「断言逻辑不改」的可复核证据
+- **commit 判定不变**：全量 `dotnet build AIShop.sln` 红（Service.Tests 122 S8969 等并行在制品）→ 任何 commit 被 check_commitgate BLOCKED。Api.Tests 半程 `ModelRouterWebTests` 4/4 绿已验证（`dotnet test --filter "FullyQualifiedName~ModelRouterWebTests"`）；Service.Tests 半程 `ModelRouterTests` 3 用例文件级验证（编译 0 错误 + 逐字一致原全绿版本），项目整体跑需等 T10 S8969 收口
+- **tasks.md checkbox 依旧被 check_gateway.py 规则 4 拦截**（implementer Edit BLOCK 实测历史），handoff 注明待 @task-breaker 勾选
+
+
+## T10 迁移纯单元测试组 A 笔记（service-layer-extraction）
+
+- **「纯单元测试组」标签与实测不符：T10 的 6 文件全部是 WebApplicationFactory 端点集成测试**（走 /api/chat、/api/recommendations、/api/login HTTP 契约，无一个直接 new Agent 的纯单元用例）。协调者 T10 指令明确「仅改文件归属 + 命名空间、断言逻辑不改、原 Api.Tests 文件移除、6 类在 Service.Tests 全绿」→ 整体迁移必须让 Service.Tests 支持 WAF：给 Service.Tests.csproj 加 `Microsoft.AspNetCore.Mvc.Testing 10.0.9` + `ProjectReference AIShop.Api`（Program/Features.Chat DTO），形成 `Service.Tests → Api → Service` 依赖链，**打破 design §7.2「Service.Tests 不引 Api」的分层约定**。处置 = 按协调者指令优先（learnings R2 先例），handoff 显著标注偏差，若协调者要恢复 §7.2 分层需另指示
+- **`using AIShop.Api.Agents; → using AIShop.Service;` 单行替换不够**：`using AIShop.Service` 只解析顶层类型（ModelRouter/ShoppingAssistantAgent/ModelInfo），子命名空间类型需补 using——`DeepSeekDelegatingChatClient`（`AIShop.Service.Clients`）、`CartToolProvider`（`AIShop.Service.Tools`）。6 文件全部引用这两类型 → 每文件加两行 using。协调者指令字面只列一行，实测必须补，属必要编译支撑非行为变更
+- **S8969 修复选「复制 GlobalSuppressions.cs」而非删 `!`**：与 T15 agent 观察一致（Api.Tests 有模块级 S8969/S3358 压制、Service.Tests 无 → 迁移后大量 S8969 error）。T10 从 Api.Tests 复制同一文件到 Service.Tests（justification「Pre-existing in unmodified test files」完全贴合），测试代码零改动，比删 `!` 更贴合「仅改文件归属 + 命名空间、断言逻辑不改」。该压制是项目级，一并解决并行 T11 文件的同类 S8969，对并行 agent 无害（若对方已删 `!` 则两者并存无害）
+- **提交时机判断 = 全量 build/test 绿才 commit**：T10 开工时全量 build 红（17 测试文件用旧命名空间），工作完成时并行 T11-T15 已迁移收口 → 全量 `dotnet build -warnaserror` 0 错误 0 警告、`dotnet test` 287/287 绿 → commit gate 可过。**迁移阶段提交被拦 ≠ 永久**：等并行工单收口后全量恢复绿即放行
+- **并行 agent 跑测试会锁 Service.Tests.dll → CS2012 拦全量 build**：testhost（PID 17556）正在跑 Service.Tests 全量时，我的 `dotnet build AIShop.sln` 报 CS2012（obj dll 被占用）+ CS0006（ref dll 缺失，obj 竞态）。处置 = 不杀并行 testhost，等其自然退出后重试 build；先 `Get-CimInstance Win32_Process` 确认持锁进程再等
+- **rename 提交 pathspec 必须含旧+新路径**：`git commit -o -m -- <paths>` 对 staged rename（index 有 delete(旧)+add(新) 两个条目）若只给新路径，旧路径的删除不被提交 → 旧文件留在 HEAD。6 个 git mv 文件提交时 pathspec 显式列「6 旧路径 + 6 新路径 + csproj + GlobalSuppressions」共 14 条
+- **tasks.md checkbox 依旧被 check_gateway.py 规则 4 拦截**（implementer Edit BLOCK 实测历史），handoff 注明待 @task-breaker 勾选
+
+## T12 迁移纯单元测试组 C 笔记（service-layer-extraction）
+
+- **staged rename + pathspec 提交的 add/delete 分裂陷阱（T12 独立复现 T10 笔记的坑）**：`git mv` 暂存 rename 后，`git commit -o -m -- <仅新路径>` **只提交新增侧**（`git show --stat` 显示 create、旧文件仍留 HEAD），删除侧（`D 旧路径`）滞留暂存区。补救 = 第二个 `git commit -o -m -- <旧路径>` 补齐删除侧，两 commit 合起来才是完整 rename（T12 的 c5bedf3 + 6536ee4）。**凡是 staged rename 想用 pathspec 隔离提交，pathspec 必须旧路径+新路径都列上**（T10 的 14 条做法），否则必然半提交
+- **S8969 两种处置可并存无害，先到先得**：T10/T15 走「复制 GlobalSuppressions.cs 模块级压制」（Service.Tests 03:45 落地），T12 早于压制文件删了 2 处冗余 `!`（`Assert.NotNull(x); x!.Foo` 模式，编译器已证明非空，删 `!` 行为恒等无 CS8602 风险）。**压制文件已存在则删 `!` 是可选的代码清理；尚未存在则删 `!` 是让项目编译的最小手段——别因对方会加压制就回退已提交的 `!` 移除**
+- **迁移后文件 0 警告验证必须跑 `--no-incremental` 全量编译**：增量 build 的 S8969 错误集随并行 agent 改文件而「抖动」，只有 `dotnet build --no-incremental` 才暴露全部 S8969。判定「我的文件干净」= 用 `--no-incremental` 输出 grep 我的文件名，零命中才算数
+- **纯单元 vs WAF 的迁移归属判定先 grep 引用**：T12 的 3 文件（RunChatAsyncPreferenceBackfillTests/SqliteChatHistoryProviderTests/ShoppingAssistantAgentRunTests）均不引用 Api DTO/WebApplicationFactory，构造 `ShoppingAssistantAgent` 用 mock IChatClient + in-memory SQLite + `ServiceCollection.AddDbContextFactory` 出 `IServiceScopeFactory` 供 `CartToolProvider`（与 Api.Tests 时期逐字一致）→ 符合 design §7.2 迁 Service.Tests；与 T10 的 6 个 WAF 文件（需引 Api）形成对照。**别信 tasks.md 的「纯单元测试组」标签，先 grep 引用再定归属**
+- **T12 两次 commit 各被已知 flaky 拦 1 次**：`PreferenceWriteHostedServiceTests.ShouldContinue_WhenSingleMessageProcessingThrows`（隔离 4/4 通过）与 `ServiceDefaultsDebugTests.ShouldWriteHeaderTagsToLocalLog_AndRedactFromOtlp_WhenDebugTrue`（隔离 3/3 通过），处置与既有先例一致 = 隔离 filter 通过 + 全量 287/287 绿 → 立即重试 commit 即成功，不 `--no-verify`
+- **全量 287/287 验证口径**：McpServer 11 + Service.Tests 140（含我的 45 = RunChatAsyncPreferenceBackfill 2 + SqliteChatHistoryProvider 40 + ShoppingAssistantAgentRun 3）+ Api.Tests 136；`dotnet build AIShop.sln -warnaserror` 0 错误 0 警告
+- **tasks.md checkbox 依旧被 check_gateway.py 规则 4 拦截**（implementer Edit BLOCK 实测历史），handoff 注明待 @task-breaker 勾选
+
+## 收尾：修正 Service.Tests 测试分层（service-layer-extraction）
+
+- **T10「6 个 WAF 测试类迁 Service.Tests」是设计偏差，收尾修正移回 Api.Tests**：design §7.2 明确 `WebApplicationFactory<Program>` 端点集成测试留 Api.Tests（合法链 `Api.Tests → Api → Service`），T10 协调者指令整体迁入 Service.Tests 并让 Service.Tests 引 Api（`Service.Tests → Api → Service` 无环但破坏单向分层语义）。用户决策修正回设计：6 文件（ChatPreference*/ChatRecommendation*/ChatReplySanitization）`git mv` 回 `tests/AIShop.Api.Tests/`，namespace 改回 `AIShop.Api.Tests`；Service.Tests.csproj 删 `<ProjectReference AIShop.Api>` + `Microsoft.AspNetCore.Mvc.Testing` 包。**判定 WAF 测试归属先 grep `WebApplicationFactory`/`AIShop.Api` 引用**，6 文件全命中、剩余 10 文件（AgentTelemetryTests 等）仅在注释含 "Program.cs" 无代码引用 → 移除 Api 依赖安全
+- **namespace 迁移的 using 增减判断用「外层命名空间查找」规则，不盲抄**：`AIShop.Service.Tests` 是 `AIShop.Service` 子命名空间 → `using AIShop.Service;` 冗余（但实际用到不报 CS8019）；移回 `AIShop.Api.Tests`（非 Service 子命名空间）后 `using AIShop.Service;` **从冗余变必需**，必须保留。`AIShop.Service.Clients`/`Tools`/`AIShop.Api.Features.Chat` 均为显式子命名空间，两处都需显式 using。本次 6 文件实测 using 零改动，仅 namespace 一行变化（git diff 显示 `2 +-` = 1 删 1 增），断言逻辑零改动
+- **`git mv` staged rename 后改工作树内容，需 `git add <新路径>` 才并入 staged（RM → R）**：6 个文件 git mv 后 status 为 `RM`（rename 已 staged + 工作树 namespace 修改未 add）；`git add <新路径>` 把修改并入 staged rename 变 `R`，无需再动旧路径。与 T12「rename 提交 pathspec 必须含旧+新」不矛盾——那是 commit 的 pathspec 要求，add 只加新路径即可
+- **测试数守恒验证**：Service.Tests 140→108（-32，移走 6 个 WAF 类）、Api.Tests 136→168（+32）、McpServer 11，总计 287 不变；`dotnet build AIShop.sln -warnaserror` 0 错误 0 警告 + 全量 `dotnet test` 三项目全绿（108/168/11）
+- **pathspec 提交 44 条一次成功（commit `7ab607b`）**：26 文件（19 个 T4-T9/T13/T17 staged 收尾 + 7 个本次修正），rename 新旧路径全列（11 src rename + ChatEndpointsWebTests + 6 WAF rename = 18 对 + 8 非 rename），commitgate 全量 build+test 一次通过（287 绿）无 flaky 拦截；`git show --stat HEAD` 复核恰 26 文件、6 WAF 文件每文件仅 namespace 行变化
+
+## T18 DeepSeekChatClient 真流式改造笔记（service-layer-extraction）
+
+- **CS1626「try-catch 内不能 yield」**：C# 编译器禁止在包含 catch 子句的 try 块内 yield return（CS1626: Cannot yield a value in a try block that contains a catch clause）。流式解析 SSE 响应时，JSON 解析需要 try-catch 容错，但 yield 不能放在同一个 try-catch 内。解法 = 在 try-catch 内将 content 收集到 `List<string>`，循环结束后在 try-catch 外 `foreach` yield。CA2024 同时禁止在异步方法中使用 `reader.EndOfStream`（同步属性），改用 `while ((line = await reader.ReadLineAsync(ct)) is not null)` 模式。
+- **请求体提取为 `BuildRequestBody` 复用方法**：流式和非流式共享相同的消息构建/工具构建逻辑，唯一差异是 `stream: true`。提取为 `private Dictionary<string, object?> BuildRequestBody(messages, options, bool stream)`，`stream=false` 时 `["stream"] = null` 经 `DefaultIgnoreCondition.WhenWritingNull` 自动省略。避免代码重复且保证两条路径请求体一致。
+- **SSE 解析要点**：DeepSeek SSE 格式为 `data: {...}` 逐行、`data: [DONE]` 结束。每行去掉 `data: ` 前缀后 JSON 解析，取 `choices[0].delta.content` yield；`delta.reasoning_content` 和 `delta.tool_calls` 跳过不推前端。JSON 解析异常记录 Warning 后 continue（跳过坏行，不中断流）。
+- **tasks.md checkbox 依旧被 check_gateway.py 规则 4 拦截**（implementer Edit BLOCK 实测历史），handoff 注明待 @task-breaker 勾选
+
+## T19 新增流式接口和 DTO 笔记（service-layer-extraction）
+
+- **接口新增方法会导致实现类编译失败（CS0535）**：`IShoppingAssistantAgent` 新增 `RunChatStreamAsync` 后，`ShoppingAssistantAgent` 必须同步提供实现才能编译通过。T19 的完成判据是 `dotnet build` 0 错误，因此需要在实现类中加桩（`yield break`），即使 T20 才做完整逻辑。桩实现需用 `[EnumeratorCancellation]` 标注 CancellationToken 参数（`System.Runtime.CompilerServices` 命名空间，.NET 10 ImplicitUsings 已覆盖）。
+- **IAsyncEnumerable 桩实现模式**：`async IAsyncEnumerable<T> Method(..., [EnumeratorCancellation] CancellationToken ct) { await Task.CompletedTask; yield break; }` — 编译器要求 async 方法至少有一个 await，`Task.CompletedTask` 满足此要求；`yield break` 立即结束枚举，不产出任何元素。
+- **tasks.md checkbox 依旧被 check_gateway.py 规则 4 拦截**（implementer Edit BLOCK 实测历史），handoff 注明待 @task-breaker 勾选
+
+## T20 ShoppingAssistantAgent 流式实现笔记（service-layer-extraction）
+
+- **CS1626/CS1631「try-catch 内不能 yield」是 IAsyncEnumerable 实现的核心约束**：C# 编译器禁止在包含 catch 子句的 try 块内 yield return（CS1626），也禁止在 catch 子句体内 yield（CS1631）。流式方法必须把「数据采集」和「yield 输出」分离——采集逻辑提取到不含 yield 的私有方法（如 `CollectStreamingChunks`）中用 try-catch 包裹，主方法在 try-catch 外遍历收集结果并 yield。会话创建的 catch 块也不能 yield，改用 nullable session + null 检查 + if 分支 yield 的模式规避。
+- **MAF 1.18.0 `AIAgent.RunStreamingAsync` API 实测确认**：通过临时反射程序验证，`AIAgent` 有 `RunStreamingAsync(string message, AgentSession session, AgentRunOptions options, CancellationToken ct)` 重载（除 message 外全 optional），返回 `IAsyncEnumerable<AgentResponseUpdate>`。`AgentResponseUpdate` 不继承 `ChatResponseUpdate`（MEAI），是独立类型，属性含 `Text`（string）、`Role`（ChatRole?）、`Contents`（IList<AIContent>）、`FinishReason` 等。NuGet 包路径通过 `dotnet nuget locals global-packages --list` 找到（`D:\NuGetPackages`），XML 文档确认方法签名。
+- **SonarAnalyzer S3267 在 `await foreach` 循环上的误报**：循环体内维护缓冲状态（`unflushed`）时，S3267 仍建议"用 Select 简化"，但实际无法简化。用 `#pragma warning disable/restore S3267` 精确抑制，注释说明抑制原因（需维护跨迭代状态）。
+- **增量清洗（SanitizeReplyIncremental）的缓冲策略**：累积 `buffer + newText`，用三个正则（FixedIdPattern/HashIdPattern/ProductIdLabelPattern）尝试匹配，取最早匹配位置 `safePos` 作为安全边界。`safePos` 之前的部分无模式风险，安全发送；`safePos` 之后保留到下一轮。流结束时用 `SanitizeReply`（非增量版）冲洗缓冲区残留。`EndsWithPatternPrefix` 检查尾部是否可能是模式前缀（以 `#` 结尾或含 `商品Id`/`商品ID`），防止误 flush 部分模式。
+- **tasks.md checkbox 依旧被 check_gateway.py 规则 4 拦截**（implementer Edit BLOCK 实测历史），handoff 注明待 @task-breaker 勾选
+
+## T21 /api/chat/stream SSE 端点笔记（service-layer-extraction）
+
+- **`Results.Stream(Func<Stream, CancellationToken, Task>, ...)` 重载解析失败（CS1660）**：ASP.NET Core Minimal API 的 `Results.Stream` 有两个重载：`Stream Stream(Stream, ...)` 和 `Stream Stream(Func<Stream, CancellationToken, Task>, ...)`。传入 `async (stream, _) => { ... }` lambda 时，编译器尝试将 lambda 转换为 `Stream` 类型（匹配第一个重载）而非识别为委托（第二个重载），报 CS1660。**解法：不用 `Results.Stream`，改用 `HttpContext.Response` 直接设置响应头（`ContentType = "text/event-stream"`）并写 `Response.Body`**——行为等价且无重载歧义。需要在端点参数列表加 `HttpContext httpContext`，错误响应改 `httpContext.Response.StatusCode + WriteAsJsonAsync`。
+- **SSE 端点必须 `AutoFlush = true`**：`new StreamWriter(httpContext.Response.Body) { AutoFlush = true }` 确保每个 `WriteAsync` 后立即刷新到客户端，否则数据积压在缓冲区，前端 `EventSource` 收不到增量事件。
+- **`BuildChatReply` 提取复用消除端点间逻辑重复**：`/api/chat` 和 `/api/chat/stream` 的推荐计算逻辑（关键词匹配 + 偏好合并 + SplitProducts + 缓存写入 + 偏好入队）完全一致。提取为 `private static ChatReply BuildChatReply(...)` 后两端点共用，保证推荐结果一致性（满足 spec「/api/chat/stream 与 /api/chat 推荐结果一致」），未来推荐逻辑变更只改一处。
+- **`System.Text.Json` 需显式 using**：ASP.NET Core Web SDK 的隐式 using 不含 `System.Text.Json`（ImplicitUsings 只含 System.* + Microsoft.*），SSE 事件序列化用 `JsonSerializer.Serialize` 需手动加 `using System.Text.Json;`。
+- **流式端点降级策略：try-catch 包裹 `await foreach` + fallback 到 `RunChatAsync`**：流式过程中 `streamChunks.WithCancellation(ct)` 的异常（如网络中断、模型不支持流式）用 `catch (Exception ex) when (IsRetryableAgentFailure(ex, ct))` 捕获，降级到非流式 `RunChatAsync` 获取完整结果后发送单个 `done` 事件。未返回 `FullResult` 的情况（Agent 未 yield 完整 chunk）同样走降级路径。
+- **tasks.md checkbox 依旧被 check_gateway.py 规则 4 拦截**（implementer Edit BLOCK 实测历史），handoff 注明待 @task-breaker 勾选
+
+## T22 前端 SSE 消费笔记（service-layer-extraction）
+
+- **`addMessage` 创建的 `div.message` 无 `.message-content` 子元素**：`addMessage(role, content)` 直接在 `div` 上设 `textContent = content`，没有嵌套子元素。流式更新 typing 气泡时 `typing.querySelector('.message-content').textContent = ...` 会返回 null → 运行时 TypeError。正确做法 = `typing.textContent = fullText + '▌'`（直接更新 div 文本内容）。**做前端流式显示前先确认 addMessage 的 DOM 结构**，不要假设存在子元素
+- **SSE 事件解析必须处理跨 chunk 不完整行**：`TextDecoder.decode(value, { stream: true })` 解码当前 chunk 后，用 `split('\n')` + `lines.pop()` 保留最后一个不完整行到下一轮拼接。遗漏 `pop()` 会导致跨 chunk 的 `event:` / `data:` 行被截断 → `JSON.parse` 报错或事件丢失
+- **`done` 事件发送的是完整 `ChatReply` JSON**：端点 `WriteSseEventAsync(writer, "done", JsonSerializer.Serialize(chatReply))` 序列化整个 ChatReply record（含 `response`/`recommendedProducts`/`otherProducts`/`recMessage`/`hasRecommendation`/`matchedCategories`）。前端 `data.response` 取文本回复，`data` 直接传给 `renderRecommendationPanel(data)` 渲染推荐——两者共用同一 JSON 对象，零适配
+- **`token` 事件的 `data.text` 是已清洗商品 ID 的文本增量**：DeepSeekChatClient 流式输出经 `SanitizeReplyIncremental` 缓冲清洗后 yield，前端无需二次清洗。`fullText` 累积所有 token 后在 `done` 事件时被 `data.response`（服务端最终清洗版）替换——两者在正常路径下内容一致，`|| fullText` 仅作降级兜底
+
+## T23 全量验证笔记（service-layer-extraction）
+
+- **`StreamWriter.AutoFlush = true` 在 ASP.NET Core Kestrel 下抛 `Synchronous operations are disallowed`**：`AutoFlush = true` 让 `StreamWriter` 在每次 `WriteAsync` 后同步调用 `Flush()`，而 Kestrel 默认禁止同步 I/O（`AllowSynchronousIO = false`）。报错栈指向 `HttpResponseStream.Flush()` → `StreamWriter.Flush()`。修复 = 移除 `AutoFlush = true`，改在 `WriteSseEventAsync` 里每次写入后显式 `await writer.FlushAsync()`——行为等价（每事件立即刷新到客户端）且全异步。**做 SSE 流式端点时不要用 `AutoFlush = true`，用显式 `FlushAsync()`**
+- **Windows curl 中文请求体需 UTF-8 文件**：`curl -d '{"message":"中文"}'` 在 Windows 终端默认 GBK 编码发送 → 服务端 UTF-8 解码失败报 500。用 `printf '...' > /tmp/req.json && curl --data-binary @/tmp/req.json -H "Content-Type: application/json; charset=utf-8"` 确保 UTF-8 编码（operations.md 已有记录，本次实证再次确认）
+- **全量验证发现并修复了 T21 遗留的流式端点同步 I/O 问题**：T21 实现时可能在无 HTTP 服务器的环境下测试（如单元测试 mock stream），未暴露 `AutoFlush` 的同步 I/O 问题；T23 端到端 curl 测试首次暴露。**流式端点必须用真实 HTTP 服务器测试，不能只靠 mock stream**
