@@ -80,14 +80,20 @@ public sealed class ChatPreferenceEnqueueTests : IDisposable
         await SeedPreferencesAsync(marlaId, """{"咖啡":2}""");
 
         using var client = f.CreateClient();
-        var response = await client.PostAsJsonAsync("/api/chat",
+        // 第一次 POST：Agent 把 Preferences 写入 StateBag["NewPreferences"]（复用 session，未直接入队）
+        var response1 = await client.PostAsJsonAsync("/api/chat",
             new ChatRequest("marla", "你好"));
-        response.EnsureSuccessStatusCode();
-        var reply = await response.Content.ReadFromJsonAsync<ChatReply>();
-        Assert.NotNull(reply);
-        Assert.Contains("模拟回复", reply!.Response);   // 端点已返回 ChatReply
+        response1.EnsureSuccessStatusCode();
+        var reply1 = await response1.Content.ReadFromJsonAsync<ChatReply>();
+        Assert.NotNull(reply1);
+        Assert.Contains("模拟回复", reply1!.Response);   // 端点已返回 ChatReply
 
-        // 端点入队轻量消息：UserId + Preferences 精确匹配（不构造实体、不等待落库）
+        // 第二次 POST：Provider.Store 读到 StateBag["NewPreferences"] → 入队 mockQueue（响应仍先返回）
+        var response2 = await client.PostAsJsonAsync("/api/chat",
+            new ChatRequest("marla", "你好"));
+        response2.EnsureSuccessStatusCode();
+
+        // Provider.Store 入队轻量消息：UserId + Preferences 精确匹配（不构造实体、不等待落库）
         mockQueue.Received(1).TryEnqueue(Arg.Is<UserPreferenceUpdate>(
             u => u.UserId == marlaId && u.Preferences.SequenceEqual(new[] { "咖啡", "健身" })));
 
@@ -109,12 +115,17 @@ public sealed class ChatPreferenceEnqueueTests : IDisposable
         await SeedPreferencesAsync(marlaId, """{"咖啡":2}""");
 
         using var client = _factory.CreateClient();
-        var response = await client.PostAsJsonAsync("/api/chat",
+        // 两次 POST：第一次写 StateBag["NewPreferences"]，第二次 Provider.Store 入队 → worker 累加落库
+        var response1 = await client.PostAsJsonAsync("/api/chat",
             new ChatRequest("marla", "你好"));
-        response.EnsureSuccessStatusCode();
-        var reply = await response.Content.ReadFromJsonAsync<ChatReply>();
-        Assert.NotNull(reply);
-        Assert.Contains("模拟回复", reply!.Response);   // 响应已返回，落库由后台 worker 异步完成
+        response1.EnsureSuccessStatusCode();
+        var reply1 = await response1.Content.ReadFromJsonAsync<ChatReply>();
+        Assert.NotNull(reply1);
+        Assert.Contains("模拟回复", reply1!.Response);   // 响应已返回，落库由后台 worker 异步完成
+
+        var response2 = await client.PostAsJsonAsync("/api/chat",
+            new ChatRequest("marla", "你好"));
+        response2.EnsureSuccessStatusCode();
 
         var weights = await WaitForWeightsAsync(marlaId, w => w.Count == 2);
         Assert.Equal(3, weights["咖啡"]);   // 咖啡 2+1
@@ -156,28 +167,23 @@ public sealed class ChatPreferenceEnqueueTests : IDisposable
                 var pipeline = new DeepSeekDelegatingChatClient(mockClient, null, "qwen");
                 services.AddSingleton<Meai.IChatClient>(pipeline);
 
+                ShoppingAssistantAgent CreateAgent(IServiceProvider sp) => new ShoppingAssistantAgent(
+                    sp.GetRequiredService<Meai.IChatClient>(),
+                    sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                    ProductKeywordMap.Entries,
+                    sp.GetRequiredService<CartToolProvider>(),
+                    isOpenAI: false,
+                    sp.GetRequiredService<AgentTelemetryOptions>(),
+                    sp.GetRequiredService<IPreferenceQueue>());
+
                 var capturedFactory = factory!;
                 var mockRouter = Substitute.For<ModelRouter>();
                 mockRouter.ActiveModel.Returns("qwen");
-                mockRouter.GetAgent(Arg.Any<string>()).Returns(callInfo =>
-                {
-                    var sp = capturedFactory.Services;
-                    return new ShoppingAssistantAgent(
-                        sp.GetRequiredService<Meai.IChatClient>(),
-                        sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        ProductKeywordMap.Entries,
-                        sp.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
-                        sp.GetRequiredService<AgentTelemetryOptions>());
-                });
-                mockRouter.GetDefaultAgent().Returns(
-                    _ => new ShoppingAssistantAgent(
-                        capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
-                        ProductKeywordMap.Entries,
-                        capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
-                        capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
+                // 缓存 agent 实例：多次 POST 复用同一 agent/session（偏好 State/StateBag 跨轮保留，
+                // 本轮 NewPreferences 由下次 Run 的 Provider.Store 读到并入队）
+                ShoppingAssistantAgent? cachedAgent = null;
+                mockRouter.GetAgent(Arg.Any<string>()).Returns(_ => cachedAgent ??= CreateAgent(capturedFactory.Services));
+                mockRouter.GetDefaultAgent().Returns(_ => cachedAgent ??= CreateAgent(capturedFactory.Services));
                 mockRouter.GetAvailableModels().Returns([
                     new ModelInfo("qwen", "Qwen 3.7", true),
                 ]);

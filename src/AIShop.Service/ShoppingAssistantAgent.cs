@@ -1,5 +1,6 @@
 #pragma warning disable MAAI001
 using AIShop.AgentTelemetry;
+using AIShop.Core.Interfaces;
 using AIShop.Infrastructure.Data;
 using AIShop.Service.Providers;
 using AIShop.Service.Tools;
@@ -7,6 +8,7 @@ using Microsoft.Agents.AI;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 using Serilog;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Encodings.Web;
@@ -22,6 +24,8 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     private readonly AIAgent _agent;
     private readonly SqliteChatHistoryProvider _provider;
     private readonly bool _isOpenAI;
+    // 按 sessionId 复用 AgentSession（State/StateBag 跨轮保留，偏好以 State 为主、Store 延迟一轮入队生效）
+    private readonly ConcurrentDictionary<Guid, AgentSession> _sessions = new();
     private static readonly Serilog.ILogger Logger = Log.ForContext<ShoppingAssistantAgent>();
 
     internal static bool IsOpenAIModel(string model) =>
@@ -124,7 +128,8 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 
     public ShoppingAssistantAgent(IChatClient chatClient, IDbContextFactory<AppDbContext> dbFactory,
         IReadOnlyDictionary<string, string[]> keywordMap, CartToolProvider cartTools, bool isOpenAI,
-        AgentTelemetryOptions telemetryOptions)
+        AgentTelemetryOptions telemetryOptions,
+        IPreferenceQueue? preferenceQueue = null)
     {
         _isOpenAI = isOpenAI;
         var instructions = BuildInstructions(keywordMap);
@@ -161,16 +166,22 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 
         // T10：Provider 存为字段（不只内联传给 ChatHistoryProvider）——
         // RunChatAsync 在 Run 正常返回后需调用 _provider.MarkRoundFinalAsync(runId) 兜底补标本轮终点
-        _provider = new SqliteChatHistoryProvider(dbFactory, (session) => {
-
-            if (session!.TryGetInMemoryChatHistory(out var chatHistory) && chatHistory is { Count: > 0 }) 
+        // 会话身份（SessionId）由 RunChatAsync 写入 StateBag，Provider 经默认 stateInitializer
+        // 从 StateBag 读取构造 State（对齐官方 Provider 的 stateInitializer 模式）
+        _provider = new SqliteChatHistoryProvider(
+            dbFactory,
+            options: new SqliteChatHistoryProviderOptions
             {
-                return new SqliteChatHistoryProvider.State() { Messages = chatHistory };
-            }
-
-            return new SqliteChatHistoryProvider.State();
-
-        }, stateKey: "ShoppingAssistant");
+                StateKey = "ShoppingAssistant",
+                // Provide：历史输出给 LLM 前过滤——排除 system 消息（系统指令走 Instructions，不入历史上下文）
+                ProvideOutputMessageFilter = msgs => msgs.Where(m => m.Role != ChatRole.System),
+                // Store：请求消息入库前过滤——排除框架回传的历史（避免重复存储）+ system
+                StoreInputRequestMessageFilter = msgs => msgs.Where(m =>
+                    m.GetAgentRequestMessageSourceType() != AgentRequestMessageSourceType.ChatHistory
+                    && m.Role != ChatRole.System),
+                // Store：响应消息入库前过滤——排除 system
+                StoreInputResponseMessageFilter = msgs => msgs.Where(m => m.Role != ChatRole.System),
+            });
 
         var options = new HarnessAgentOptions
         {
@@ -193,7 +204,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             DisableApprovalNotRequiredFunctionBypassing = false,
          
 
-            AIContextProviders = [new PreferenceMemoryProvider()]
+            AIContextProviders = [new PreferenceMemoryProvider(dbFactory, preferenceQueue)]
         };
 
         _agent = new HarnessAgent(chatClient, options);
@@ -227,6 +238,20 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     }
 
     /// <summary>
+    /// 按 sessionId 获取或创建会话：复用使 State/StateBag 跨轮保留（偏好以 State 为主，
+    /// 端点写 StateBag["NewPreferences"] 的本轮新偏好由下次 Store 读到并入队）。
+    /// </summary>
+    private async Task<AgentSession> GetOrCreateSessionAsync(Guid sessionId, CancellationToken ct)
+    {
+        if (_sessions.TryGetValue(sessionId, out var existing))
+            return existing;
+
+        var session = await _agent.CreateSessionAsync(ct);
+        _sessions[sessionId] = session;
+        return session;
+    }
+
+    /// <summary>
     /// 执行一次 Agent 对话。
     ///
     /// 所有模型统一走 Text 模式：
@@ -240,13 +265,16 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     /// </summary>
     public async Task<(AgentChatResult Result, AgentSession Session)> RunChatAsync(
         Guid sessionId, string userMessage, string username,
-        string? preferences = null, CancellationToken ct = default)
+        string? preferences = null, Guid? userId = null, CancellationToken ct = default)
     {
         CartToolProvider.SetCurrentUser(username);
 
         var sw = Stopwatch.StartNew();
-        var session = await _agent.CreateSessionAsync(ct);
+        // 复用按 sessionId 缓存的会话（State/StateBag 跨轮保留，偏好以 State 为主）
+        var session = await GetOrCreateSessionAsync(sessionId, ct);
         session.StateBag.SetValue("SessionId", sessionId.ToString());
+        if (userId is { } uid)
+            session.StateBag.SetValue(PreferenceMemoryProvider.UserIdStateKey, uid.ToString());
 
         // T10：每轮开始生成唯一 run_id 写入 StateBag（一次 Run 只生成一次，spec「RunChatAsync
         // 每轮开始生成 run_id 写 StateBag」）——Provider.Store 从 StateBag 读同一值，
@@ -328,6 +356,10 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         // Agent 不直接操作 DbContext（评审 Y3）。异常中断时不会执行到此，该轮天然视为未完成
         await _provider.MarkRoundFinalAsync(runId, ct);
 
+        // 把本轮 LLM 提取的偏好写入 StateBag，Provider.Store 下次 Run 读到并入队（复用 session，延迟一轮生效）
+        if (result?.Preferences is { Length: > 0 })
+            session.StateBag.SetValue(PreferenceMemoryProvider.NewPreferencesStateKey, string.Join("、", result.Preferences));
+
         return (result ?? new AgentChatResult(rawText ?? "", [], null), session);
     }
 
@@ -346,15 +378,16 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     /// </summary>
     public async IAsyncEnumerable<ChatStreamChunk> RunChatStreamAsync(
         Guid sessionId, string userMessage, string username,
-        string? preferences = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        string? preferences = null, Guid? userId = null,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
         CartToolProvider.SetCurrentUser(username);
 
-        // 会话创建（失败直接降级，无需 MarkRoundFinal）
+        // 复用按 sessionId 缓存的会话（失败直接降级，无需 MarkRoundFinal）
         AgentSession? session = null;
         try
         {
-            session = await _agent.CreateSessionAsync(ct);
+            session = await GetOrCreateSessionAsync(sessionId, ct);
         }
         catch (Exception ex)
         {
@@ -363,13 +396,15 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 
         if (session is null)
         {
-            var (fallbackResult, _) = await RunChatAsync(sessionId, userMessage, username, preferences, ct);
+            var (fallbackResult, _) = await RunChatAsync(sessionId, userMessage, username, preferences, userId, ct);
             yield return new ChatStreamChunk { TextDelta = fallbackResult.Reply, IsComplete = false };
             yield return new ChatStreamChunk { TextDelta = "", IsComplete = true, FullResult = fallbackResult };
             yield break;
         }
 
         session.StateBag.SetValue("SessionId", sessionId.ToString());
+        if (userId is { } uid)
+            session.StateBag.SetValue(PreferenceMemoryProvider.UserIdStateKey, uid.ToString());
         var runId = Guid.NewGuid();
         session.StateBag.SetValue("RunId", runId.ToString());
         if (!string.IsNullOrWhiteSpace(preferences))
@@ -413,6 +448,9 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         // 流结束后：从累积的完整原始文本解析 AgentChatResult
         // （原生流式路径下增量文本不写回 session history，改用累积文本解析）
         var finalResult = ParseFinalResultFromText(fullTextBuilder.ToString());
+        // 写入本轮新偏好（Provider.Store 下次 Run 入队）
+        if (finalResult.Preferences is { Length: > 0 })
+            session.StateBag.SetValue(PreferenceMemoryProvider.NewPreferencesStateKey, string.Join("、", finalResult.Preferences));
         yield return new ChatStreamChunk { TextDelta = "", IsComplete = true, FullResult = finalResult };
 
         await _provider.MarkRoundFinalAsync(runId, ct);

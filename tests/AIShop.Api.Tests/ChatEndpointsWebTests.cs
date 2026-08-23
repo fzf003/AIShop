@@ -470,7 +470,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 var mockAgent = Substitute.For<IShoppingAssistantAgent>();
                 mockAgent.RunChatAsync(
                         Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                        Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>())
                     .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
                         _ => throw new InvalidOperationException("agent boom"));
 
@@ -855,7 +855,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 // NSubstitute 回调队列：第 1 次抛 HttpRequestException，第 2 次返回正常回复
                 agent.RunChatAsync(
                         Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                        Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>())
                     .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
                         _ => throw new HttpRequestException("网络抖动"),
                         _ => Task.FromResult(
@@ -880,7 +880,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
         // 重试成功路径：RunChatAsync 恰好被调用 2 次（首次失败 + 一次重试）
         await mockAgent!.Received(2).RunChatAsync(
             Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-            Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>());
     }
 
     /// <summary>
@@ -903,7 +903,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 // 第 1 次与第 2 次（重试）均抛 HttpRequestException
                 agent.RunChatAsync(
                         Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                        Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>())
                     .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
                         _ => throw new HttpRequestException("网络抖动 1"),
                         _ => throw new HttpRequestException("网络抖动 2"));
@@ -926,7 +926,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
         // 兜底路径：RunChatAsync 恰好被调用 2 次（首次失败 + 一次重试，重试仍失败才兜底）
         await mockAgent!.Received(2).RunChatAsync(
             Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-            Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>());
     }
 
     // ============ T13T2 非重试异常不重试测试（方案 A：确定性失败） ============
@@ -950,7 +950,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 var agent = Substitute.For<IShoppingAssistantAgent>();
                 agent.RunChatAsync(
                         Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                        Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>())
                     .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
                         _ => throw new InvalidOperationException("agent boom"));
                 mockAgent = agent;
@@ -972,7 +972,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
         // 非重试异常：RunChatAsync 只被调用 1 次（不重试）
         await mockAgent!.Received(1).RunChatAsync(
             Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-            Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>());
     }
 
     /// <summary>
@@ -994,7 +994,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 var agent = Substitute.For<IShoppingAssistantAgent>();
                 agent.RunChatAsync(
                         Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                        Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>())
                     .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
                         _ => throw new KeyNotFoundException("model not found"));
                 mockAgent = agent;
@@ -1015,7 +1015,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
         // 独立 catch 优先：RunChatAsync 只被调用 1 次（不重试）
         await mockAgent!.Received(1).RunChatAsync(
             Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-            Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>());
     }
 
     // ============ T16 已发 token 降级守卫测试 ============
@@ -1042,12 +1042,12 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 // 流式：先 yield 一个文本 chunk（已发 token），随后抛可重试异常
                 agent.RunChatStreamAsync(
                         Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                        Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>())
                     .Returns(StreamThenThrow());
                 // 降级目标 RunChatAsync 返回正常结果——但已发 token 后不得被调用（Received(0)）
                 agent.RunChatAsync(
                         Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                        Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>())
                     .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
                         _ => Task.FromResult(
                             (new AgentChatResult("完整回复", [], null),
@@ -1079,7 +1079,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
         // 不降级调用 RunChatAsync
         await mockAgent!.Received(0).RunChatAsync(
             Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-            Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>());
 
         // 迭代器辅助：先 yield 一个 chunk，随后抛可重试异常
         static async IAsyncEnumerable<ChatStreamChunk> StreamThenThrow()
@@ -1113,12 +1113,12 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 // 会落入 L256「获取流失败重试」分支而非消费循环的降级分支，RunChatAsync 不会被调用
                 agent.RunChatStreamAsync(
                         Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                        Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>())
                     .Returns(ThrowImmediately());
                 // 降级目标 RunChatAsync 返回正常结果——未发 token 时须被调用一次
                 agent.RunChatAsync(
                         Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                        Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>())
                     .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
                         _ => Task.FromResult(
                             (new AgentChatResult("降级回复", [], null),
@@ -1156,7 +1156,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
         // 降级路径：RunChatAsync 恰被调用一次（未发 token 时维持降级，不重试）
         await mockAgent!.Received(1).RunChatAsync(
             Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-            Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>());
 
         // 迭代器辅助：首个 MoveNextAsync 即抛可重试异常（不 yield 任何 chunk，未发 token）。
         // 用 await Task.FromException 而非直接 throw 后跟 yield break——后者在迭代器内 throw 后紧跟
@@ -1206,12 +1206,12 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 // 流式：只 yield 文本 chunk（已发 token）、不 yield complete chunk（无完整结果）
                 agent.RunChatStreamAsync(
                         Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                        Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>())
                     .Returns(OnlyTextChunks());
                 // 降级目标 RunChatAsync 返回正常结果——但已发 token 后不得被调用（Received(0)）
                 agent.RunChatAsync(
                         Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-                        Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                        Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>())
                     .Returns<Task<(AgentChatResult, Microsoft.Agents.AI.AgentSession)>>(
                         _ => Task.FromResult(
                             (new AgentChatResult("完整回复", [], null),
@@ -1243,7 +1243,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
         // 不降级调用 RunChatAsync
         await mockAgent!.Received(0).RunChatAsync(
             Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(),
-            Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>());
 
         // 迭代器辅助：只 yield 文本 chunk、不 yield complete chunk（无完整结果，流正常结束）
         static async IAsyncEnumerable<ChatStreamChunk> OnlyTextChunks()

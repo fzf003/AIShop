@@ -1799,6 +1799,63 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
         ctx.SaveChanges();
     }
 
+    [Fact]
+    public async Task Provide_WithEmptyCache_LoadsFromDatabaseIntoCache()
+    {
+        // 直接 seed 数据库（不经 Store，缓存仍空）
+        SeedMessages(2);
+
+        // Provide：缓存空 → 查库回填并返回
+        var messages = await InvokeProvideAsync();
+        Assert.Equal(2, messages.Count);
+
+        // 再 Provide：命中缓存，且与首次返回的内容一致
+        var cached = await InvokeProvideAsync();
+        Assert.Equal(2, cached.Count);
+        Assert.Equal(messages[0].Text, cached[0].Text);
+    }
+
+    [Fact]
+    public async Task Provide_AfterStore_ReturnsCachedMessages()
+    {
+        // 首次 Provide：缓存空 → 查库（空库）返回空
+        var first = await InvokeProvideAsync();
+        Assert.Empty(first);
+
+        // Store：写库 + 追加缓存
+        await InvokeStoreAsync(
+            requestMessages: [new AgentChatMessage(ChatRole.User, "你好")],
+            responseMessages: [new AgentChatMessage(ChatRole.Assistant, "嗨")]);
+
+        // 再次 Provide：命中会话内缓存，返回刚存的消息（免查库）
+        var second = await InvokeProvideAsync();
+        Assert.Equal(2, second.Count);
+        Assert.Contains(second, m => m.Role == ChatRole.User && m.Text == "你好");
+        Assert.Contains(second, m => m.Role == ChatRole.Assistant && m.Text == "嗨");
+    }
+
+    [Fact]
+    public async Task Store_MultipleRounds_AppendsToSessionCache()
+    {
+        // 第 1 轮 Store
+        await InvokeStoreAsync(
+            requestMessages: [new AgentChatMessage(ChatRole.User, "问题1")],
+            responseMessages: [new AgentChatMessage(ChatRole.Assistant, "回答1")]);
+
+        // 第 2 轮 Store（缓存应已含第 1 轮）
+        await InvokeStoreAsync(
+            requestMessages: [new AgentChatMessage(ChatRole.User, "问题2")],
+            responseMessages: [new AgentChatMessage(ChatRole.Assistant, "回答2")]);
+
+        // Provide：缓存命中，包含全部 4 条，顺序为先存后新
+        var messages = await InvokeProvideAsync();
+        Assert.Equal(4, messages.Count);
+        Assert.Equal("问题1", messages[0].Text);
+        Assert.Equal("回答1", messages[1].Text);
+        Assert.Equal("问题2", messages[2].Text);
+        Assert.Equal("回答2", messages[3].Text);
+    }
+
     private sealed class TestSession : AgentSession
     {
         public TestSession() : base(new AgentSessionStateBag()) { }

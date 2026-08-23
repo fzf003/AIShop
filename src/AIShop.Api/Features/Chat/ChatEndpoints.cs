@@ -73,7 +73,6 @@ public static class ChatEndpoints
             ModelRouter router,
             IMemoryCache cache,
             IPreferenceRepository prefRepo,
-            IPreferenceQueue queue,
             CancellationToken ct) =>
         {
             var endpointSw = Stopwatch.StartNew();
@@ -102,7 +101,7 @@ public static class ChatEndpoints
                 var modelId = req.Model ?? router.ActiveModel;
                 var agent = router.GetAgent(modelId);
                 // R8：会话对象（第二元组元素）已不再被端点使用（agent_result_ 缓存已删），丢弃
-                (result, _) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, ct);
+                (result, _) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, userId: user.Id, ct);
             }
             catch (KeyNotFoundException knf)
             {
@@ -131,7 +130,7 @@ public static class ChatEndpoints
                     // 重试一次：首次若用非默认模型则换到默认模型；已用默认模型则同模型再试
                     var retryModel = router.ActiveModel;
                     (result, _) = await router.GetAgent(retryModel).RunChatAsync(
-                        sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, ct);
+                        sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, userId: user.Id, ct);
                 }
                 catch (Exception retryEx)
                 {
@@ -174,7 +173,7 @@ public static class ChatEndpoints
 
             // 3. 推荐计算（复用 BuildChatReply：关键词匹配 + 偏好合并 + SplitProducts + 缓存写入 + 偏好入队）
             var userMsg = req.Message ?? "";
-            var chatReply = BuildChatReply(result, userMsg, prefs, catalog, req.Username, user.Id, cache, queue);
+            var chatReply = BuildChatReply(result, userMsg, prefs, catalog, req.Username, cache);
 
             endpointSw.Stop();
             logger.Information(
@@ -196,7 +195,6 @@ public static class ChatEndpoints
             ModelRouter router,
             IMemoryCache cache,
             IPreferenceRepository prefRepo,
-            IPreferenceQueue queue,
             CancellationToken ct) =>
         {
             var logger = Log.ForContext("SourceContext", "Diagnose");
@@ -238,7 +236,7 @@ public static class ChatEndpoints
                 try
                 {
                     var agent = router.GetAgent(modelId);
-                    streamChunks = agent.RunChatStreamAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, ct);
+                    streamChunks = agent.RunChatStreamAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, userId: user.Id, ct);
                 }
                 catch (KeyNotFoundException knf)
                 {
@@ -260,7 +258,7 @@ public static class ChatEndpoints
                     try
                     {
                         var retryModel = router.ActiveModel;
-                        streamChunks = router.GetAgent(retryModel).RunChatStreamAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, ct);
+                        streamChunks = router.GetAgent(retryModel).RunChatStreamAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, userId: user.Id, ct);
                     }
                     catch (Exception retryEx)
                     {
@@ -311,7 +309,7 @@ public static class ChatEndpoints
                     }
                     // 未发 token：维持降级到 RunChatAsync
                     var agent = router.GetAgent(modelId);
-                    var (result, _) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, ct);
+                    var (result, _) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, userId: user.Id, ct);
                     finalResult = result;
                 }
 
@@ -327,13 +325,13 @@ public static class ChatEndpoints
                     }
                     // 未发 token：维持降级到 RunChatAsync
                     var agent = router.GetAgent(modelId);
-                    var (result, _) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, ct);
+                    var (result, _) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, userId: user.Id, ct);
                     finalResult = result;
                 }
 
                 // 发送 done 事件（完整 ChatReply JSON）
                 var userMsg = req.Message ?? "";
-                var chatReply = BuildChatReply(finalResult, userMsg, prefs, catalog, req.Username, user.Id, cache, queue);
+                var chatReply = BuildChatReply(finalResult, userMsg, prefs, catalog, req.Username, cache);
                 // done 事件用 camelCase 序列化（JsonSerializerOptions.Web），与 token/error 事件及
                 // cart/products 等端点的 camelCase 契约一致——前端统一按 camelCase 读取。
                 // 此前裸 Serialize 输出 PascalCase（record 属性名），前端 data.Response 等读取失败（修复）。
@@ -529,8 +527,8 @@ public static class ChatEndpoints
     /// </summary>
     private static ChatReply BuildChatReply(
         AgentChatResult result, string userMsg, UserPreferences? prefs,
-        IProductCatalogService catalog, string username, Guid userId,
-        IMemoryCache cache, IPreferenceQueue queue)
+        IProductCatalogService catalog, string username,
+        IMemoryCache cache)
     {
         // 关键词匹配：从用户输入直接匹配（不依赖模型结构化输出）
         var validKeywords = catalog.KeywordMap.Keys
@@ -595,16 +593,9 @@ public static class ChatEndpoints
                 chatReply.RecMessage ?? ""),
             TimeSpan.FromMinutes(10));
 
-        // 偏好异步写入：端点只入队轻量 UserPreferenceUpdate（权重累加在
-        // PreferenceWriteHostedService worker 侧串行读-改-写完成），立即返回不等待落库；
-        // DropOldest 语义下 TryEnqueue 仅在 channel 标记完成后才返回 false，此处 Warning 作为
-        // channel 完成兜底；队列满挤掉最旧的观测日志已内聚到 PreferenceQueue.TryEnqueue（P2-3）
-        if (result.Preferences is { Length: > 0 })
-        {
-            var update = new UserPreferenceUpdate(userId, result.Preferences);
-            if (!queue.TryEnqueue(update))
-                Log.Warning("Preference queue completed, update dropped for {UserId}", userId);
-        }
+        // 偏好持久化收敛到 PreferenceMemoryProvider.StoreAIContextAsync：
+        // Agent 把本轮 result.Preferences 写入 StateBag["NewPreferences"]，
+        // Provider.Store 下次 Run 读到并入队（权重累加写库），端点不再直接入队，避免双重写入。
 
         return chatReply;
     }
