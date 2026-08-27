@@ -74,7 +74,7 @@ public sealed class ChatRecommendationMergeTests : IDisposable
                     var sp = capturedFactory.Services;
                     return new ShoppingAssistantAgent(
                         sp.GetRequiredService<Meai.IChatClient>(),
-                        sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        sp.GetRequiredService<IChatHistoryStore>(), sp.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         sp.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -83,7 +83,7 @@ public sealed class ChatRecommendationMergeTests : IDisposable
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -179,7 +179,7 @@ public sealed class ChatRecommendationMergeTests : IDisposable
         Assert.NotNull(reply);
         Assert.False(reply!.HasRecommendation);
         Assert.Null(reply.RecommendedProducts);
-        Assert.Equal("暂无特定推荐 — 浏览精选商品", reply.RecMessage);
+        Assert.Equal("为您精选商品", reply.RecMessage);
         Assert.NotNull(reply.OtherProducts);
         Assert.Equal([1, 2, 3, 4, 5, 6], reply.OtherProducts!.Select(p => p.Id).ToArray());
     }
@@ -251,7 +251,9 @@ public sealed class ChatRecommendationMergeTests : IDisposable
 
         using var seedCtx = new AppDbContext(
             new DbContextOptionsBuilder<AppDbContext>().UseSqlite(connStr).Options);
-        seedCtx.Database.EnsureCreated();
+        // 用 Migrate 建表（对齐宿主 Program.cs 的 MigrateAsync）：EnsureCreated 不写迁移历史，
+        // 会让宿主的 MigrateAsync 重跑迁移撞已存在的表 → 集成测试 host 启动失败
+        seedCtx.Database.Migrate();
         seedCtx.Products.AddRange(ProductSeedData.Products);
         seedCtx.SaveChanges();
     }

@@ -3,7 +3,9 @@ using AIShop.AgentTelemetry;
 // C# 遮蔽规则下「AgentTelemetry」解析为命名空间而非类，故加别名引用静态类。
 using AgentTelemetryHelper = AIShop.AgentTelemetry.AgentTelemetry;
 using AIShop.Core.StaticData;
+using AIShop.Core.Services;
 using AIShop.Infrastructure.Data;
+using AIShop.Infrastructure.Services;
 using AIShop.Service.Tools;
 using Microsoft.Agents.AI;
 using Microsoft.Data.Sqlite;
@@ -379,7 +381,6 @@ public sealed class AgentTelemetryTests : IDisposable
 
         // 行为不变：mock IChatClient 返回固定 JSON 回复，RunChatAsync 原样返回
         var sessionId = Guid.NewGuid();
-        CartToolProvider.SetCurrentUser("t13-user");
         var (result, _) = await agent.RunChatAsync(sessionId, "帮我推荐跑鞋", "t13-user");
 
         Assert.NotNull(result);
@@ -401,7 +402,6 @@ public sealed class AgentTelemetryTests : IDisposable
         Assert.Contains("OpenTelemetryAgent", internalAgent.GetType().Name);
 
         var sessionId = Guid.NewGuid();
-        CartToolProvider.SetCurrentUser("t13-user");
         var (result, _) = await agent.RunChatAsync(sessionId, "查看购物车", "t13-user");
 
         Assert.NotNull(result);
@@ -461,11 +461,11 @@ public sealed class AgentTelemetryTests : IDisposable
             var serviceCollection = new ServiceCollection();
             serviceCollection.AddDbContextFactory<AppDbContext>(o => o.UseSqlite(_connection));
             _scopeFactory = serviceCollection.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
-            _cartTools = new CartToolProvider(_scopeFactory);
+            _cartTools = new CartToolProvider(_scopeFactory, new CurrentUserAccessor());
         }
 
         public ShoppingAssistantAgent CreateAgent(AgentTelemetryLevel level)
-            => new(_chatClient, _dbFactory, ProductKeywordMap.Entries, _cartTools, isOpenAI: false,
+            => new(_chatClient, new ChatHistoryStore(_dbFactory), new RoundBasedCompactionPolicy(), ProductKeywordMap.Entries, _cartTools, isOpenAI: false,
                 new AgentTelemetryOptions { Level = level });
 
         public void Dispose()

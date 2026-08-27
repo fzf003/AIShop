@@ -3,7 +3,9 @@ using AIShop.AgentTelemetry;
 using AIShop.Service;
 using AIShop.Service.Tools;
 using AIShop.Core.StaticData;
+using AIShop.Core.Services;
 using AIShop.Infrastructure.Data;
+using AIShop.Infrastructure.Services;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -62,10 +64,10 @@ public sealed class ShoppingAssistantAgentRunTests : IDisposable
         var serviceCollection = new ServiceCollection();
         serviceCollection.AddDbContextFactory<AppDbContext>(o => o.UseSqlite(_connection));
         var scopeFactory = serviceCollection.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
-        var cartTools = new CartToolProvider(scopeFactory);
+        var cartTools = new CartToolProvider(scopeFactory, new CurrentUserAccessor());
 
         var agent = new ShoppingAssistantAgent(
-            mockClient, dbFactory, ProductKeywordMap.Entries, cartTools,
+            mockClient, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), ProductKeywordMap.Entries, cartTools,
             isOpenAI: false, new AgentTelemetryOptions { Level = AgentTelemetryLevel.None });
 
         var sessionId = Guid.NewGuid();
@@ -126,10 +128,10 @@ public sealed class ShoppingAssistantAgentRunTests : IDisposable
         var serviceCollection = new ServiceCollection();
         serviceCollection.AddDbContextFactory<AppDbContext>(o => o.UseSqlite(_connection));
         var scopeFactory = serviceCollection.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
-        var cartTools = new CartToolProvider(scopeFactory);
+        var cartTools = new CartToolProvider(scopeFactory, new CurrentUserAccessor());
 
         var agent = new ShoppingAssistantAgent(
-            mockClient, dbFactory, ProductKeywordMap.Entries, cartTools,
+            mockClient, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), ProductKeywordMap.Entries, cartTools,
             isOpenAI: false, new AgentTelemetryOptions { Level = AgentTelemetryLevel.None });
 
         var sessionId = Guid.NewGuid();
@@ -193,10 +195,10 @@ public sealed class ShoppingAssistantAgentRunTests : IDisposable
         var serviceCollection = new ServiceCollection();
         serviceCollection.AddDbContextFactory<AppDbContext>(o => o.UseSqlite(_connection));
         var scopeFactory = serviceCollection.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
-        var cartTools = new CartToolProvider(scopeFactory);
+        var cartTools = new CartToolProvider(scopeFactory, new CurrentUserAccessor());
 
         var agent = new ShoppingAssistantAgent(
-            mockClient, dbFactory, ProductKeywordMap.Entries, cartTools,
+            mockClient, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), ProductKeywordMap.Entries, cartTools,
             isOpenAI: false, new AgentTelemetryOptions { Level = AgentTelemetryLevel.None });
 
         var sessionId = Guid.NewGuid();

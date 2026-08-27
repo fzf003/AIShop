@@ -4,7 +4,9 @@ using AIShop.Service;
 using AIShop.Service.Tools;
 using AIShop.Core.Entities;
 using AIShop.Core.StaticData;
+using AIShop.Core.Services;
 using AIShop.Infrastructure.Data;
+using AIShop.Infrastructure.Services;
 using Microsoft.Agents.AI;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -84,10 +86,10 @@ public sealed class RunChatAsyncPreferenceBackfillTests : IDisposable
         var serviceCollection = new ServiceCollection();
         serviceCollection.AddDbContextFactory<AppDbContext>(o => o.UseSqlite(_connection));
         var scopeFactory = serviceCollection.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
-        var cartTools = new CartToolProvider(scopeFactory);
+        var cartTools = new CartToolProvider(scopeFactory, new CurrentUserAccessor());
 
         var agent = new ShoppingAssistantAgent(
-            mockClient, dbFactory, ProductKeywordMap.Entries, cartTools,
+            mockClient, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), ProductKeywordMap.Entries, cartTools,
             isOpenAI: false, new AgentTelemetryOptions { Level = AgentTelemetryLevel.None });
 
         var sessionId = Guid.NewGuid();
@@ -130,10 +132,10 @@ public sealed class RunChatAsyncPreferenceBackfillTests : IDisposable
         var serviceCollection = new ServiceCollection();
         serviceCollection.AddDbContextFactory<AppDbContext>(o => o.UseSqlite(_connection));
         var scopeFactory = serviceCollection.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
-        var cartTools = new CartToolProvider(scopeFactory);
+        var cartTools = new CartToolProvider(scopeFactory, new CurrentUserAccessor());
 
         var agent = new ShoppingAssistantAgent(
-            mockClient, dbFactory, ProductKeywordMap.Entries, cartTools,
+            mockClient, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), ProductKeywordMap.Entries, cartTools,
             isOpenAI: false, new AgentTelemetryOptions { Level = AgentTelemetryLevel.None });
 
         await agent.RunChatAsync(Guid.NewGuid(), "推荐商品", "t16-user", preferences: null);

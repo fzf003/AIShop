@@ -6,16 +6,14 @@ namespace AIShop.Service.Tools;
 
 /// <summary>
 /// 提供购物车操作工具函数，供 AI Agent 调用。
-/// 用户名由 API 层通过 SetCurrentUser 注入，LLM 不需要关心。
+/// 用户名由调用方经 <see cref="ICurrentUserAccessor"/> 注入（按执行流传递），LLM 不需要关心。
 /// </summary>
-public sealed class CartToolProvider(IServiceScopeFactory scopeFactory)
+public sealed class CartToolProvider(IServiceScopeFactory scopeFactory, ICurrentUserAccessor currentUserAccessor)
 {
-    private static readonly AsyncLocal<string?> _currentUser = new();
+    /// <summary>在 Agent 运行前注入当前登录用户名（实例方法，内部走 ICurrentUserAccessor）。</summary>
+    public void SetCurrentUser(string username) => currentUserAccessor.SetCurrentUser(username);
 
-    /// <summary>在 API 端点调用 Agent 前注入当前登录用户名。</summary>
-    public static void SetCurrentUser(string username) => _currentUser.Value = username;
-
-    private static string? GetCurrentUser() => _currentUser.Value;
+    private string? GetCurrentUser() => currentUserAccessor.CurrentUser;
 
     /// <summary>
     /// 按名称关键词搜索商品，供 AI Agent 调用。
@@ -107,7 +105,7 @@ public sealed class CartToolProvider(IServiceScopeFactory scopeFactory)
 
         // 幂等检查：如果商品已在购物车，返回当前状态，不重复添加
         var cart = await cartRepo.GetByUserIdAsync(user.Id);
-        var existing = cart?.Items.FirstOrDefault(i => i.ProductId == productId);
+        var existing = cart?.FindItemByProductId(productId);
         if (existing is not null)
             return $"注意：{product.Name} 已在购物车中（当前 {existing.Quantity} 件）。如需增加数量请用 update_cart_quantity({productId}, 新数量) 设置最终数量。";
 
@@ -137,11 +135,11 @@ public sealed class CartToolProvider(IServiceScopeFactory scopeFactory)
             return $"用户 {username} 不存在";
 
         var cart = await cartRepo.GetByUserIdAsync(user.Id);
-        if (cart is null || cart.Items.Count == 0)
+        if (cart is null || cart.IsEmpty)
             return "您的购物车是空的";
 
-        var totalItems = cart.Items.Sum(i => i.Quantity);
-        var totalPrice = cart.Items.Sum(i => i.ProductPrice * i.Quantity);
+        var totalItems = cart.TotalItems;
+        var totalPrice = cart.TotalPrice;
 
         var lines = cart.Items
             .Select(i => $"{i.ProductName} x{i.Quantity} = ¥{i.ProductPrice * i.Quantity:F2}")
@@ -172,7 +170,7 @@ public sealed class CartToolProvider(IServiceScopeFactory scopeFactory)
             return $"用户 {username} 不存在";
 
         var cart = await cartRepo.GetByUserIdAsync(user.Id);
-        var item = cart?.Items.FirstOrDefault(i => i.Id == itemId);
+        var item = cart?.FindItem(itemId);
         if (item is null)
             return "该商品不在您的购物车中";
 

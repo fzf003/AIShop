@@ -75,11 +75,13 @@ try
     // Global exception handler middleware
     app.UseExceptionHandler();
 
-    // Auto-migrate SQLite on startup
-    using (var scope = app.Services.CreateScope())
+    // Auto-migrate SQLite on startup（P8：EnsureCreated + 手写 DDL → EF Migrations）
+    // EF.IsDesignTime 跳过：避免 dotnet ef 设计时执行启动 DB 逻辑（否则 HostAbortedException）
+    if (!EF.IsDesignTime)
     {
+        using var scope = app.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        await db.Database.EnsureCreatedAsync();
+        await db.Database.MigrateAsync();
 
         // Seed users (match login buttons in the UI)
         async Task SeedUser(string username, string displayName)
@@ -94,30 +96,7 @@ try
         await SeedUser("fzf003", "fzf003");
         await db.SaveChangesAsync();
 
-        // 幂等建表兜底：EnsureCreatedAsync 仅当库不存在时创建全部 schema；库已存在时直接跳过、绝不补建新表。
-        // 因此任何有历史库的环境（生产/同事/曾运行过）都必须依赖下面的 CREATE TABLE IF NOT EXISTS 补建
-        // Products / UserPreferences 两表，否则播种时表不存在 → SqliteException → 启动崩溃。
-        // 注意：DDL 以 EF 空库 EnsureCreated 实际生成的 schema 为准照抄（表名/约束名 PascalCase：
-        // "Products"/"UserPreferences"/PK_Products/PK_UserPreferences），与 EF 映射 100% 一致，
-        // 不得按 tasks.md 早期的小写示例（products/user_preferences）手写，否则播种/查询会因表名不匹配失败。
-        // P2 时序：EnsureCreatedAsync + 建表兜底 DDL + 播种全部在同一个 CreateScope() 块、同一个 AppDbContext 实例上执行。
-        await db.Database.ExecuteSqlRawAsync("""
-            CREATE TABLE IF NOT EXISTS "Products" (
-                "Id" INTEGER NOT NULL CONSTRAINT "PK_Products" PRIMARY KEY,
-                "Name" TEXT NOT NULL,
-                "Category" TEXT NOT NULL,
-                "Tags" TEXT NOT NULL,
-                "Price" TEXT NOT NULL,
-                "Emoji" TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS "UserPreferences" (
-                "UserId" TEXT NOT NULL CONSTRAINT "PK_UserPreferences" PRIMARY KEY,
-                "KeywordsJson" TEXT NOT NULL,
-                "UpdatedAt" TEXT NOT NULL
-            );
-            """);
-
-        // 幂等播种：空表才写入 18 个种子商品（全新库 EnsureCreated 已建表；既有库兜底建表后走到这里），
+        // 幂等播种：空表才写入 18 个种子商品（MigrateAsync 已建表），
         // 覆盖全新库与既有库两路径，重复启动不产生重复行。
         if (!await db.Products.AnyAsync())
         {

@@ -1,10 +1,8 @@
 using AIShop.AgentTelemetry;
 using AIShop.Core.Interfaces;
 using AIShop.Core.StaticData;
-using AIShop.Infrastructure.Data;
 using AIShop.Service.Clients;
 using AIShop.Service.Tools;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -15,7 +13,6 @@ using Serilog;
 using System.ClientModel;
 using System.ClientModel.Primitives;
 using System.Collections.Concurrent;
-using System.Net.Sockets;
 
 namespace AIShop.Service;
 
@@ -123,13 +120,15 @@ public class ModelRouter
             var cfg = _modelConfigs[key];
             Logger.Information("GetAgent.Lazy: 开始创建 model={ModelName} endpoint={Endpoint}", key, cfg.Endpoint);
             var chatClient = CreateChatClient(cfg);
-            var dbFactory = _sp.GetRequiredService<IDbContextFactory<AppDbContext>>();
+            var chatHistoryStore = _sp.GetRequiredService<IChatHistoryStore>();
+            var compaction = _sp.GetRequiredService<IChatCompactionPolicy>();
             var cartTools = _sp.GetRequiredService<CartToolProvider>();
             var isOpenAI = ShoppingAssistantAgent.IsOpenAIModel(cfg.Model);
             var telemetryOptions = _sp.GetRequiredService<AgentTelemetryOptions>();
             var agent = new ShoppingAssistantAgent(
-                chatClient, dbFactory, ProductKeywordMap.Entries, cartTools, isOpenAI, telemetryOptions,
-                _sp.GetRequiredService<IPreferenceQueue>());
+                chatClient, chatHistoryStore, compaction, ProductKeywordMap.Entries, cartTools, isOpenAI, telemetryOptions,
+                _sp.GetRequiredService<IPreferenceQueue>(),
+                _sp.GetRequiredService<IServiceScopeFactory>());
             Logger.Information("GetAgent.Lazy: 创建成功 model={ModelName}", key);
             return agent;
         })).Value;

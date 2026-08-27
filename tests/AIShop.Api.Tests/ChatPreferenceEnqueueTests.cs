@@ -169,7 +169,7 @@ public sealed class ChatPreferenceEnqueueTests : IDisposable
 
                 ShoppingAssistantAgent CreateAgent(IServiceProvider sp) => new ShoppingAssistantAgent(
                     sp.GetRequiredService<Meai.IChatClient>(),
-                    sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                    sp.GetRequiredService<IChatHistoryStore>(), sp.GetRequiredService<IChatCompactionPolicy>(),
                     ProductKeywordMap.Entries,
                     sp.GetRequiredService<CartToolProvider>(),
                     isOpenAI: false,
@@ -270,7 +270,9 @@ public sealed class ChatPreferenceEnqueueTests : IDisposable
 
         using var seedCtx = new AppDbContext(
             new DbContextOptionsBuilder<AppDbContext>().UseSqlite(connStr).Options);
-        seedCtx.Database.EnsureCreated();
+        // 用 Migrate 建表（对齐宿主 Program.cs 的 MigrateAsync）：EnsureCreated 不写迁移历史，
+        // 会让宿主的 MigrateAsync 重跑迁移撞已存在的表 → 集成测试 host 启动失败
+        seedCtx.Database.Migrate();
         seedCtx.Products.AddRange(ProductSeedData.Products);
         seedCtx.SaveChanges();
     }

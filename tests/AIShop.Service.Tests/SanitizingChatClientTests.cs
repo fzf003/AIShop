@@ -4,7 +4,9 @@ using AIShop.Service;
 using AIShop.Service.Clients;
 using AIShop.Service.Tools;
 using AIShop.Core.StaticData;
+using AIShop.Core.Services;
 using AIShop.Infrastructure.Data;
+using AIShop.Infrastructure.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
@@ -85,10 +87,10 @@ public sealed class SanitizingChatClientTests
             .Returns(AsyncEnumerable.Empty<ChatResponseUpdate>());
 
         var scopeFactory = Substitute.For<IServiceScopeFactory>();
-        var cartTools = new CartToolProvider(scopeFactory);
+        var cartTools = new CartToolProvider(scopeFactory, new CurrentUserAccessor());
         var dbFactory = Substitute.For<IDbContextFactory<AppDbContext>>();
 
-        var agent = new ShoppingAssistantAgent(inner, dbFactory, ProductKeywordMap.Entries, cartTools, true,
+        var agent = new ShoppingAssistantAgent(inner, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), ProductKeywordMap.Entries, cartTools, true,
             new AgentTelemetryOptions { Level = AgentTelemetryLevel.Metadata });
 
         Assert.NotNull(agent);

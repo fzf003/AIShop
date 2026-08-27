@@ -5,8 +5,10 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 using Microsoft.Agents.AI;
+using AIShop.Core.Services;
 using AIShop.Infrastructure.Data;
 using AIShop.Infrastructure.Entities;
+using AIShop.Infrastructure.Services;
 using AIShop.Service.Providers;
 using NSubstitute;
 using AgentChatMessage = Microsoft.Extensions.AI.ChatMessage;
@@ -65,7 +67,8 @@ public sealed class SqliteChatHistoryProviderTests : IDisposable
             return ctx;
         });
 
-        _provider = new SqliteChatHistoryProvider(_dbFactory);
+        _provider = new SqliteChatHistoryProvider(
+            new ChatHistoryStore(_dbFactory), new RoundBasedCompactionPolicy());
         _session = new TestSession();
         _session.StateBag.SetValue("SessionId", _sessionId.ToString());
     }

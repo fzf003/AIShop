@@ -1,5 +1,5 @@
-using System.Text.Json;
 using AIShop.Core.Entities;
+using AIShop.Core.ValueObjects;
 using AIShop.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
@@ -41,21 +41,16 @@ public sealed class PreferenceWriteHostedService : BackgroundService
                     var current = await db.UserPreferences.FindAsync(update.UserId);
                     var isNew = current is null;
                     current ??= new UserPreferences { UserId = update.UserId };
-                    var weights = JsonSerializer.Deserialize<Dictionary<string, int>>(current.KeywordsJson ?? "{}") ?? [];
 
-                    foreach (var p in update.Preferences)
-                    {
-                        weights[p] = weights.GetValueOrDefault(p) + 1;
-                    }
+                    // 读旧值 → 逐词 +1 → Top-20 截断：逻辑收敛到 Core PreferenceProfile（含确定性排序），
+                    // 与旧实现语义逐字一致（spec「偏好权重累加」：权重降序 + Key 序数序，Top-20 可复现）。
+                    var merged = PreferenceProfile
+                        .FromKeywordsJson(update.UserId, current.KeywordsJson, current.UpdatedAt)
+                        .Merge(update.Preferences)
+                        .TrimToTop();
 
-                    // Top-20 截断（spec「偏好权重累加」）：按权重降序保留前 20，并列权重按 Key 序数序二次排序，
-                    // 保证 Top-20 结果确定可复现。不再依赖 Dictionary 枚举顺序（旧实现 Take(20) 保留的是最早见过的 20 个词）。
-                    current.KeywordsJson = JsonSerializer.Serialize(
-                        weights.OrderByDescending(kv => kv.Value)
-                            .ThenBy(kv => kv.Key, StringComparer.Ordinal)
-                            .Take(20)
-                            .ToDictionary(kv => kv.Key, kv => kv.Value));
-                    current.UpdatedAt = DateTime.UtcNow;
+                    current.KeywordsJson = merged.ToKeywordsJson();
+                    current.UpdatedAt = merged.UpdatedAt;
 
                     if (isNew)
                     {

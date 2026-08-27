@@ -1,7 +1,9 @@
 #pragma warning disable MAAI001
 using AIShop.AgentTelemetry;
 using AIShop.Core.StaticData;
+using AIShop.Core.Services;
 using AIShop.Infrastructure.Data;
+using AIShop.Infrastructure.Services;
 using AIShop.Service;
 using AIShop.Service.Tools;
 using Microsoft.Agents.AI;
@@ -61,11 +63,11 @@ public sealed class RunChatStreamAsyncTests : IDisposable
         var serviceCollection = new ServiceCollection();
         serviceCollection.AddDbContextFactory<AppDbContext>(o => o.UseSqlite(_connection));
         var scopeFactory = serviceCollection.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
-        var cartTools = new CartToolProvider(scopeFactory);
+        var cartTools = new CartToolProvider(scopeFactory, new CurrentUserAccessor());
 
         // agentWrapper 走 T13 测试缝（internal 构造）：包装真实 agent 使首次会话创建抛异常
         return new ShoppingAssistantAgent(
-            mockClient, dbFactory, ProductKeywordMap.Entries, cartTools,
+            mockClient, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), ProductKeywordMap.Entries, cartTools,
             isOpenAI: false, new AgentTelemetryOptions { Level = AgentTelemetryLevel.None }, agentWrapper);
     }
 

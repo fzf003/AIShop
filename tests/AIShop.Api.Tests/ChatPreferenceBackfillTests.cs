@@ -83,7 +83,7 @@ public sealed class ChatPreferenceBackfillTests : IDisposable
                     var sp = capturedFactory.Services;
                     return new ShoppingAssistantAgent(
                         sp.GetRequiredService<Meai.IChatClient>(),
-                        sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        sp.GetRequiredService<IChatHistoryStore>(), sp.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         sp.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -92,7 +92,7 @@ public sealed class ChatPreferenceBackfillTests : IDisposable
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -211,7 +211,9 @@ public sealed class ChatPreferenceBackfillTests : IDisposable
         // ConfigureServices 阶段 BuildServiceProvider() 触发 Serilog "already frozen"）。
         using var seedCtx = new AppDbContext(
             new DbContextOptionsBuilder<AppDbContext>().UseSqlite(connStr).Options);
-        seedCtx.Database.EnsureCreated();
+        // 用 Migrate 建表（对齐宿主 Program.cs 的 MigrateAsync）：EnsureCreated 不写迁移历史，
+        // 会让宿主的 MigrateAsync 重跑迁移撞已存在的表 → 集成测试 host 启动失败
+        seedCtx.Database.Migrate();
         seedCtx.Products.AddRange(ProductSeedData.Products);
         seedCtx.SaveChanges();
     }

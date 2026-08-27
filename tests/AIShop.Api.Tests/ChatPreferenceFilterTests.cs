@@ -79,7 +79,7 @@ public sealed class ChatPreferenceFilterTests : IDisposable
         // 非法/空白偏好词被过滤 → 无当前关键词 → 兜底，而非空推荐
         Assert.False(reply!.HasRecommendation);
         Assert.Null(reply.RecommendedProducts);
-        Assert.Equal("暂无特定推荐 — 浏览精选商品", reply.RecMessage);
+        Assert.Equal("为您精选商品", reply.RecMessage);
         Assert.Equal(6, reply.OtherProducts!.Count);
         Assert.Equal(1, reply.OtherProducts[0].Id);   // All.Take(6) 首条为 Id=1
     }
@@ -131,7 +131,7 @@ public sealed class ChatPreferenceFilterTests : IDisposable
 
     /// <summary>
     /// P2-4 + R8 /recommendations — 偏好仅含非法词、消息无关键词时，/chat 过滤后 merged 为空 →
-    /// 走兜底分支并写入快照（BestMatch=null / Message=「暂无特定推荐 — 浏览精选商品」），
+    /// 走兜底分支并写入快照（BestMatch=null / Message=「为您精选商品」），
     /// 而非「空推荐却提示已推荐」；/recommendations 镜像该快照（与聊天文案一致，非缓存 miss 的「为您精选商品」）。
     /// </summary>
     [Fact]
@@ -155,7 +155,7 @@ public sealed class ChatPreferenceFilterTests : IDisposable
 
         Assert.Null(result!.BestMatch);
         // Message 取聊天快照（/chat 兜底 RecMessage），与聊天 100% 一致
-        Assert.Equal("暂无特定推荐 — 浏览精选商品", result.Message);
+        Assert.Equal("为您精选商品", result.Message);
         Assert.Null(result.MatchedCategories);
         Assert.Equal(6, result.Other.Count);
     }
@@ -198,7 +198,7 @@ public sealed class ChatPreferenceFilterTests : IDisposable
                     var sp = capturedFactory.Services;
                     return new ShoppingAssistantAgent(
                         sp.GetRequiredService<Meai.IChatClient>(),
-                        sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        sp.GetRequiredService<IChatHistoryStore>(), sp.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         sp.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -207,7 +207,7 @@ public sealed class ChatPreferenceFilterTests : IDisposable
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -264,7 +264,9 @@ public sealed class ChatPreferenceFilterTests : IDisposable
 
         using var seedCtx = new AppDbContext(
             new DbContextOptionsBuilder<AppDbContext>().UseSqlite(connStr).Options);
-        seedCtx.Database.EnsureCreated();
+        // 用 Migrate 建表（对齐宿主 Program.cs 的 MigrateAsync）：EnsureCreated 不写迁移历史，
+        // 会让宿主的 MigrateAsync 重跑迁移撞已存在的表 → 集成测试 host 启动失败
+        seedCtx.Database.Migrate();
         seedCtx.Products.AddRange(ProductSeedData.Products);
         seedCtx.SaveChanges();
     }

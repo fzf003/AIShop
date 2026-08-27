@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Diagnostics;
 using AIShop.AgentTelemetry;
 using AIShop.Api.Features.Chat;
+using AIShop.Core.Interfaces;
 using AIShop.Core.StaticData;
 using AIShop.Infrastructure.Data;
 using AIShop.Service;
@@ -66,7 +67,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                     var sp = capturedFactory.Services;
                     return new ShoppingAssistantAgent(
                         sp.GetRequiredService<Meai.IChatClient>(),
-                        sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        sp.GetRequiredService<IChatHistoryStore>(), sp.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         sp.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -75,7 +76,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -111,7 +112,9 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
         // 避免在 ConfigureServices 阶段 BuildServiceProvider() 触发 Serilog "already frozen"。
         using var seedCtx = new AppDbContext(
             new DbContextOptionsBuilder<AppDbContext>().UseSqlite(connStr).Options);
-        seedCtx.Database.EnsureCreated();
+        // 用 Migrate 建表（对齐宿主 Program.cs 的 MigrateAsync）：EnsureCreated 不写迁移历史，
+        // 会让宿主的 MigrateAsync 重跑迁移撞已存在的表 → 集成测试 host 启动失败
+        seedCtx.Database.Migrate();
         seedCtx.Products.AddRange(ProductSeedData.Products);
         seedCtx.SaveChanges();
     }
@@ -268,7 +271,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 mockRouter.GetAgent(Arg.Any<string>()).Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -276,7 +279,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -342,7 +345,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 mockRouter.GetAgent(Arg.Any<string>()).Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -350,7 +353,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -557,7 +560,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                     usedModel = callInfo.Arg<string>();
                     return new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -566,7 +569,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -618,7 +621,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                     usedModel = callInfo.Arg<string>();
                     return new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -627,7 +630,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -690,7 +693,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 mockRouter.GetAgent("qwen").Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("qwen"),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -698,7 +701,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 mockRouter.GetAgent("gpt-4.1").Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("gpt-4.1"),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -706,7 +709,7 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("qwen"),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,

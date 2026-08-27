@@ -20,14 +20,14 @@ namespace AIShop.Api.Tests;
 public sealed class ProgramSeedingTestsCollection;
 
 /// <summary>
-/// T7 测试：Program.cs 幂等建表兜底 + 播种 18 商品。
+/// T7 测试集合：Program.cs 启动建表（MigrateAsync）+ 播种 18 商品。
 /// 对应 spec「Product 表幂等播种」与「UserPreferences 表持久化」：
-///  - 全新库路径：EnsureCreated 建全部 schema → 兜底 DDL 无副作用 → 播种恰 18 行，重复执行不产生重复行
-///  - 既有库缺表路径：EnsureCreated 跳过（库已存在）→ CREATE TABLE IF NOT EXISTS 补建 Products/UserPreferences → 播种成功
-///  - 端到端：全新库 / 既有库启动后 GET /api/products 均返回 18
+///  - 单元级：EF 模型生成的 schema 契约（表名/约束 PascalCase）与播种幂等
+///  - 端到端全新库：MigrateAsync 建全部 schema → 播种恰 18 行，重复启动不产生重复行
+///  - 端到端已迁移库：迁移历史已存在 → 启动跳过建表 → 播种成功
 ///  - user_preferences 空表首写可落库（完整累加链路归 T14/T20）
 /// 注意：EF 实际生成的表名为 PascalCase（Products / UserPreferences，约束 PK_Products / PK_UserPreferences），
-/// 非 tasks.md 早期示例的小写表名。Program.cs 的兜底 DDL 以 EF 空库 EnsureCreated 生成的 schema 为准照抄。
+/// 迁移 InitialCreate 即按此 schema 建表（Migration 与 EnsureCreated 同源于 EF 模型）。
 /// </summary>
 [Collection(nameof(ProgramSeedingTests))]
 public sealed class ProgramSeedingTests : IDisposable
@@ -263,24 +263,24 @@ public sealed class ProgramSeedingTests : IDisposable
         SqliteConnection.ClearAllPools();
     }
 
-    // ---------- 端到端：既有库缺表启动（验证②）+ user_preferences 可写（验证③） ----------
+    // ---------- 端到端：已迁移库启动（迁移跳过）+ user_preferences 可写（验证③） ----------
 
     [Fact]
-    public async Task Startup_ExistingDatabase_MissingNewTables_CreatesTables_GetProducts_Returns18_AndUserPreferencesWritable()
+    public async Task Startup_MigratedDatabase_SkipsMigration_GetProducts_Returns18_AndUserPreferencesWritable()
     {
         var dbPath = NewDbPath("e2e_existing");
         var connStr = $"Data Source={dbPath}";
 
-        // 预建旧库（含 users/sessions/carts 等既有表），删掉新表，模拟历史库
+        // 预建完整 schema：用 Migrate 写迁移历史（模拟已迁移库），与宿主 Program.cs 的 MigrateAsync 同一路径。
+        // （原「EnsureCreated 旧库 + 启动兜底 DDL 补缺表」场景在迁移世界不适用：迁移保证 schema 完整，
+        //   历史库升级走迁移机制而非启动时手动补表。）
         var options = OptionsFor(connStr);
         using (var ctx = new AppDbContext(options))
         {
-            await ctx.Database.EnsureCreatedAsync();
-            await ctx.Database.ExecuteSqlRawAsync(
-                "DROP TABLE \"Products\"; DROP TABLE \"UserPreferences\";");
+            await ctx.Database.MigrateAsync();
         }
 
-        // 启动：EnsureCreated 跳过（库已存在）→ 兜底 DDL 补建两表 → 播种 18
+        // 启动：MigrateAsync 检测迁移历史已存在 → 跳过建表 → 空 Products 表播种 18
         using (var factory = CreateFactory(connStr))
         {
             _liveFactories.Add(factory);
@@ -294,7 +294,7 @@ public sealed class ProgramSeedingTests : IDisposable
         _liveFactories.Clear();
         SqliteConnection.ClearAllPools();
 
-        // user_preferences 空表首写可落库：启动后表已补建，写入一行并读回成功
+        // user_preferences 空表首写可落库：表已由迁移建好，写入一行并读回成功
         using (var ctx = new AppDbContext(options))
         {
             var userId = Guid.NewGuid();

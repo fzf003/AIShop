@@ -21,26 +21,7 @@ internal sealed class CartRepository(AppDbContext db) : ICartRepository
         try
         {
             var cart = await GetOrCreateCartAsync(userId, ct);
-
-            var existingItem = cart.Items.FirstOrDefault(i => i.ProductId == productId);
-            if (existingItem is not null)
-            {
-                existingItem.Quantity += quantity;
-            }
-            else
-            {
-                cart.Items.Add(new CartItem
-                {
-                    CartId = cart.Id,
-                    ProductId = productId,
-                    ProductName = productName,
-                    ProductPrice = productPrice,
-                    ProductEmoji = productEmoji,
-                    Quantity = quantity
-                });
-            }
-
-            cart.UpdatedAt = DateTime.UtcNow;
+            cart.AddItem(productId, productName, productPrice, productEmoji, quantity);
             await db.SaveChangesAsync(ct);
         }
         catch (Exception ex) when (ex.GetType().Name != "OperationCanceledException")
@@ -54,50 +35,32 @@ internal sealed class CartRepository(AppDbContext db) : ICartRepository
         Guid userId, Guid itemId, int quantity, CancellationToken ct = default)
     {
         var cart = await GetByUserIdAsync(userId, ct);
-        var item = cart?.Items.FirstOrDefault(i => i.Id == itemId);
-        if (item is null) return;
-
-        item.Quantity = quantity;
-        cart!.UpdatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(ct);
+        if (cart is not null && cart.UpdateItemQuantity(itemId, quantity))
+            await db.SaveChangesAsync(ct);
     }
 
     public async Task SetQuantityAsync(
         Guid userId, int productId, int quantity, CancellationToken ct = default)
     {
         var cart = await GetOrCreateCartAsync(userId, ct);
-        var item = cart.Items.FirstOrDefault(i => i.ProductId == productId);
-        if (item is null) return;
-
-        item.Quantity = quantity;
-        cart.UpdatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(ct);
+        if (cart.SetQuantity(productId, quantity))
+            await db.SaveChangesAsync(ct);
     }
 
     public async Task RemoveAllByProductIdAsync(
         Guid userId, int productId, CancellationToken ct = default)
     {
         var cart = await GetByUserIdAsync(userId, ct);
-        var items = cart?.Items.Where(i => i.ProductId == productId).ToList();
-        if (items is null || items.Count == 0) return;
-
-        foreach (var item in items)
-            cart!.Items.Remove(item);
-
-        cart!.UpdatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(ct);
+        if (cart is not null && cart.RemoveAllByProductId(productId) > 0)
+            await db.SaveChangesAsync(ct);
     }
 
     public async Task RemoveItemAsync(
         Guid userId, Guid itemId, CancellationToken ct = default)
     {
         var cart = await GetByUserIdAsync(userId, ct);
-        var item = cart?.Items.FirstOrDefault(i => i.Id == itemId);
-        if (item is null) return;
-
-        cart!.Items.Remove(item);
-        cart.UpdatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(ct);
+        if (cart is not null && cart.RemoveItem(itemId))
+            await db.SaveChangesAsync(ct);
     }
 
     public async Task ClearAsync(Guid userId, CancellationToken ct = default)
@@ -105,8 +68,7 @@ internal sealed class CartRepository(AppDbContext db) : ICartRepository
         var cart = await GetByUserIdAsync(userId, ct);
         if (cart is null) return;
 
-        cart.Items.Clear();
-        cart.UpdatedAt = DateTime.UtcNow;
+        cart.Clear();
         await db.SaveChangesAsync(ct);
     }
 

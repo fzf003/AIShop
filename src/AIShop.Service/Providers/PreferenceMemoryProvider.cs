@@ -2,10 +2,8 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using AIShop.Core.Interfaces;
-using AIShop.Infrastructure.Data;
 using Microsoft.Agents.AI;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.AI;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace AIShop.Service.Providers;
 
@@ -33,22 +31,22 @@ public sealed class PreferenceMemoryProvider : MessageAIContextProvider
     private const string DefaultStateKey = nameof(PreferenceMemoryProvider);
 
     private readonly ProviderSessionState<State> _sessionState;
-    private readonly IDbContextFactory<AppDbContext>? _dbFactory;
+    private readonly IServiceScopeFactory? _scopeFactory;
     private readonly IPreferenceQueue? _prefQueue;
     private IReadOnlyList<string>? _stateKeys;
 
     /// <summary>
     /// 初始化 <see cref="PreferenceMemoryProvider"/>。
     /// </summary>
-    /// <param name="dbFactory">可选的 EF Core DbContext 工厂，用于 Provide 时从偏好表加载用户偏好（可跨 scope 使用）。</param>
+    /// <param name="scopeFactory">可选的 DI scope 工厂，用于 Provide 时按需创建 scope 解析偏好仓储（避免长生命周期 Provider 持有 scoped 依赖）。</param>
     /// <param name="preferenceQueue">可选的偏好写入队列，用于 Store 时将新偏好入队（权重累加写库）。</param>
     /// <param name="stateInitializer">可选的状态初始化器；未提供时默认从 StateBag["UserId"] 构造 State。</param>
     public PreferenceMemoryProvider(
-        IDbContextFactory<AppDbContext>? dbFactory = null,
+        IServiceScopeFactory? scopeFactory = null,
         IPreferenceQueue? preferenceQueue = null,
         Func<AgentSession?, State>? stateInitializer = null)
     {
-        _dbFactory = dbFactory;
+        _scopeFactory = scopeFactory;
         _prefQueue = preferenceQueue;
         _sessionState = new ProviderSessionState<State>(
             stateInitializer ?? DefaultStateInitializer,
@@ -80,11 +78,12 @@ public sealed class PreferenceMemoryProvider : MessageAIContextProvider
         var state = _sessionState.GetOrInitializeState(context.Session);
 
         // 以 State 为主：State 无偏好且能按用户查库时，从偏好表加载进 State（首次/会话重建）
-        if (string.IsNullOrWhiteSpace(state.KeywordsJson) && state.UserId is { } uid && _dbFactory is not null)
+        if (string.IsNullOrWhiteSpace(state.KeywordsJson) && state.UserId is { } uid && _scopeFactory is not null)
         {
-            await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
-            var prefs = await db.UserPreferences.FirstOrDefaultAsync(p => p.UserId == uid, cancellationToken);
-            state.KeywordsJson = prefs?.KeywordsJson ?? "{}";
+            using var scope = _scopeFactory.CreateScope();
+            var prefRepo = scope.ServiceProvider.GetRequiredService<IPreferenceRepository>();
+            var prefs = await prefRepo.GetByUserIdAsync(uid, cancellationToken);
+            state.KeywordsJson = prefs?.ToKeywordsJson() ?? "{}";
             _sessionState.SaveState(context.Session, state);
         }
 

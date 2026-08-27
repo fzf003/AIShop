@@ -169,7 +169,7 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
 
     /// <summary>
     /// R8 — 有对话但消息无关键词且无偏好 → /chat 走兜底分支并写入快照（BestMatch=null、
-    /// Other=All.Take(6)、Message=「暂无特定推荐 — 浏览精选商品」），/recommendations 镜像该快照：
+    /// Other=All.Take(6)、Message=「为您精选商品」），/recommendations 镜像该快照：
     /// 推荐栏与聊天提示语一致（而非缓存 miss 时的「为您精选商品」）；固定顺序，无 shuffle。
     /// </summary>
     [Fact]
@@ -178,7 +178,7 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
         using var factory = BuildFactory("""{"Reply":"模拟回复","Keywords":[],"Preferences":[]}""");
         using var client = factory.CreateClient();
 
-        // 先产生对话消息（无关键词「你好」），/chat 兜底分支写入快照（Message=暂无特定推荐 — 浏览精选商品）
+        // 先产生对话消息（无关键词「你好」），/chat 兜底分支写入快照（Message=为您精选商品）
         var chat = await client.PostAsJsonAsync("/api/chat", new ChatRequest("marla", "你好"));
         chat.EnsureSuccessStatusCode();
 
@@ -189,7 +189,7 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
         Assert.NotNull(result);
         Assert.Null(result!.BestMatch);
         // Message 取聊天快照（/chat 兜底 RecMessage），与聊天 100% 一致
-        Assert.Equal("暂无特定推荐 — 浏览精选商品", result.Message);
+        Assert.Equal("为您精选商品", result.Message);
         Assert.Null(result.MatchedCategories);
         Assert.Equal(6, result.Other.Count);
         Assert.Equal([1, 2, 3, 4, 5, 6],
@@ -282,7 +282,7 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
                     var sp = capturedFactory.Services;
                     return new ShoppingAssistantAgent(
                         sp.GetRequiredService<Meai.IChatClient>(),
-                        sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        sp.GetRequiredService<IChatHistoryStore>(), sp.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         sp.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -291,7 +291,7 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -550,7 +550,7 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
                     var sp = capturedFactory.Services;
                     return new ShoppingAssistantAgent(
                         sp.GetRequiredService<Meai.IChatClient>(),
-                        sp.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        sp.GetRequiredService<IChatHistoryStore>(), sp.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         sp.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -559,7 +559,7 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
-                        capturedFactory.Services.GetRequiredService<IDbContextFactory<AppDbContext>>(),
+                        capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
@@ -634,7 +634,9 @@ public sealed class ChatRecommendationsMergeTests : IDisposable
 
         using var seedCtx = new AppDbContext(
             new DbContextOptionsBuilder<AppDbContext>().UseSqlite(connStr).Options);
-        seedCtx.Database.EnsureCreated();
+        // 用 Migrate 建表（对齐宿主 Program.cs 的 MigrateAsync）：EnsureCreated 不写迁移历史，
+        // 会让宿主的 MigrateAsync 重跑迁移撞已存在的表 → 集成测试 host 启动失败
+        seedCtx.Database.Migrate();
         seedCtx.Products.AddRange(ProductSeedData.Products);
         seedCtx.SaveChanges();
     }

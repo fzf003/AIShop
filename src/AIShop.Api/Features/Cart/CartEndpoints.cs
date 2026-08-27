@@ -88,7 +88,7 @@ public static class CartEndpoints
                 return Results.NotFound(new ErrorResponse("用户不存在"));
 
             var cart = await cartRepo.GetByUserIdAsync(user.Id, ct);
-            var item = cart?.Items.FirstOrDefault(i => i.Id == itemId);
+            var item = cart?.FindItem(itemId);
             if (item is null)
                 return Results.NotFound(new ErrorResponse("商品不在购物车中"));
 
@@ -111,7 +111,7 @@ public static class CartEndpoints
                 return Results.NotFound(new ErrorResponse("用户不存在"));
 
             var cart = await cartRepo.GetByUserIdAsync(user.Id, ct);
-            var item = cart?.Items.FirstOrDefault(i => i.Id == itemId);
+            var item = cart?.FindItem(itemId);
             if (item is null)
                 return Results.NotFound(new ErrorResponse("商品不在购物车中"));
 
@@ -148,7 +148,7 @@ public static class CartEndpoints
                 return Results.NotFound(new ErrorResponse("用户不存在"));
 
             var cart = await cartRepo.GetByUserIdAsync(user.Id, ct);
-            if (cart is null || cart.Items.Count == 0)
+            if (cart is null || cart.IsEmpty)
                 return Results.Ok(new CartSummaryResponse(0, 0m, []));
 
             var items = cart.Items
@@ -156,8 +156,8 @@ public static class CartEndpoints
                 .ToArray();
 
             return Results.Ok(new CartSummaryResponse(
-                cart.Items.Sum(i => i.Quantity),
-                cart.Items.Sum(i => i.ProductPrice * i.Quantity),
+                cart.TotalItems,
+                cart.TotalPrice,
                 items));
         });
     }
@@ -169,8 +169,8 @@ public static class CartEndpoints
             cart.Items.Select(i => new CartItemDto(
                 i.Id, i.ProductId, i.ProductName, i.ProductPrice,
                 i.ProductEmoji, i.Quantity, i.AddedAt)).ToList(),
-            cart.Items.Sum(i => i.Quantity),
-            cart.Items.Sum(i => i.ProductPrice * i.Quantity),
+            cart.TotalItems,
+            cart.TotalPrice,
             cart.UpdatedAt);
     }
 }

@@ -1,19 +1,19 @@
 #pragma warning disable MAAI001
 using AIShop.AgentTelemetry;
 using AIShop.Core.Interfaces;
-using AIShop.Infrastructure.Data;
+using AIShop.Core.Services;
 using AIShop.Service.Providers;
 using AIShop.Service.Tools;
 using Microsoft.Agents.AI;
-using Microsoft.EntityFrameworkCore;
+using Microsoft.Agents.AI.Compaction;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.DependencyInjection;
 using Serilog;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 
 namespace AIShop.Service;
 
@@ -23,6 +23,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     // （见 internal 构造，agentWrapper 参数），readonly 允许构造器内多次赋值；字段仅在构造期赋值
     private readonly AIAgent _agent;
     private readonly SqliteChatHistoryProvider _provider;
+    private readonly CartToolProvider _cartTools;
     private readonly bool _isOpenAI;
     // 按 sessionId 复用 AgentSession（State/StateBag 跨轮保留，偏好以 State 为主、Store 延迟一轮入队生效）
     private readonly ConcurrentDictionary<Guid, AgentSession> _sessions = new();
@@ -35,30 +36,12 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 
     // R4/R5/R9：清洗 LLM 回复中的商品 ID 展示（#5、商品Id:4、商品ID为4 等）
     // 与 ChatEndpoints.cs 中的正则一致，用于流式增量清洗
-    private static readonly Regex HashIdPattern =
-        new(@"#(?<id>\d+)", RegexOptions.None, TimeSpan.FromSeconds(1));
-    private static readonly Regex FixedIdPattern =
-        new(@"商品Id[:：]\d+", RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
-    private static readonly Regex ProductIdLabelPattern =
-        new(@"商品ID[\s:：为是]*\d+", RegexOptions.None, TimeSpan.FromSeconds(1));
-    // 删 ID 后括号内可能残留「（，¥249.99）」：仅删除价格符号前的标点（不影响「为您推荐，现在」这类正常句子逗号）
-    private static readonly Regex PricePunctuationPattern =
-        new(@"[，,、;；]+\s*(?=[¥￥$])", RegexOptions.None, TimeSpan.FromSeconds(1));
-    private const int MinProductId = 1;
-    private const int MaxProductId = 18;
-
+    
     /// <summary>
     /// 清洗 LLM 回复文本（R4/R5/R9）：去除商品 ID 展示，只清洗 Reply 字符串。
     /// </summary>
-    private static string SanitizeReply(string? reply)
-    {
-        // T14：委托 ApplySanitizePatterns（三路替换）后 Trim。
-        // 收敛为复用而非内联，使 ApplySanitizePatterns 保持存活（tasks.md T14：方法本身保留），行为与内联零变化
-        return ApplySanitizePatterns(reply ?? "").Trim();
-    }
+    private static string SanitizeReply(string? reply) => ReplySanitizer.Clean(reply);
 
-    private static bool IsProductId(string idText) =>
-        int.TryParse(idText, out var id) && id is >= MinProductId and <= MaxProductId;
 
     private static string BuildInstructions(IReadOnlyDictionary<string, string[]> keywordMap)
     {
@@ -126,12 +109,14 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         return string.Join("\n", lines);
     }
 
-    public ShoppingAssistantAgent(IChatClient chatClient, IDbContextFactory<AppDbContext> dbFactory,
+    public ShoppingAssistantAgent(IChatClient chatClient, IChatHistoryStore chatHistoryStore, IChatCompactionPolicy compaction,
         IReadOnlyDictionary<string, string[]> keywordMap, CartToolProvider cartTools, bool isOpenAI,
         AgentTelemetryOptions telemetryOptions,
-        IPreferenceQueue? preferenceQueue = null)
+        IPreferenceQueue? preferenceQueue = null,
+        IServiceScopeFactory? scopeFactory = null)
     {
         _isOpenAI = isOpenAI;
+        _cartTools = cartTools;
         var instructions = BuildInstructions(keywordMap);
 
 
@@ -169,7 +154,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         // 会话身份（SessionId）由 RunChatAsync 写入 StateBag，Provider 经默认 stateInitializer
         // 从 StateBag 读取构造 State（对齐官方 Provider 的 stateInitializer 模式）
         _provider = new SqliteChatHistoryProvider(
-            dbFactory,
+            chatHistoryStore, compaction,
             options: new SqliteChatHistoryProviderOptions
             {
                 StateKey = "ShoppingAssistant",
@@ -183,6 +168,14 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
                 StoreInputResponseMessageFilter = msgs => msgs.Where(m => m.Role != ChatRole.System),
             });
 
+        // 基于模型上下文窗口自动计算阈值
+        /* var compactionoption = new ContextWindowCompactionStrategy(
+             maxContextWindowTokens: 128000,  // 你的模型上下文窗口
+             maxOutputTokens: 16384,          // 模型最大输出
+             toolEvictionThreshold: 0.5,      // 50% 时裁剪旧工具结果
+             truncationThreshold: 0.8);       // 80% 时截断最旧消息
+         //new CompactionProvider(compactionoption)
+        */
         var options = new HarnessAgentOptions
         {
             Name = "ShoppingAssistant",
@@ -191,9 +184,9 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             ChatOptions = chartOptions,
             ChatHistoryProvider = _provider,
 
-            DisableCompaction = true,
+            DisableCompaction = true,//禁用Harness 自动管理
             MaximumIterationsPerRequest = 3,
-              
+            MaxOutputTokens = 128000,
 
             DisableToolAutoApproval = false,//DisableToolAutoApproval = false（即默认启用）。设 true 的话，所有工具都不走审批——包括那些本应审批的
             DisableWebSearch = true,
@@ -202,10 +195,13 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             DisableAgentSkillsProvider = true,
             DisableAgentModeProvider = true,
             DisableApprovalNotRequiredFunctionBypassing = false,
-         
 
-            AIContextProviders = [new PreferenceMemoryProvider(dbFactory, preferenceQueue)]
+
+            AIContextProviders = [new PreferenceMemoryProvider(scopeFactory, preferenceQueue)]
         };
+
+       
+
 
         _agent = new HarnessAgent(chatClient, options);
 
@@ -228,10 +224,10 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     /// public 构造委托本构造并传 null，行为与接口契约零变化（spec Requirement 7：RunChatStreamAsync 签名不变）。
     /// </summary>
     internal ShoppingAssistantAgent(
-        IChatClient chatClient, IDbContextFactory<AppDbContext> dbFactory,
+        IChatClient chatClient, IChatHistoryStore chatHistoryStore, IChatCompactionPolicy compaction,
         IReadOnlyDictionary<string, string[]> keywordMap, CartToolProvider cartTools, bool isOpenAI,
         AgentTelemetryOptions telemetryOptions, Func<AIAgent, AIAgent>? agentWrapper)
-        : this(chatClient, dbFactory, keywordMap, cartTools, isOpenAI, telemetryOptions)
+        : this(chatClient, chatHistoryStore, compaction, keywordMap, cartTools, isOpenAI, telemetryOptions)
     {
         if (agentWrapper is not null)
             _agent = agentWrapper(_agent);
@@ -267,7 +263,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         Guid sessionId, string userMessage, string username,
         string? preferences = null, Guid? userId = null, CancellationToken ct = default)
     {
-        CartToolProvider.SetCurrentUser(username);
+        _cartTools.SetCurrentUser(username);
 
         var sw = Stopwatch.StartNew();
         // 复用按 sessionId 缓存的会话（State/StateBag 跨轮保留，偏好以 State 为主）
@@ -381,7 +377,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         string? preferences = null, Guid? userId = null,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
-        CartToolProvider.SetCurrentUser(username);
+        _cartTools.SetCurrentUser(username);
 
         // 复用按 sessionId 缓存的会话（失败直接降级，无需 MarkRoundFinal）
         AgentSession? session = null;
@@ -508,68 +504,11 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     /// 处理跨 chunk 的模式（如 "#5" 在一个 chunk、"无线" 在下一个 chunk）。
     /// </summary>
     private static (string safeToEmit, string remaining) SanitizeReplyIncremental(string newText, string buffer)
-    {
-        var fullText = buffer + newText;
+        => ReplySanitizer.CleanIncremental(newText, buffer);
 
-        // 逐模式尝试匹配，取最早匹配位置作为安全边界
-        int safePos = fullText.Length;
-
-        var fixedMatch = FixedIdPattern.Match(fullText);
-        if (fixedMatch.Success && fixedMatch.Index < safePos)
-            safePos = fixedMatch.Index;
-
-        var hashMatch = HashIdPattern.Match(fullText);
-        if (hashMatch.Success && hashMatch.Index < safePos)
-            safePos = hashMatch.Index;
-
-        var labelMatch = ProductIdLabelPattern.Match(fullText);
-        if (labelMatch.Success && labelMatch.Index < safePos)
-            safePos = labelMatch.Index;
-
-        if (safePos == fullText.Length)
-        {
-            // 无匹配，检查尾部是否可能是模式前缀（如以 "商品Id" 结尾）
-            if (!EndsWithPatternPrefix(fullText))
-                return (fullText, "");
-            return ("", fullText);
-        }
-
-        // 有匹配：safePos 之前的部分已清洗（无模式），安全发送
-        var safe = fullText[..safePos];
-        // 从 safePos 开始是可能包含模式的区域，保留到下一轮
-        var remaining = fullText[safePos..];
-
-        return (safe, remaining);
-    }
-
-    private static string ApplySanitizePatterns(string text)
-    {
-        text = FixedIdPattern.Replace(text, "");
-        text = HashIdPattern.Replace(text, static match =>
-            IsProductId(match.Groups["id"].Value) ? "" : match.Value);
-        text = ProductIdLabelPattern.Replace(text, "");
-        // 删 ID 后清理价格符号前的残留标点（「（，¥249.99）」→「（¥249.99）」）
-        text = PricePunctuationPattern.Replace(text, "");
-        return text;
-    }
 
     /// <summary>
     /// 检查文本尾部是否可能是某个清洗模式的前缀。
     /// 如果是，则不能安全 flush，需要等待更多文本。
     /// </summary>
-    private static bool EndsWithPatternPrefix(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return false;
-        var tail = text.Length > 10 ? text[^10..] : text;
-
-        // # 后可能跟数字
-        if (tail.EndsWith('#')) return true;
-
-        // 商品Id 后可能跟 :N
-        if (tail.Contains("商品Id", StringComparison.OrdinalIgnoreCase) ||
-            tail.Contains("商品ID", StringComparison.OrdinalIgnoreCase))
-            return true;
-
-        return false;
-    }
 }

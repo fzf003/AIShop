@@ -1,4 +1,5 @@
 using AIShop.Core.Entities;
+using AIShop.Core.ValueObjects;
 using AIShop.Infrastructure.Data;
 using AIShop.Infrastructure.Repositories;
 using Microsoft.Data.Sqlite;
@@ -66,7 +67,7 @@ public sealed class PreferenceRepositoryTests : IDisposable
 
         Assert.NotNull(result);
         Assert.Equal(userId, result!.UserId);
-        Assert.Equal("{\"咖啡\":2}", result.KeywordsJson);
+        Assert.Equal(2, result.KeywordWeights["咖啡"]);
     }
 
     [Fact]
@@ -76,11 +77,7 @@ public sealed class PreferenceRepositoryTests : IDisposable
         using var db = new AppDbContext(_options);
         var repo = new PreferenceRepository(db);
 
-        await repo.UpsertAsync(new UserPreferences
-        {
-            UserId = userId,
-            KeywordsJson = "{\"咖啡\":2}",
-        });
+        await repo.UpsertAsync(PreferenceProfile.FromKeywordsJson(userId, """{"咖啡":2}""", DateTime.UtcNow));
 
         // 全新 context 读回，强制从 DB materialization，验证插入已落库且仅一行
         using var readCtx = new AppDbContext(_options);
@@ -110,12 +107,7 @@ public sealed class PreferenceRepositoryTests : IDisposable
         var newUpdatedAt = DateTime.UtcNow;
         using var db = new AppDbContext(_options);
         var repo = new PreferenceRepository(db);
-        await repo.UpsertAsync(new UserPreferences
-        {
-            UserId = userId,
-            KeywordsJson = "{\"咖啡\":3,\"健身\":1}",
-            UpdatedAt = newUpdatedAt,
-        });
+        await repo.UpsertAsync(PreferenceProfile.FromKeywordsJson(userId, """{"咖啡":3,"健身":1}""", newUpdatedAt));
 
         // 全新 context 读回：仍只有一行（未插入重复行）、内容被覆盖、UpdatedAt 刷新为新值
         using var readCtx = new AppDbContext(_options);

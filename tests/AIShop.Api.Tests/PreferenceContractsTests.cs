@@ -1,6 +1,6 @@
 using System.Reflection;
-using AIShop.Core.Entities;
 using AIShop.Core.Interfaces;
+using AIShop.Core.ValueObjects;
 
 namespace AIShop.Api.Tests;
 
@@ -48,7 +48,7 @@ public sealed class PreferenceContractsTests
         var method = typeof(IPreferenceRepository).GetMethod(nameof(IPreferenceRepository.GetByUserIdAsync));
 
         Assert.NotNull(method);
-        Assert.Equal(typeof(Task<UserPreferences?>), method!.ReturnType);
+        Assert.Equal(typeof(Task<PreferenceProfile?>), method!.ReturnType);
 
         var parameters = method.GetParameters();
         Assert.Equal(2, parameters.Length);
@@ -59,7 +59,7 @@ public sealed class PreferenceContractsTests
     }
 
     [Fact]
-    public void IPreferenceRepository_UpsertAsyncTakesUserPreferencesAndReturnsTask()
+    public void IPreferenceRepository_UpsertAsyncTakesPreferenceProfileAndReturnsTask()
     {
         var method = typeof(IPreferenceRepository).GetMethod(nameof(IPreferenceRepository.UpsertAsync));
 
@@ -68,8 +68,8 @@ public sealed class PreferenceContractsTests
 
         var parameters = method.GetParameters();
         Assert.Equal(2, parameters.Length);
-        Assert.Equal(typeof(UserPreferences), parameters[0].ParameterType);
-        Assert.Equal("preferences", parameters[0].Name);
+        Assert.Equal(typeof(PreferenceProfile), parameters[0].ParameterType);
+        Assert.Equal("profile", parameters[0].Name);
         Assert.Equal(typeof(CancellationToken), parameters[1].ParameterType);
         Assert.True(parameters[1].IsOptional, "CancellationToken 参数应为可选（默认 default）");
     }

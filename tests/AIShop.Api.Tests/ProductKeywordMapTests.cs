@@ -8,7 +8,7 @@ public sealed class ProductKeywordMapTests
     [
         "夹克", "鞋子", "靴子", "音乐", "咖啡", "健身", "瑜伽", "烹饪",
         "科技", "阅读", "户外", "时尚", "环保", "巧克力", "跑步", "家居",
-        "送礼", "爱好", "耳机", "手表", "运动", "音频", "数码"
+        "送礼", "爱好", "耳机", "手表", "运动", "音频", "数码", "保温"
     ];
 
     [Fact]
@@ -22,9 +22,9 @@ public sealed class ProductKeywordMapTests
     }
 
     [Fact]
-    public void Entries_HasExactlyTwentyThreeKeys()
+    public void Entries_HasExactlyTwentyFourKeys()
     {
-        Assert.Equal(23, ProductKeywordMap.Entries.Count);
+        Assert.Equal(24, ProductKeywordMap.Entries.Count);
     }
 
     [Fact]

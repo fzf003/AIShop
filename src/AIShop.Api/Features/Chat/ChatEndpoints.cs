@@ -1,12 +1,13 @@
-using System.ClientModel;
+﻿using System.ClientModel;
 using System.Diagnostics;
 using AIShop.Core.Entities;
 using AIShop.Service;
 using AIShop.Core.Interfaces;
+using AIShop.Core.Services;
+using AIShop.Core.ValueObjects;
 using Microsoft.Extensions.Caching.Memory;
 using Serilog;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 
 namespace AIShop.Api.Features.Chat;
 
@@ -73,6 +74,7 @@ public static class ChatEndpoints
             ModelRouter router,
             IMemoryCache cache,
             IPreferenceRepository prefRepo,
+            RecommendationService recommendationService,
             CancellationToken ct) =>
         {
             var endpointSw = Stopwatch.StartNew();
@@ -91,7 +93,7 @@ public static class ChatEndpoints
 
             // 会话重建回填：从 DB 加载历史偏好，按权重 Top-5 生成顿号连接文本注入 Agent 上下文
             var prefs = await prefRepo.GetByUserIdAsync(user.Id, ct);
-            var preferencesText = string.Join("、", RecommendationMerger.GetTopPreferenceKeywords(prefs?.KeywordsJson, 5));
+            var preferencesText = string.Join("、", prefs?.TopKeywords(5) ?? []);
 
             // 1. Get agent and response (history loaded from SQLite by provider)
             var agentSw = Stopwatch.StartNew();
@@ -173,7 +175,7 @@ public static class ChatEndpoints
 
             // 3. 推荐计算（复用 BuildChatReply：关键词匹配 + 偏好合并 + SplitProducts + 缓存写入 + 偏好入队）
             var userMsg = req.Message ?? "";
-            var chatReply = BuildChatReply(result, userMsg, prefs, catalog, req.Username, cache);
+            var chatReply = BuildChatReply(result, userMsg, prefs, catalog, req.Username, cache, recommendationService);
 
             endpointSw.Stop();
             logger.Information(
@@ -195,6 +197,7 @@ public static class ChatEndpoints
             ModelRouter router,
             IMemoryCache cache,
             IPreferenceRepository prefRepo,
+            RecommendationService recommendationService,
             CancellationToken ct) =>
         {
             var logger = Log.ForContext("SourceContext", "Diagnose");
@@ -217,7 +220,7 @@ public static class ChatEndpoints
             var sid = Guid.Parse(sessionId);
 
             var prefs = await prefRepo.GetByUserIdAsync(user.Id, ct);
-            var preferencesText = string.Join("、", RecommendationMerger.GetTopPreferenceKeywords(prefs?.KeywordsJson, 5));
+            var preferencesText = string.Join("、", prefs?.TopKeywords(5) ?? []);
 
             // 设置 SSE 响应头
             httpContext.Response.StatusCode = StatusCodes.Status200OK;
@@ -331,7 +334,7 @@ public static class ChatEndpoints
 
                 // 发送 done 事件（完整 ChatReply JSON）
                 var userMsg = req.Message ?? "";
-                var chatReply = BuildChatReply(finalResult, userMsg, prefs, catalog, req.Username, cache);
+                var chatReply = BuildChatReply(finalResult, userMsg, prefs, catalog, req.Username, cache, recommendationService);
                 // done 事件用 camelCase 序列化（JsonSerializerOptions.Web），与 token/error 事件及
                 // cart/products 等端点的 camelCase 契约一致——前端统一按 camelCase 读取。
                 // 此前裸 Serialize 输出 PascalCase（record 属性名），前端 data.Response 等读取失败（修复）。
@@ -350,6 +353,7 @@ public static class ChatEndpoints
             IProductCatalogService catalog,
             IPreferenceRepository prefRepo,
             IMemoryCache cache,
+            RecommendationService recommendationService,
             CancellationToken ct) =>
         {
             var endpointSw = Stopwatch.StartNew();
@@ -379,50 +383,20 @@ public static class ChatEndpoints
             // miss（新用户 / 缓存过期）→ 偏好兜底：偏好关键词白名单过滤 + 合并（无当前消息关键词）。
             // 与 /chat 推荐分支同一套 FilterValidPreferenceKeywords / MergeKeywords / SplitProducts 口径。
             var prefs = await prefRepo.GetByUserIdAsync(user.Id, ct);
-            var prefKeywords = FilterValidPreferenceKeywords(prefs?.KeywordsJson, catalog);
+            var prefKeywords = FilterValidPreferenceKeywords(prefs?.TopKeywords(5), catalog);
 
-            var merged = RecommendationMerger.MergeKeywords([], prefKeywords);
+            // 无当前消息关键词 → 偏好兜底（推荐编排统一收敛到 RecommendationService，口径与 /chat 一致）
+            var recommendation = recommendationService.Build([], prefKeywords);
 
-            RecommendationResponse response;
-            if (merged.Length > 0)
-            {
-                var (recommended, others) = catalog.SplitProducts(merged);
-                if (recommended.Length > 0)
-                {
-                    // 有推荐（merged>0 且有商品）→ 提示语与内容一致；固定顺序，无 shuffle
-                    var recDtos = recommended.Select(ToDto).ToList();
-                    var otherDtos = others.Take(12).Select(ToDto).ToList();
-                    response = new RecommendationResponse(
-                        recDtos.FirstOrDefault(),
-                        recDtos,
-                        otherDtos,
-                        "根据您的兴趣，为您推荐：",
-                        recDtos.Select(p => p.Category).Distinct().ToArray());
-                }
-                else
-                {
-                    // merged>0 但无商品命中（如偏好词均未命中商品）→ 兜底精选，不显示「已推荐」空列表
-                    response = new RecommendationResponse(
-                        null,
-                        [],
-                        catalog.All.Take(6).Select(ToDto).ToList(),
-                        "为您精选商品",
-                        null);
-                }
-            }
-            else
-            {
-                // 无关键词无偏好 → All.Take(6) 固定顺序兜底（无 shuffle）。
-                // 提示语与内容一致：有兜底商品说「为您精选商品」，仅当商品库完全为空才说「暂无特定推荐」
-                //（消除 R6「暂无特定推荐」却列表有商品的矛盾）。
-                var fallback = catalog.All.Take(6).Select(ToDto).ToList();
-                response = new RecommendationResponse(
-                    null,
-                    [],
-                    fallback,
-                    catalog.All.Count == 0 ? "暂无特定推荐" : "为您精选商品",
-                    null);
-            }
+            var recDtos = recommendation.Recommended.Select(ToDto).ToList();
+            var otherDtos = recommendation.Other.Select(ToDto).ToList();
+
+            var response = new RecommendationResponse(
+                recDtos.FirstOrDefault(),
+                recDtos,
+                otherDtos,
+                recommendation.Message,
+                recommendation.MatchedCategories?.ToArray());
 
             endpointSw.Stop();
             logger.Information(
@@ -460,61 +434,20 @@ public static class ChatEndpoints
 
     private static ProductDto ToDto(Product p) => new(p.Id, p.Name, p.Category, p.Tags, p.Price, p.Emoji);
 
-    // 商品 ID 标记正则（R4/R5/R9）：预编译 + 显式 timeout（满足 S6444/S6354）。
-    // 不使用裸 \d+（会误删价格/数量），只匹配带 # 前缀或 商品ID 前缀的 ID 形式。
-    // R5 收紧：#\d+ 原来会误删非商品 ID 的「#数字」（如「订单号 #123456」「参见 #3 条款」），
-    // 商品 ID 范围是 1-18（ProductSeedData.Products 的 Id 显式 1..18）。
-    // 因此 # 前缀改走「\d+ 提取 + int.TryParse 校验 1..18 才删」，范围变化时只需同步 Min/MaxProductId。
-    // 商品ID 前缀则保持任意数字——前缀本身即明确的产品 ID 标记（无歧义），收紧反而会回归 R4「隐藏商品 ID 展示」的诉求。
-    // R9：Agent 指令固定唯一合法格式「商品Id:N」，本主正则精确删该格式（IgnoreCase 覆盖「商品id:N」）；
-    // ProductIdLabelPattern 字符类扩入「为/是」作兜底，删「商品ID为4」「商品ID是4」等变体（字段泄漏案例）。
-    private static readonly Regex HashIdPattern =
-        new(@"#(?<id>\d+)", RegexOptions.None, TimeSpan.FromSeconds(1));
-    private static readonly Regex FixedIdPattern =
-        new(@"商品Id[:：]\d+", RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
-    private static readonly Regex ProductIdLabelPattern =
-        new(@"商品ID[\s:：为是]*\d+", RegexOptions.None, TimeSpan.FromSeconds(1));
-
-    // 商品 ID 合法范围（R5）：与 ProductSeedData.Products 的 Id 1..18 一致；新增/删除商品导致范围变化时同步这里。
-    private const int MinProductId = 1;
-    private const int MaxProductId = 18;
-
     /// <summary>
-    /// 清洗 LLM 回复文本（R4/R5/R9）：去除「#5」「商品ID: 4」「商品ID为4」「商品Id:4」等商品 ID 展示，
-    /// 避免对话历史向用户暴露商品 ID。只清洗 Reply 字符串，绝不触碰
-    /// RecommendedProducts/OtherProducts 的 ProductDto.Id——前端加购依赖的结构化数据，不从文本解析。
-    /// R5 收紧：# 前缀仅删 1-18 范围内的 ID（防误删「订单号 #123456」等非商品 ID 的 #数字）。
-    /// R9：删除顺序先精确删固定格式「商品Id:N」（Agent 指令唯一合法格式，IgnoreCase 覆盖小写 id），
-    /// 再删 # 前缀（1-18 校验），最后用 ProductIdLabelPattern 兜底删「商品ID为4」等变体。
+    /// 清洗 LLM 回复文本（委托到 Core ReplySanitizer，规则统一）。
     /// </summary>
-    private static string SanitizeReply(string? reply)
-    {
-        var text = reply ?? "";
-        // R9：先精确删固定格式「商品Id:4」「商品Id：4」（IgnoreCase 覆盖「商品id:4」）
-        text = FixedIdPattern.Replace(text, "");
-        // 去 #5（1-18 内商品 ID）；#123456/#20（非 1-18）保留不删
-        text = HashIdPattern.Replace(text, static match =>
-            IsProductId(match.Groups["id"].Value) ? "" : match.Value);
-        // R9 兜底：去「商品ID: 4」「商品ID为4」「商品ID是4」等变体
-        text = ProductIdLabelPattern.Replace(text, "");
-        return text.Trim();                             // 清残留空格/标点
-    }
-
-    /// <summary>
-    /// 判断 # 后的数字是否为合法商品 ID（R5）：落在 1-18 范围内才删除。
-    /// </summary>
-    private static bool IsProductId(string idText) =>
-        int.TryParse(idText, out var id) && id is >= MinProductId and <= MaxProductId;
+    private static string SanitizeReply(string? reply) => ReplySanitizer.Clean(reply);
 
     /// <summary>
     /// 偏好关键词白名单过滤（P2-4）：偏好词来自 DB，可能含非法词/空白词。
     /// 仅保留非空白、且命中商品关键词白名单（KeywordMap）或任一商品 Tag 的词，
     /// 避免非法偏好词合并后 SplitProducts 返回空推荐却仍标记 HasRecommendation=true（空推荐 UX 退化）。
     /// </summary>
-    private static string[] FilterValidPreferenceKeywords(string? keywordsJson, IProductCatalogService catalog)
+    private static string[] FilterValidPreferenceKeywords(string[]? keywords, IProductCatalogService catalog)
     {
         var productTags = catalog.All.SelectMany(p => p.Tags).ToHashSet(StringComparer.Ordinal);
-        return RecommendationMerger.GetTopPreferenceKeywords(keywordsJson, 5)
+        return (keywords ?? [])
             .Where(kw => !string.IsNullOrWhiteSpace(kw)
                 && (catalog.KeywordMap.ContainsKey(kw) || productTags.Contains(kw)))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -526,9 +459,9 @@ public static class ChatEndpoints
     /// /api/chat 与 /api/chat/stream 共用此方法，保证推荐结果一致。
     /// </summary>
     private static ChatReply BuildChatReply(
-        AgentChatResult result, string userMsg, UserPreferences? prefs,
+        AgentChatResult result, string userMsg, PreferenceProfile? prefs,
         IProductCatalogService catalog, string username,
-        IMemoryCache cache)
+        IMemoryCache cache, RecommendationService recommendationService)
     {
         // 关键词匹配：从用户输入直接匹配（不依赖模型结构化输出）
         var validKeywords = catalog.KeywordMap.Keys
@@ -553,33 +486,18 @@ public static class ChatEndpoints
         // 不足 3 个时用偏好权重 Top-N 补齐到 ≤5，按序数忽略大小写去重。
         // 偏好词来自 DB，先经白名单过滤（P2-4），避免非法/空白偏好词合并后
         // SplitProducts 返回空推荐却仍标记 HasRecommendation=true。
-        var prefKeywords = FilterValidPreferenceKeywords(prefs?.KeywordsJson, catalog);
-        var merged = RecommendationMerger.MergeKeywords(validKeywords, prefKeywords);
+        var prefKeywords = FilterValidPreferenceKeywords(prefs?.TopKeywords(5), catalog);
+        var recommendation = recommendationService.Build(validKeywords, prefKeywords);
 
-        ChatReply chatReply;
-        if (merged.Length == 0)
-        {
-            // 无当前关键词且无偏好 → All.Take(6) 兜底（HasRecommendation=false）
-            var fallback = catalog.All.Take(6).Select(ToDto).ToList();
-            chatReply = new ChatReply(SanitizeReply(result.Reply),
-                RecommendedProducts: null,
-                OtherProducts: fallback,
-                "暂无特定推荐 — 浏览精选商品",
-                HasRecommendation: false,
-                MatchedCategories: null);
-        }
-        else
-        {
-            var (recommended, others) = catalog.SplitProducts(merged);
-            var recDtos = recommended.Select(ToDto).ToList();
-            var otherDtos = recommended.Length == 0
-                ? catalog.All.Take(6).Select(ToDto).ToList()
-                : others.Take(12).Select(ToDto).ToList();
+        var recDtos = recommendation.Recommended.Select(ToDto).ToList();
+        var otherDtos = recommendation.Other.Select(ToDto).ToList();
 
-            chatReply = new ChatReply(SanitizeReply(result.Reply), recDtos, otherDtos,
-                "根据您的兴趣，为您推荐：", HasRecommendation: true,
-                recDtos.Select(p => p.Category).Distinct().ToArray());
-        }
+        var chatReply = new ChatReply(SanitizeReply(result.Reply),
+            recDtos.Count > 0 ? recDtos : null,
+            otherDtos,
+            recommendation.Message,
+            recommendation.HasRecommendation,
+            recommendation.MatchedCategories?.ToArray());
 
         // R8：聊天产物联动推荐栏 — 写用户维度推荐快照缓存（推荐以聊天产物为准）。
         // 先同步更新内存（/recommendations 立即读到最新推荐，与聊天 100% 一致），
