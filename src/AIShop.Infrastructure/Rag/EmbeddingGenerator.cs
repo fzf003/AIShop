@@ -33,6 +33,15 @@ public sealed class EmbeddingGenerator : IEmbeddingGenerator<string, Embedding<f
     /// 18 条量级单次推理足够，串行比并发锁更简单可靠。</summary>
     private readonly object _sync = new();
 
+    /// <summary>进程内共享的 ONNX 会话缓存（按模型路径）。
+    /// 为什么共享：bge 模型是只读资源，而每个宿主（WebApplicationFactory 测试每用例一个宿主 / 生产多实例）
+    /// 都会解析一个 EmbeddingGenerator 单例——各自 new InferenceSession 会重复加载 ~95MB 模型，
+    /// 拖慢启动并放大内存压力。共享会话只在首次解析时加载一次，后续实例复用；
+    /// OnnxRuntime 的 session.Run 线程安全（实例仍用 _sync 串行化 tokenize+推理），共享不改变语义。
+    /// 注意：共享会话不随实例 Dispose 释放（避免一个实例释放使其他实例失效），进程退出时由 OS 回收。</summary>
+    private static readonly object _sessionCacheLock = new();
+    private static readonly Dictionary<string, InferenceSession> _sharedSessions = new(StringComparer.Ordinal);
+
     /// <summary>
     /// 加载 ONNX 模型 + vocab 词表。模型缺失 / 加载失败在此抛明确异常（含下载指引），
     /// 上层（RagIndexer 索引构建失败 → 检索降级关键词路，AI-3）据此降级，不崩溃。
@@ -57,7 +66,7 @@ public sealed class EmbeddingGenerator : IEmbeddingGenerator<string, Embedding<f
         }
 
         _dimensions = dimensions;
-        _session = new InferenceSession(modelPath);
+        _session = GetOrCreateSharedSession(modelPath);
 
         // 构造期校验输入张量齐全，避免推理时才发现模型不匹配
         var inputNames = _session.InputMetadata.Keys.ToHashSet(StringComparer.Ordinal);
@@ -84,6 +93,23 @@ public sealed class EmbeddingGenerator : IEmbeddingGenerator<string, Embedding<f
             IndividuallyTokenizeCjk = true,
             LowerCaseBeforeTokenization = false,
         });
+    }
+
+    /// <summary>
+    /// 获取（首次创建）共享 ONNX 会话。double-checked lock：避免并发宿主同时 new 多个 InferenceSession。
+    /// 会话仅在校验通过后入缓存（构造器后续对输入张量/输出维度校验，失败则构造抛异常且该坏会话不再复用）。
+    /// </summary>
+    private static InferenceSession GetOrCreateSharedSession(string modelPath)
+    {
+        lock (_sessionCacheLock)
+        {
+            if (!_sharedSessions.TryGetValue(modelPath, out var session))
+            {
+                session = new InferenceSession(modelPath);
+                _sharedSessions[modelPath] = session;
+            }
+            return session;
+        }
     }
 
     /// <inheritdoc />
@@ -197,5 +223,9 @@ public sealed class EmbeddingGenerator : IEmbeddingGenerator<string, Embedding<f
     public object? GetService(Type serviceType, object? serviceKey = null) => null;
 
     /// <inheritdoc />
-    public void Dispose() => _session.Dispose();
+    public void Dispose()
+    {
+        // 会话是进程内共享资源（static），不在此释放——一个实例 Dispose 不应使其他实例的会话失效；
+        // 进程退出时由 OS 回收原生句柄。tokenizer 非 IDisposable，无需额外释放。
+    }
 }

@@ -64,6 +64,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             "",
             "可用工具：",
             "- search_product(keyword): 搜索商品",
+            "- search_knowledge(query): 搜索商品知识/描述文档",
             "- add_to_cart(productId, quantity): **追加**商品到购物车（在原数量上加）",
             "- update_cart_quantity(productId, quantity): **设置**精确数量（用户说只要X个时调用）",
             "- get_cart_summary(): 查看购物车",
@@ -113,7 +114,8 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         IReadOnlyDictionary<string, string[]> keywordMap, CartToolProvider cartTools, bool isOpenAI,
         AgentTelemetryOptions telemetryOptions,
         IPreferenceQueue? preferenceQueue = null,
-        IServiceScopeFactory? scopeFactory = null)
+        IServiceScopeFactory? scopeFactory = null,
+        IRagSearchService? ragSearchService = null)
     {
         _isOpenAI = isOpenAI;
         _cartTools = cartTools;
@@ -196,8 +198,10 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             DisableAgentModeProvider = true,
             DisableApprovalNotRequiredFunctionBypassing = false,
 
-
-            AIContextProviders = [new PreferenceMemoryProvider(scopeFactory, preferenceQueue)]
+            // 上下文注入 Provider 链：PreferenceMemoryProvider（既有偏好）+ TextSearchProvider（知识检索，Task 11）。
+            // 知识检索工具 search_knowledge 由 TextSearchProvider 以 OnDemandFunctionCalling（Tool 模式）注入（design §5.7，AK-1）；
+            // IRagSearchService 未注册（RAG 未启用的宿主）时仅保留偏好 provider，不破坏既有 Agent 行为（与 CartToolProvider 的可选注入同约定）
+            AIContextProviders = BuildContextProviders(preferenceQueue, scopeFactory, ragSearchService)
         };
 
        
@@ -215,6 +219,27 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             _agent,
             telemetryOptions.SourceName,
             telemetryOptions.Level);
+    }
+
+    /// <summary>
+    /// 构建 HarnessAgent 的 AIContextProviders 链（design §5.7，Task 11）。
+    /// 偏好 provider 恒挂载；知识检索 provider（TextSearchProvider）仅当 IRagSearchService 已注入时挂载——
+    /// 检索能力全部经 Tool 暴露（AK-4），不注入任何静态指令数据。
+    /// </summary>
+    private static List<AIContextProvider> BuildContextProviders(
+        IPreferenceQueue? preferenceQueue, IServiceScopeFactory? scopeFactory, IRagSearchService? ragSearchService)
+    {
+        var providers = new List<AIContextProvider>
+        {
+            new PreferenceMemoryProvider(scopeFactory, preferenceQueue),
+        };
+
+        if (ragSearchService is not null)
+        {
+            providers.Add(RagTextSearchAdapter.CreateTextSearchProvider(ragSearchService));
+        }
+
+        return providers;
     }
 
     /// <summary>

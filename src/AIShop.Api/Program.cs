@@ -44,6 +44,11 @@ try
     builder.Services.AddSwaggerGen();
     builder.Services.AddInfrastructure();
 
+    // RAG 底座注册（design §5.6，Task 11）：向量存储/embedding/检索/索引 + 启动预构建。
+    // 放在 AddInfrastructure 之后（IRagSearchService 供 CartToolProvider.search_product 混合检索
+    // 与 ShoppingAssistantAgent 的 search_knowledge 工具使用），向量库独立 aishop.rag.db（R6）
+    builder.Services.AddRag();
+
     // Register Agent definitions (AIShop.Service/)
     builder.Services.AddSingleton<CartToolProvider>();
     builder.Services.AddSingleton<ModelRouter>();
