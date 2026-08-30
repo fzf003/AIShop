@@ -41,7 +41,10 @@ public sealed class RagKnowledgeToolTests : IDisposable
         _options = new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).Options;
         using (var ctx = new AppDbContext(_options))
         {
-            ctx.Database.EnsureCreated();
+            // 用 Migrate 建表（对齐宿主 Program.cs 的 MigrateAsync，项目 memory「integration-test-db-migrate」）：
+            // EnsureCreated 建表但不写 __EFMigrationsHistory，与宿主迁移历史不一致；本项目集成测试
+            // 隔离库建表统一 Migrate，避免「表已建却被迁移重跑」的语义分叉。
+            ctx.Database.Migrate();
         }
     }
 

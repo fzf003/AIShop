@@ -79,7 +79,15 @@ public sealed class RagIndexer : IRagIndexer
     /// <inheritdoc />
     public async Task RebuildAsync(CancellationToken ct = default)
     {
-        // 1. 幂等建表：product 数据表 + vec_product 虚拟表（已存在则无操作，重跑全量/增量安全）
+        // 1. 清空 collection（脏标记重建需清空保证删除收敛）：全量重建只 upsert 不清空，
+        //    无法清除「业务库已删但索引残留」的幽灵记录——若增量 RemoveProductAsync 失败置脏标记，
+        //    脏标记触发的全量重建仍保留 ghost，删除永不收敛，检索会召回已删商品（Fix B）。
+        //    选「删表重建」（EnsureCollectionDeletedAsync + EnsureCollectionExistsAsync）而非
+        //    「按 key 全量删除」：一次 DROP 即清空全部（含幽灵记录），语义最干净，且与下一步
+        //    幂等建表天然衔接；SqliteVec 实现用 DROP TABLE IF EXISTS，对不存在 collection 是幂等 no-op。
+        await _collection.EnsureCollectionDeletedAsync(ct);
+
+        // 2. 幂等建表：product 数据表 + vec_product 虚拟表（已存在则无操作，重跑全量/增量安全）
         await _collection.EnsureCollectionExistsAsync(ct);
 
         // 2. 经 IServiceScopeFactory 解析 scoped IProductRepository（RagIndexer 是 Singleton，

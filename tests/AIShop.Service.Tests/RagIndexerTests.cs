@@ -185,8 +185,8 @@ public sealed class RagIndexerTests : IAsyncLifetime
         Assert.Equal(18, await CountRecordsAsync());
 
         // 业务库更新商品 5（改名）；随后一次增量 upsert 失败（FailNext 模拟 embedding 抛异常）。
-        // 注意重建收敛场景选「内容变更」而非「删除商品」：RebuildAsync 是 upsert-only（design §5.5，
-        // 无清空语义），删除类收敛由 RemoveProductAsync 负责；用改名才能被「重建后 upsert 覆盖」观察到。
+        // 重建收敛场景选「内容变更」：改名可被「重建后 upsert 覆盖」观察到；
+        // 「业务库删除 → 脏标记重建收敛删除」的 ghost 场景由 DirtyRebuild_AfterBusinessDelete_RemovesGhostRecord 覆盖。
         _repo.Products = _repo.Products
             .Select(p => p.Id == 5
                 ? new Product { Id = 5, Name = "新款意式浓缩咖啡机", Category = p.Category, Tags = p.Tags, Price = p.Price, Emoji = p.Emoji }
@@ -203,6 +203,30 @@ public sealed class RagIndexerTests : IAsyncLifetime
         await _indexer.EnsureIndexedAsync();
         Assert.Equal("新款意式浓缩咖啡机", (await GetSingleAsync(r => r.ProductId == 5))!.Name);
         Assert.Equal(3, _embeddings.CallCount); // 1(初建) + 1(失败增量) + 1(脏标记重建)
+    }
+
+    [Fact]
+    public async Task DirtyRebuild_AfterBusinessDelete_RemovesGhostRecord()
+    {
+        // Fix B（AI-5 删除收敛）：脏标记触发的全量重建必须清空 collection，否则
+        // 「业务库已删、增量删除失败置脏标记」留下的幽灵记录永远无法被重建清除，
+        // 检索会召回已删商品。旧实现 RebuildAsync 是 upsert-only（不清空），此场景下
+        // 重建后仍 18 条（product-5 幽灵残留）；修复后开头清空 → 从业务库重建 17 条。
+        await _indexer.EnsureIndexedAsync();
+        Assert.Equal(18, await CountRecordsAsync());
+
+        // 业务库删除商品 5（未来商品删除场景）：collection 仍残留 product-5（模拟
+        // RemoveProductAsync 失败置脏标记、未真正删除——脏标记的重建兜底须收敛删除）
+        _repo.Products = _repo.Products.Where(p => p.Id != 5).ToArray();
+
+        // 触发脏标记：一次失败的增量 upsert（FailNext 模拟 embedding 抛异常 → 置脏标记、不改 collection）
+        _embeddings.FailNext = true;
+        await _indexer.UpsertProductAsync(_repo.Products[0]); // 不抛给业务（AI-5）
+
+        // 脏标记兜底重建：修复后 RebuildAsync 开头清空 collection → 从业务库重建 17 条，幽灵记录被清除
+        await _indexer.EnsureIndexedAsync();
+        Assert.Equal(17, await CountRecordsAsync());
+        Assert.Null(await GetSingleAsync(r => r.ProductId == 5));
     }
 
     /// <summary>统计 collection 内记录总数（filter 恒真 + 足够大的 top）。</summary>
