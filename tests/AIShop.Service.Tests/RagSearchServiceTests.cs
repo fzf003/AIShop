@@ -173,6 +173,18 @@ public sealed class RagSearchServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SearchKnowledgeAsync_WhenEmbeddingFails_ReturnsEmpty_NoException()
+    {
+        // AI-3：知识检索异常（模拟模型缺失 / embedding 推理失败）→ 不抛异常、返回空结果，
+        // 与 SearchProductsAsync 的向量路降级一致（不崩溃）。知识检索没有关键词兜底路，
+        // 空结果即「无检索上下文」——TextSearchProvider 按空结果注入、Agent 无参考资料正常回复（AI-3 空结果语义）。
+        _embeddings.FailNext = true;
+        var results = await _service.SearchKnowledgeAsync("咖啡", domain: RagOptions.Domain, top: 3);
+
+        Assert.Empty(results);
+    }
+
+    [Fact]
     public void Constructor_InjectVectorDataAbstraction_NotSqliteVecConcreteType()
     {
         // AB-1：构造注入类型为 VectorData 抽象 VectorStoreCollection<string, ProductDocumentRecord>，

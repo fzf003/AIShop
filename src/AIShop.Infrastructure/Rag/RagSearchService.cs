@@ -63,32 +63,44 @@ public sealed class RagSearchService : IRagSearchService
     public async Task<IReadOnlyList<KnowledgeSearchHit>> SearchKnowledgeAsync(
         string query, string? domain = null, int top = 3, CancellationToken ct = default)
     {
-        // 懒构建兜底：覆盖「启动预构建失败 / 首次访问」场景（design §2.4）
-        await _indexer.EnsureIndexedAsync(ct);
-
-        // 显式生成查询向量：ProductDocumentRecord.Embedding 是 SqliteVec 原生支持类型，
-        // 检索不会自动生成 embedding，必须显式传入（design §4.2）
-        var embedding = (await _embeddingGenerator.GenerateAsync([query], cancellationToken: ct))[0];
-        var options = new VectorSearchOptions<ProductDocumentRecord>();
-        if (!string.IsNullOrWhiteSpace(domain))
+        try
         {
-            // AK-3 领域过滤：VectorData 10.x 的 VectorSearchFilter 已过时，用 LINQ 表达式（D-c POC 实测）
-            options.Filter = r => r.Domain == domain;
-        }
+            // 懒构建兜底：覆盖「启动预构建失败 / 首次访问」场景（design §2.4）
+            await _indexer.EnsureIndexedAsync(ct);
 
-        var hits = new List<KnowledgeSearchHit>();
-        await foreach (var result in _collection.SearchAsync(embedding.Vector, top, options, ct))
+            // 显式生成查询向量：ProductDocumentRecord.Embedding 是 SqliteVec 原生支持类型，
+            // 检索不会自动生成 embedding，必须显式传入（design §4.2）
+            var embedding = (await _embeddingGenerator.GenerateAsync([query], cancellationToken: ct))[0];
+            var options = new VectorSearchOptions<ProductDocumentRecord>();
+            if (!string.IsNullOrWhiteSpace(domain))
+            {
+                // AK-3 领域过滤：VectorData 10.x 的 VectorSearchFilter 已过时，用 LINQ 表达式（D-c POC 实测）
+                options.Filter = r => r.Domain == domain;
+            }
+
+            var hits = new List<KnowledgeSearchHit>();
+            await foreach (var result in _collection.SearchAsync(embedding.Vector, top, options, ct))
+            {
+                var record = result.Record;
+                hits.Add(new KnowledgeSearchHit(
+                    record.Id,
+                    record.Name,
+                    record.Category,
+                    record.Text,
+                    result.Score ?? 0));
+            }
+
+            return hits;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            var record = result.Record;
-            hits.Add(new KnowledgeSearchHit(
-                record.Id,
-                record.Name,
-                record.Category,
-                record.Text,
-                result.Score ?? 0));
+            // AI-3 降级：知识检索任一步异常（模型缺失 / 索引构建失败 / 存储错误）→ 返回空结果、不抛给 TextSearchProvider
+            // 工具链（否则异常会传到 Agent 循环导致整个对话失败）。与 search_product 的降级对齐——知识检索没有关键词兜底路，
+            // 空结果即「无检索上下文」，TextSearchProvider 按空结果注入、Agent 无参考资料正常回复（AI-3 空结果语义）。
+            // OperationCanceledException 正常传播（调用方取消语义）
+            Log.Warning(ex, "知识检索失败，返回空结果：{Query}", query);
+            return [];
         }
-
-        return hits;
     }
 
     /// <summary>
