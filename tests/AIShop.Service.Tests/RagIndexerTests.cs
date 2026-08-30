@@ -21,6 +21,7 @@ public sealed class RagIndexerTests : IAsyncLifetime
     private FakeEmbeddingGenerator _embeddings = null!;
     private RagIndexer _indexer = null!;
     private VectorStoreCollection<string, ProductDocumentRecord> _collection = null!;
+    private FakeProductRepository _repo = null!;
 
     public Task InitializeAsync()
     {
@@ -32,8 +33,10 @@ public sealed class RagIndexerTests : IAsyncLifetime
         // 与 AddRag（design §5.6）一致的注册方式：vector store + collection（注册抽象 VectorStoreCollection，AB-1）
         services.AddSqliteVectorStore(_ => connectionString);
         services.AddSqliteCollection<string, ProductDocumentRecord>(RagOptions.CollectionName, _ => connectionString);
-        // IProductRepository 在应用中为 Scoped（DependencyInjection.cs），RagIndexer 经 IServiceScopeFactory 解析
-        services.AddScoped<IProductRepository>(_ => new FakeProductRepository());
+        // IProductRepository 在应用中为 Scoped（DependencyInjection.cs），RagIndexer 经 IServiceScopeFactory 解析；
+        // 测试用共享实例（Scoped 工厂每次返回同一 _repo），使「业务库变更 → 增量/全量重建读到新状态」可观察
+        _repo = new FakeProductRepository();
+        services.AddScoped<IProductRepository>(_ => _repo);
 
         _provider = services.BuildServiceProvider();
         _collection = _provider.GetRequiredService<VectorStoreCollection<string, ProductDocumentRecord>>();
@@ -107,6 +110,101 @@ public sealed class RagIndexerTests : IAsyncLifetime
         Assert.Equal(callsBefore, failing.CallCount);
     }
 
+    [Fact]
+    public async Task UpsertProduct_SameKeyRepeated_IsIdempotent_NoDuplicateRows()
+    {
+        // AI-5：UpsertProductAsync 同 key 重复调用幂等（按 key REPLACE），不产生重复行
+        await _indexer.RebuildAsync();
+        Assert.Equal(18, await CountRecordsAsync());
+
+        var product5 = ProductSeedData.Products.Single(p => p.Id == 5);
+        await _indexer.UpsertProductAsync(product5);
+        await _indexer.UpsertProductAsync(product5);
+
+        // 重复 upsert 后仍 18 条；ProductId=5 恰 1 条（GetSingleAsync 用 SingleOrDefault，重复会抛异常）
+        Assert.Equal(18, await CountRecordsAsync());
+        var record5 = await GetSingleAsync(r => r.ProductId == 5);
+        Assert.NotNull(record5);
+        Assert.Equal("product-5", record5!.Id);
+    }
+
+    [Fact]
+    public async Task RemoveProduct_DeletesExistingKey()
+    {
+        // AI-5：RemoveProductAsync 按 key 移除对应商品
+        await _indexer.RebuildAsync();
+        Assert.Equal(18, await CountRecordsAsync());
+
+        await _indexer.RemoveProductAsync(5);
+        Assert.Equal(17, await CountRecordsAsync());
+        Assert.Null(await GetSingleAsync(r => r.ProductId == 5));
+    }
+
+    [Fact]
+    public async Task RemoveProduct_NonExistentKey_NoSideEffect()
+    {
+        // AI-5：删除不存在 key 无副作用（幂等），不抛异常、不影响既有记录
+        await _indexer.RebuildAsync();
+        Assert.Equal(18, await CountRecordsAsync());
+
+        await _indexer.RemoveProductAsync(999); // 商品种子 Id 为 1..18，999 不存在
+        Assert.Equal(18, await CountRecordsAsync());
+    }
+
+    [Fact]
+    public async Task Upsert_Incremental_ConvergesToSameStateAsFullRebuild()
+    {
+        // AI-5：增量同步结果与全量重建结果一致（fake embedding，不调真实 LLM）
+        await _indexer.RebuildAsync();
+        Assert.Equal(18, await CountRecordsAsync());
+
+        // 业务库更新商品 5（改名），用全新 Product 实例避免污染共享种子数据
+        _repo.Products = _repo.Products
+            .Select(p => p.Id == 5
+                ? new Product { Id = 5, Name = "新款意式浓缩咖啡机", Category = p.Category, Tags = p.Tags, Price = p.Price, Emoji = p.Emoji }
+                : p)
+            .ToArray();
+        await _indexer.UpsertProductAsync(_repo.Products.Single(p => p.Id == 5));
+
+        // 增量后：条数不变、商品 5 已更新
+        Assert.Equal(18, await CountRecordsAsync());
+        Assert.Equal("新款意式浓缩咖啡机", (await GetSingleAsync(r => r.ProductId == 5))!.Name);
+
+        // 全量重建后与增量结果完全一致（条数与商品 5 内容都收敛到业务库当前状态）
+        await _indexer.RebuildAsync();
+        Assert.Equal(18, await CountRecordsAsync());
+        Assert.Equal("新款意式浓缩咖啡机", (await GetSingleAsync(r => r.ProductId == 5))!.Name);
+    }
+
+    [Fact]
+    public async Task IncrementalFailure_SetsDirty_AndNextEnsureIndexed_FullyRebuilds()
+    {
+        // AI-5：增量失败置脏标记 → 下次 EnsureIndexedAsync 触发全量重建兜底（最终一致）
+        // 先经 EnsureIndexedAsync 置位 _indexed=true，确保后续重建是由「脏标记」触发而非「未构建」触发
+        await _indexer.EnsureIndexedAsync();
+        Assert.Equal(18, await CountRecordsAsync());
+
+        // 业务库更新商品 5（改名）；随后一次增量 upsert 失败（FailNext 模拟 embedding 抛异常）。
+        // 注意重建收敛场景选「内容变更」而非「删除商品」：RebuildAsync 是 upsert-only（design §5.5，
+        // 无清空语义），删除类收敛由 RemoveProductAsync 负责；用改名才能被「重建后 upsert 覆盖」观察到。
+        _repo.Products = _repo.Products
+            .Select(p => p.Id == 5
+                ? new Product { Id = 5, Name = "新款意式浓缩咖啡机", Category = p.Category, Tags = p.Tags, Price = p.Price, Emoji = p.Emoji }
+                : p)
+            .ToArray();
+        _embeddings.FailNext = true;
+        await _indexer.UpsertProductAsync(_repo.Products.Single(p => p.Id == 5)); // 不抛给业务（AI-5）
+
+        // 增量失败：商品 5 仍为旧名（upsert 在 embedding 阶段即失败，未触达 collection 写）
+        Assert.Equal("意式浓缩咖啡机", (await GetSingleAsync(r => r.ProductId == 5))!.Name);
+
+        // 脏标记兜底：_indexed 已为 true，若无脏标记逻辑此处会走快速路径短路、商品 5 保持旧名；
+        // 实测触发全量重建 → 收敛到业务库当前状态（商品 5 改名），且 embedding 确实被再次调用
+        await _indexer.EnsureIndexedAsync();
+        Assert.Equal("新款意式浓缩咖啡机", (await GetSingleAsync(r => r.ProductId == 5))!.Name);
+        Assert.Equal(3, _embeddings.CallCount); // 1(初建) + 1(失败增量) + 1(脏标记重建)
+    }
+
     /// <summary>统计 collection 内记录总数（filter 恒真 + 足够大的 top）。</summary>
     private async Task<int> CountRecordsAsync()
     {
@@ -131,12 +229,17 @@ public sealed class RagIndexerTests : IAsyncLifetime
         return matches.SingleOrDefault();
     }
 
-    /// <summary>fake IProductRepository：返回 18 条种子数据（与真实 ProductRepository.GetAll 语义一致）。</summary>
+    /// <summary>
+    /// fake IProductRepository：默认返回 18 条种子数据（与真实 ProductRepository.GetAll 语义一致）。
+    /// Products 可替换：测试可模拟「业务库变更」（改名/删除），供「增量 vs 全量重建一致性」「脏标记兜底」观察。
+    /// </summary>
     private sealed class FakeProductRepository : IProductRepository
     {
-        public IReadOnlyList<Product> GetAll() => ProductSeedData.Products;
+        public IReadOnlyList<Product> Products { get; set; } = ProductSeedData.Products;
 
-        public Product? QueryFilter(Func<Product, bool> predicate) => ProductSeedData.Products.FirstOrDefault(predicate);
+        public IReadOnlyList<Product> GetAll() => Products;
+
+        public Product? QueryFilter(Func<Product, bool> predicate) => Products.FirstOrDefault(predicate);
     }
 
     /// <summary>
@@ -158,6 +261,9 @@ public sealed class RagIndexerTests : IAsyncLifetime
         /// <summary>GenerateAsync 累计调用次数（用于断言短路幂等）。</summary>
         public int CallCount { get; private set; }
 
+        /// <summary>若为 true，下一次 GenerateAsync 抛异常后自动清除（模拟「本次增量失败、下次恢复」，供脏标记测试用）。</summary>
+        public bool FailNext { get; set; }
+
         public Task<GeneratedEmbeddings<Embedding<float>>> GenerateAsync(
             IEnumerable<string> values,
             EmbeddingGenerationOptions? options = null,
@@ -165,6 +271,13 @@ public sealed class RagIndexerTests : IAsyncLifetime
         {
             cancellationToken.ThrowIfCancellationRequested();
             CallCount++;
+
+            // 模拟增量失败路径（AI-5）：本次抛异常，随后自动恢复
+            if (FailNext)
+            {
+                FailNext = false;
+                throw new InvalidOperationException("模拟增量 embedding 失败");
+            }
 
             // 模拟 embedding 失败路径（AI-5/AI-3）：抛一次，由 EnsureIndexedAsync 不置位实现下次重试
             if (_failures.Count > 0)
