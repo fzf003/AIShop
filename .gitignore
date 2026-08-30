@@ -24,6 +24,9 @@ Directory.Build.props
 *.db-shm
 *.db-wal
 *.bak
+
+# RAG bge-small-zh-v1.5 ONNX 模型文件（~100MB，首次运行前下载，R4；见 csproj 注释的下载源）
+src/AIShop.Infrastructure/Rag/Models/
 .agents/
 .claude/settings.local.json
 .claude/worktree/

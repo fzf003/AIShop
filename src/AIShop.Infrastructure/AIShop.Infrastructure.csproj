@@ -12,6 +12,26 @@
     <PackageReference Include="Serilog" />
   </ItemGroup>
 
+  <!-- RAG 底座（rag-feature）：向量存储抽象 + SqliteVec provider + 本地 ONNX embedding。
+       R5/R9 核对结论：Microsoft.Extensions.AI.ONNX 包在 NuGet 不存在，改用自研 IEmbeddingGenerator
+       包装 Microsoft.ML.OnnxRuntime（native+managed 拆分包）+ Microsoft.ML.Tokenizers（tokenizer.json）。 -->
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.VectorData.SqliteVec" />
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.VectorData.Abstractions" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" />
+    <PackageReference Include="Microsoft.ML.Tokenizers" />
+  </ItemGroup>
+
+  <!-- bge-small-zh-v1.5 ONNX 模型文件（R4：~95MB，gitignore 不提交 git，首次运行前从 hf-mirror 下载）：
+       https://hf-mirror.com/Xenova/bge-small-zh-v1.5/resolve/main/onnx/model.onnx
+       https://hf-mirror.com/Xenova/bge-small-zh-v1.5/resolve/main/tokenizer.json
+       复制到输出供 EmbeddingGenerator 加载（RagOptions.EmbeddingModelPath 可配置）。 -->
+  <ItemGroup>
+    <Content Include="Rag\Models\bge-small-zh-v1.5\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <!-- 覆盖传递依赖以修复 NU1903 安全漏洞 -->
   <ItemGroup>
     <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" />
