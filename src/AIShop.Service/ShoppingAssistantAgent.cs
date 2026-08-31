@@ -111,32 +111,8 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         var instructions = BuildInstructions();
 
 
-        var tools = new List<AITool>();
-
-        tools.Add(AIFunctionFactory.Create(
-            (Func<int, int, Task<string>>)((productId, quantity) => cartTools.AddToCartAsync(productId, quantity)),
-            "add_to_cart",
-            "追加商品到购物车。参数 productId=商品ID, quantity=追加数量。在现有数量上追加，不是设置最终数量。"));
-
-        tools.Add(AIFunctionFactory.Create(
-            (Func<int, int, Task<string>>)((productId, quantity) => cartTools.UpdateCartItemQuantityAsync(productId, quantity)),
-            "update_cart_quantity",
-            "设置购物车中某个商品的精确数量。参数 productId=商品ID, quantity=最终数量。用户说'只要X个'时调用。"));
-
-        tools.Add(AIFunctionFactory.Create(
-            (Func<Task<string>>)(() => cartTools.GetCartSummaryAsync()),
-            "get_cart_summary",
-            "查看当前用户的购物车摘要，无参数。"));
-
-        tools.Add(AIFunctionFactory.Create(
-            (Func<Guid, Task<string>>)(itemId => cartTools.RemoveFromCartAsync(itemId)),
-            "remove_from_cart",
-            "从购物车中移除指定商品。参数 itemId=购物车中商品项的ID。"));
-
-        tools.Add(AIFunctionFactory.Create(
-            (Func<string, Task<string>>)(keyword => cartTools.SearchProductAsync(keyword)),
-            "search_product",
-            "搜索商品。参数 keyword=商品关键词（如咖啡机、耳机）。用户提到商品名时调用。"));
+        // 购物车/商品工具由 CartToolProvider 统一注册（工具名/描述集中在工具宿主），此处只取工具列表
+        var tools = cartTools.CreateTools().ToList();
 
         var chartOptions = new ChatOptions { Tools = tools, Reasoning = new() { Effort = ReasoningEffort.Medium } };
 

@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using AIShop.Core.Interfaces;
 using AIShop.Core.Models;
+using Microsoft.Agents.AI;
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Serilog;
 
@@ -200,5 +202,36 @@ public sealed class CartToolProvider(
 
         await cartRepo.RemoveItemAsync(user.Id, itemId);
         return $"已移除 {item.ProductName}";
+    }
+
+    /// <summary>
+    /// 把购物车/商品工具方法注册为 Agent 可调用的 AI 工具（工具名与描述集中定义在工具宿主，
+    /// Agent 侧无需逐个注册）。
+    /// </summary>
+    public IReadOnlyList<AITool> CreateTools()
+    {
+        return
+        [
+            AIFunctionFactory.Create(
+                (Func<int, int, Task<string>>)((productId, quantity) => AddToCartAsync(productId, quantity)),
+                "add_to_cart",
+                "追加商品到购物车。参数 productId=商品ID, quantity=追加数量。在现有数量上追加，不是设置最终数量。"),
+            AIFunctionFactory.Create(
+                (Func<int, int, Task<string>>)((productId, quantity) => UpdateCartItemQuantityAsync(productId, quantity)),
+                "update_cart_quantity",
+                "设置购物车中某个商品的精确数量。参数 productId=商品ID, quantity=最终数量。用户说'只要X个'时调用。"),
+            AIFunctionFactory.Create(
+                (Func<Task<string>>)(() => GetCartSummaryAsync()),
+                "get_cart_summary",
+                "查看当前用户的购物车摘要，无参数。"),
+            AIFunctionFactory.Create(
+                (Func<Guid, Task<string>>)(itemId => RemoveFromCartAsync(itemId)),
+                "remove_from_cart",
+                "从购物车中移除指定商品。参数 itemId=购物车中商品项的ID。"),
+            AIFunctionFactory.Create(
+                (Func<string, Task<string>>)(keyword => SearchProductAsync(keyword)),
+                "search_product",
+                "搜索商品。参数 keyword=商品关键词（如咖啡机、耳机）。用户提到商品名时调用。"),
+        ];
     }
 }
