@@ -171,7 +171,6 @@ public sealed class ChatPreferenceEnqueueTests : IDisposable
                     sp.GetRequiredService<Meai.IChatClient>(),
                     sp.GetRequiredService<IChatHistoryStore>(), sp.GetRequiredService<IChatCompactionPolicy>(),
                     sp.GetRequiredService<CartToolProvider>(),
-                    isOpenAI: false,
                     sp.GetRequiredService<AgentTelemetryOptions>(),
                     sp.GetRequiredService<IPreferenceQueue>());
 

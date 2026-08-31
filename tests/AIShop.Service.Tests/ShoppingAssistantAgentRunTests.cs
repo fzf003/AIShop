@@ -68,7 +68,7 @@ public sealed class ShoppingAssistantAgentRunTests : IDisposable
 
         var agent = new ShoppingAssistantAgent(
             mockClient, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), cartTools,
-            isOpenAI: false, new AgentTelemetryOptions { Level = AgentTelemetryLevel.None });
+            new AgentTelemetryOptions { Level = AgentTelemetryLevel.None });
 
         var sessionId = Guid.NewGuid();
 
@@ -132,7 +132,7 @@ public sealed class ShoppingAssistantAgentRunTests : IDisposable
 
         var agent = new ShoppingAssistantAgent(
             mockClient, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), cartTools,
-            isOpenAI: false, new AgentTelemetryOptions { Level = AgentTelemetryLevel.None });
+            new AgentTelemetryOptions { Level = AgentTelemetryLevel.None });
 
         var sessionId = Guid.NewGuid();
         await agent.RunChatAsync(sessionId, "推荐商品", "t10t2-user");
@@ -199,7 +199,7 @@ public sealed class ShoppingAssistantAgentRunTests : IDisposable
 
         var agent = new ShoppingAssistantAgent(
             mockClient, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), cartTools,
-            isOpenAI: false, new AgentTelemetryOptions { Level = AgentTelemetryLevel.None });
+            new AgentTelemetryOptions { Level = AgentTelemetryLevel.None });
 
         var sessionId = Guid.NewGuid();
         var (result, _) = await agent.RunChatAsync(sessionId, "加购商品", "t10t2-user");

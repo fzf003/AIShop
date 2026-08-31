@@ -85,7 +85,6 @@ public sealed class ChatPreferenceBackfillTests : IDisposable
                         sp.GetRequiredService<Meai.IChatClient>(),
                         sp.GetRequiredService<IChatHistoryStore>(), sp.GetRequiredService<IChatCompactionPolicy>(),
                         sp.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
                         sp.GetRequiredService<AgentTelemetryOptions>());
                 });
                 mockRouter.GetDefaultAgent().Returns(
@@ -93,7 +92,6 @@ public sealed class ChatPreferenceBackfillTests : IDisposable
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.GetAvailableModels().Returns([
                     new ModelInfo("qwen", "Qwen 3.7", true),

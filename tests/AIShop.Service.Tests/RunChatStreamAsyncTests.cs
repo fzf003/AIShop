@@ -68,7 +68,7 @@ public sealed class RunChatStreamAsyncTests : IDisposable
         // agentWrapper 走 T13 测试缝（internal 构造）：包装真实 agent 使首次会话创建抛异常
         return new ShoppingAssistantAgent(
             mockClient, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), cartTools,
-            isOpenAI: false, new AgentTelemetryOptions { Level = AgentTelemetryLevel.None }, agentWrapper);
+            new AgentTelemetryOptions { Level = AgentTelemetryLevel.None }, agentWrapper);
     }
 
     /// <summary>

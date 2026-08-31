@@ -24,7 +24,6 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     private readonly AIAgent _agent;
     private readonly SqliteChatHistoryProvider _provider;
     private readonly CartToolProvider _cartTools;
-    private readonly bool _isOpenAI;
     // 按 sessionId 复用 AgentSession（State/StateBag 跨轮保留，偏好以 State 为主、Store 延迟一轮入队生效）
     private readonly ConcurrentDictionary<Guid, AgentSession> _sessions = new();
     private static readonly Serilog.ILogger Logger = Log.ForContext<ShoppingAssistantAgent>();
@@ -101,12 +100,11 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     }
 
     public ShoppingAssistantAgent(IChatClient chatClient, IChatHistoryStore chatHistoryStore, IChatCompactionPolicy compaction,
-        CartToolProvider cartTools, bool isOpenAI,
+        CartToolProvider cartTools,
         AgentTelemetryOptions telemetryOptions,
         IPreferenceQueue? preferenceQueue = null,
         IServiceScopeFactory? scopeFactory = null)
     {
-        _isOpenAI = isOpenAI;
         _cartTools = cartTools;
         var instructions = BuildInstructions();
 
@@ -193,9 +191,9 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     /// </summary>
     internal ShoppingAssistantAgent(
         IChatClient chatClient, IChatHistoryStore chatHistoryStore, IChatCompactionPolicy compaction,
-        CartToolProvider cartTools, bool isOpenAI,
+        CartToolProvider cartTools,
         AgentTelemetryOptions telemetryOptions, Func<AIAgent, AIAgent>? agentWrapper)
-        : this(chatClient, chatHistoryStore, compaction, cartTools, isOpenAI, telemetryOptions)
+        : this(chatClient, chatHistoryStore, compaction, cartTools, telemetryOptions)
     {
         if (agentWrapper is not null)
             _agent = agentWrapper(_agent);
@@ -254,62 +252,46 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         AgentChatResult? result = null;
         string? rawText = null;
 
-        if (_isOpenAI)
+        // 统一 Text 路径：Instructions 约束 JSON 格式 + 服务端兜底解析（ForJsonSchema 分叉已移除，Text 路径 4 模型 100% 兼容）
+        var response = await _agent.RunAsync(
+            userMessage, session,
+            cancellationToken: ct);
+
+        sw.Stop();
+        Logger.Information("[Diagnose] Agent调用总耗时 AgentCall={ElapsedMs}ms SessionId={SessionId}",
+            sw.ElapsedMilliseconds, sessionId);
+
+        rawText = response.Text?.Trim();
+
+        // 兜底：模型（如 Qwen）在 FICC 循环后只调用工具未输出文本
+        if (string.IsNullOrEmpty(rawText))
         {
-            // OpenAI 路径：走 ForJsonSchema 加强格式校验
-            var agentResponse = await _agent.RunAsync<AgentChatResult>(
-                userMessage, session,
-                cancellationToken: ct);
+            var toolResults = response.Messages
+                .Where(m => m.Role == ChatRole.Tool)
+                .SelectMany(m => m.Contents.OfType<TextContent>())
+                .Select(tc => tc.Text)
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .ToList();
 
-            sw.Stop();
-            Logger.Information("[Diagnose] Agent调用总耗时 AgentCall={ElapsedMs}ms SessionId={SessionId}",
-                sw.ElapsedMilliseconds, sessionId);
-
-            result = agentResponse?.Result;
+            if (toolResults.Count > 0)
+                rawText = toolResults[^1];
         }
-        else
+
+        if (!string.IsNullOrEmpty(rawText))
         {
-            // 非 OpenAI 路径：纯 Text，由 Instructions 约束 JSON 格式 + 服务端兜底解析
-            var response = await _agent.RunAsync(
-                userMessage, session,
-                cancellationToken: ct);
-
-            sw.Stop();
-            Logger.Information("[Diagnose] Agent调用总耗时 AgentCall={ElapsedMs}ms SessionId={SessionId}",
-                sw.ElapsedMilliseconds, sessionId);
-
-            rawText = response.Text?.Trim();
-
-            // 兜底：模型（如 Qwen）在 FICC 循环后只调用工具未输出文本
-            if (string.IsNullOrEmpty(rawText))
+            var jsonStart = rawText.IndexOf('{');
+            var jsonEnd = rawText.LastIndexOf('}');
+            if (jsonStart >= 0 && jsonEnd > jsonStart)
             {
-                var toolResults = response.Messages
-                    .Where(m => m.Role == ChatRole.Tool)
-                    .SelectMany(m => m.Contents.OfType<TextContent>())
-                    .Select(tc => tc.Text)
-                    .Where(t => !string.IsNullOrWhiteSpace(t))
-                    .ToList();
-
-                if (toolResults.Count > 0)
-                    rawText = toolResults[^1];
-            }
-
-            if (!string.IsNullOrEmpty(rawText))
-            {
-                var jsonStart = rawText.IndexOf('{');
-                var jsonEnd = rawText.LastIndexOf('}');
-                if (jsonStart >= 0 && jsonEnd > jsonStart)
+                var json = rawText[jsonStart..(jsonEnd + 1)];
+                try
                 {
-                    var json = rawText[jsonStart..(jsonEnd + 1)];
-                    try
-                    {
-                        result = JsonSerializer.Deserialize<AgentChatResult>(json,
-                            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                    }
-                    catch (JsonException ex)
-                    {
-                        Logger.Warning(ex, "Agent 回复 JSON 解析失败");
-                    }
+                    result = JsonSerializer.Deserialize<AgentChatResult>(json,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                }
+                catch (JsonException ex)
+                {
+                    Logger.Warning(ex, "Agent 回复 JSON 解析失败");
                 }
             }
         }

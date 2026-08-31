@@ -123,10 +123,9 @@ public class ModelRouter
             var chatHistoryStore = _sp.GetRequiredService<IChatHistoryStore>();
             var compaction = _sp.GetRequiredService<IChatCompactionPolicy>();
             var cartTools = _sp.GetRequiredService<CartToolProvider>();
-            var isOpenAI = ShoppingAssistantAgent.IsOpenAIModel(cfg.Model);
             var telemetryOptions = _sp.GetRequiredService<AgentTelemetryOptions>();
             var agent = new ShoppingAssistantAgent(
-                chatClient, chatHistoryStore, compaction, cartTools, isOpenAI, telemetryOptions,
+                chatClient, chatHistoryStore, compaction, cartTools, telemetryOptions,
                 _sp.GetRequiredService<IPreferenceQueue>(),
                 _sp.GetRequiredService<IServiceScopeFactory>());
             Logger.Information("GetAgent.Lazy: 创建成功 model={ModelName}", key);

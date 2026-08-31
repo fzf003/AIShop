@@ -69,7 +69,6 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                         sp.GetRequiredService<Meai.IChatClient>(),
                         sp.GetRequiredService<IChatHistoryStore>(), sp.GetRequiredService<IChatCompactionPolicy>(),
                         sp.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
                         sp.GetRequiredService<AgentTelemetryOptions>());
                 });
                 mockRouter.GetDefaultAgent().Returns(
@@ -77,7 +76,6 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.GetAvailableModels().Returns([
                     new ModelInfo("qwen", "Qwen 3.7", true),
@@ -271,14 +269,12 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.ActiveModel.Returns("qwen");
                 services.AddSingleton(mockRouter);
@@ -343,14 +339,12 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.ActiveModel.Returns("qwen");
                 services.AddSingleton(mockRouter);
@@ -556,7 +550,6 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>());
                 });
                 mockRouter.GetDefaultAgent().Returns(
@@ -564,7 +557,6 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.ActiveModel.Returns("qwen");
                 mockRouter.GetAvailableModels().Returns([
@@ -615,7 +607,6 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>());
                 });
                 mockRouter.GetDefaultAgent().Returns(
@@ -623,7 +614,6 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.ActiveModel.Returns("qwen");
                 mockRouter.GetAvailableModels().Returns([
@@ -685,21 +675,18 @@ public sealed class ChatEndpointsWebTests : IClassFixture<WebApplicationFactory<
                         capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("qwen"),
                         capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.GetAgent("gpt-4.1").Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("gpt-4.1"),
                         capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.GetDefaultAgent().Returns(
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredKeyedService<Meai.IChatClient>("qwen"),
                         capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
-                        isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));
                 mockRouter.ActiveModel.Returns("qwen");
                 mockRouter.GetAvailableModels().Returns([

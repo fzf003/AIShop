@@ -90,7 +90,7 @@ public sealed class SanitizingChatClientTests
         var cartTools = new CartToolProvider(scopeFactory, new CurrentUserAccessor());
         var dbFactory = Substitute.For<IDbContextFactory<AppDbContext>>();
 
-        var agent = new ShoppingAssistantAgent(inner, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), cartTools, true,
+        var agent = new ShoppingAssistantAgent(inner, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), cartTools,
             new AgentTelemetryOptions { Level = AgentTelemetryLevel.Metadata });
 
         Assert.NotNull(agent);

@@ -465,7 +465,7 @@ public sealed class AgentTelemetryTests : IDisposable
         }
 
         public ShoppingAssistantAgent CreateAgent(AgentTelemetryLevel level)
-            => new(_chatClient, new ChatHistoryStore(_dbFactory), new RoundBasedCompactionPolicy(), _cartTools, isOpenAI: false,
+            => new(_chatClient, new ChatHistoryStore(_dbFactory), new RoundBasedCompactionPolicy(), _cartTools,
                 new AgentTelemetryOptions { Level = level });
 
         public void Dispose()
