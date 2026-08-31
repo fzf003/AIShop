@@ -108,6 +108,17 @@ try
             db.Products.AddRange(ProductSeedData.Products);
             await db.SaveChangesAsync();
         }
+
+        // 预热商品语义搜索：启动时加载 bge 模型 + 构建向量索引（复用上方 scope），
+        // 避免首次检索时加载 94MB 模型 / 建索引卡住请求；失败仅 Warning，首次检索懒构建兜底
+        try
+        {
+            await scope.ServiceProvider.GetRequiredService<IProductSemanticSearch>().EnsureIndexedAsync();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "RAG 索引预热失败，首次检索将懒构建兜底");
+        }
     }
 
     if (app.Environment.IsDevelopment())

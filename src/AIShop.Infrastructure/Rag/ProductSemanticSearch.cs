@@ -40,9 +40,11 @@ public sealed class ProductSemanticSearch(
     }
 
     /// <summary>
-    /// 懒构建索引：首次检索前从商品库生成向量记录并入库（幂等，加锁防并发重复构建）。
+    /// 构建索引：从商品库生成向量记录并入库（幂等，加锁防并发重复构建）。
+    /// 公开供启动预热调用（Program.cs 启动时加载模型 + 建索引，避免首次检索卡顿）；
+    /// 未预热时检索路径内部懒构建兜底。
     /// </summary>
-    private async Task EnsureIndexedAsync(CancellationToken ct)
+    public async Task EnsureIndexedAsync(CancellationToken ct = default)
     {
         lock (_sync)
         {

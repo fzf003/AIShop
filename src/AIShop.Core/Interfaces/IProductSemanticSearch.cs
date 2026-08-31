@@ -14,4 +14,10 @@ public interface IProductSemanticSearch
     /// <param name="top">返回条数</param>
     /// <param name="ct">取消令牌</param>
     Task<IReadOnlyList<ProductSearchHit>> SearchAsync(string query, int top = 5, CancellationToken ct = default);
+
+    /// <summary>
+    /// 确保索引已构建（幂等）。供启动预热调用（加载模型 + 建索引在启动时完成，
+    /// 避免首次检索卡顿）；未预热时 <see cref="SearchAsync"/> 内部懒构建兜底。
+    /// </summary>
+    Task EnsureIndexedAsync(CancellationToken ct = default);
 }
