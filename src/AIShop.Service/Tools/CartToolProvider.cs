@@ -52,7 +52,7 @@ public sealed class CartToolProvider(
         return $"未找到包含「{keyword}」的商品";
     }
 
-    /// <summary>把混合检索结果格式化为工具兼容输出（§9：`#Id Name — ¥Price`；空结果保持无结果文案）。</summary>
+    /// <summary>把语义检索结果格式化为工具兼容输出：`#Id Name — ¥Price`；空结果保持无结果文案。</summary>
     private static string FormatHits(string keyword, IReadOnlyList<ProductSearchHit> hits)
     {
         if (hits.Count == 0)

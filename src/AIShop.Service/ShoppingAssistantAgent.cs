@@ -43,7 +43,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     private static string SanitizeReply(string? reply) => ReplySanitizer.Clean(reply);
 
 
-    private static string BuildInstructions(IReadOnlyDictionary<string, string[]> keywordMap)
+    private static string BuildInstructions()
     {
         // 所有模型统一用 Text + Instructions 内嵌 JSON 示例
         // 测试报告证明这是唯一 4 模型（OpenAI/DeepSeek/Qwen/MiMo）100% 兼容的路径
@@ -97,27 +97,18 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         lines.Add($"回复必须使用以下 JSON 格式（工具调用时除外）：");
         lines.Add($"{outputExampleJson}");
 
-        lines.Add("");
-        lines.Add("【商品关键词表（用于推荐栏）】");
-        lines.Add("关键词 | 覆盖标签");
-
-        foreach (var (key, tags) in keywordMap)
-        {
-            lines.Add($"{key} | {string.Join("、", tags)}");
-        }
-
         return string.Join("\n", lines);
     }
 
     public ShoppingAssistantAgent(IChatClient chatClient, IChatHistoryStore chatHistoryStore, IChatCompactionPolicy compaction,
-        IReadOnlyDictionary<string, string[]> keywordMap, CartToolProvider cartTools, bool isOpenAI,
+        CartToolProvider cartTools, bool isOpenAI,
         AgentTelemetryOptions telemetryOptions,
         IPreferenceQueue? preferenceQueue = null,
         IServiceScopeFactory? scopeFactory = null)
     {
         _isOpenAI = isOpenAI;
         _cartTools = cartTools;
-        var instructions = BuildInstructions(keywordMap);
+        var instructions = BuildInstructions();
 
 
         var tools = new List<AITool>();
@@ -198,7 +189,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 
             // 上下文注入 Provider 链：仅 PreferenceMemoryProvider（既有用户偏好）。
             // RAG 能力经 search_product 工具暴露（纯语义检索），不向 Agent 注入静态知识/检索上下文
-            AIContextProviders = BuildContextProviders(preferenceQueue, scopeFactory)
+            AIContextProviders = [new PreferenceMemoryProvider(scopeFactory, preferenceQueue)]
         };
 
        
@@ -219,13 +210,6 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     }
 
     /// <summary>
-    /// 构建 HarnessAgent 的 AIContextProviders 链：仅偏好 provider（用户偏好记忆）。
-    /// </summary>
-    private static List<AIContextProvider> BuildContextProviders(
-        IPreferenceQueue? preferenceQueue, IServiceScopeFactory? scopeFactory)
-        => [new PreferenceMemoryProvider(scopeFactory, preferenceQueue)];
-
-    /// <summary>
     /// T13 测试缝（internal，经 InternalsVisibleTo 对测试项目可见）：比 public 构造多一个
     /// <paramref name="agentWrapper"/> 参数，让测试可包装真实 _agent（如首次 CreateSessionAsync 抛异常），
     /// 验证 RunChatStreamAsync 会话创建失败降级到 RunChatAsync 路径。
@@ -233,9 +217,9 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
     /// </summary>
     internal ShoppingAssistantAgent(
         IChatClient chatClient, IChatHistoryStore chatHistoryStore, IChatCompactionPolicy compaction,
-        IReadOnlyDictionary<string, string[]> keywordMap, CartToolProvider cartTools, bool isOpenAI,
+        CartToolProvider cartTools, bool isOpenAI,
         AgentTelemetryOptions telemetryOptions, Func<AIAgent, AIAgent>? agentWrapper)
-        : this(chatClient, chatHistoryStore, compaction, keywordMap, cartTools, isOpenAI, telemetryOptions)
+        : this(chatClient, chatHistoryStore, compaction, cartTools, isOpenAI, telemetryOptions)
     {
         if (agentWrapper is not null)
             _agent = agentWrapper(_agent);

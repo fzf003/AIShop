@@ -199,7 +199,6 @@ public sealed class ChatPreferenceFilterTests : IDisposable
                     return new ShoppingAssistantAgent(
                         sp.GetRequiredService<Meai.IChatClient>(),
                         sp.GetRequiredService<IChatHistoryStore>(), sp.GetRequiredService<IChatCompactionPolicy>(),
-                        ProductKeywordMap.Entries,
                         sp.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         sp.GetRequiredService<AgentTelemetryOptions>());
@@ -208,7 +207,6 @@ public sealed class ChatPreferenceFilterTests : IDisposable
                     _ => new ShoppingAssistantAgent(
                         capturedFactory.Services.GetRequiredService<Meai.IChatClient>(),
                         capturedFactory.Services.GetRequiredService<IChatHistoryStore>(), capturedFactory.Services.GetRequiredService<IChatCompactionPolicy>(),
-                        ProductKeywordMap.Entries,
                         capturedFactory.Services.GetRequiredService<CartToolProvider>(),
                         isOpenAI: false,
                         capturedFactory.Services.GetRequiredService<AgentTelemetryOptions>()));

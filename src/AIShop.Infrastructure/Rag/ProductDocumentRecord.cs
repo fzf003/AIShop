@@ -43,7 +43,7 @@ public sealed class ProductDocumentRecord
 
     /// <summary>512 维句向量（bge-small-zh-v1.5 hidden_size，Task1 POC 实测 D-a，非 design 早期假设的 384）。
     /// ReadOnlyMemory&lt;float&gt; 是 SqliteVec 原生支持类型 → upsert 不会自动生成向量，
-    /// 索引必须由 RagIndexer 显式填充 Embedding；检索时必须由 RagSearchService 显式生成查询向量后传入 SearchAsync。
+    /// 索引由 ProductSemanticSearch 显式填充 Embedding；检索时显式生成查询向量后传入 SearchAsync。
     /// 无类级 [VectorStoreRecord] 标注（VectorData 10.x 不存在该属性，D-c POC 实测）；[VectorStoreVector] 必须传维度。</summary>
     [VectorStoreVector(512)]
     public ReadOnlyMemory<float> Embedding { get; set; }

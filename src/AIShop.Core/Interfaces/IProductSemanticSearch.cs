@@ -11,9 +11,10 @@ public interface IProductSemanticSearch
     /// 语义检索商品：查询文本 → 向量 → 向量库 top-k 召回。
     /// </summary>
     /// <param name="query">用户自然语言查询（如「适合送礼的咖啡机」）</param>
+    /// <param name="domain">领域过滤（扩展缝）：非空时仅检索该领域记录（当前仅 "product"）；未来加订单/FAQ 传对应 domain</param>
     /// <param name="top">返回条数</param>
     /// <param name="ct">取消令牌</param>
-    Task<IReadOnlyList<ProductSearchHit>> SearchAsync(string query, int top = 5, CancellationToken ct = default);
+    Task<IReadOnlyList<ProductSearchHit>> SearchAsync(string query, string? domain = null, int top = 5, CancellationToken ct = default);
 
     /// <summary>
     /// 确保索引已构建（幂等）。供启动预热调用（加载模型 + 建索引在启动时完成，

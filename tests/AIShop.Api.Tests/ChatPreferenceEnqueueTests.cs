@@ -170,7 +170,6 @@ public sealed class ChatPreferenceEnqueueTests : IDisposable
                 ShoppingAssistantAgent CreateAgent(IServiceProvider sp) => new ShoppingAssistantAgent(
                     sp.GetRequiredService<Meai.IChatClient>(),
                     sp.GetRequiredService<IChatHistoryStore>(), sp.GetRequiredService<IChatCompactionPolicy>(),
-                    ProductKeywordMap.Entries,
                     sp.GetRequiredService<CartToolProvider>(),
                     isOpenAI: false,
                     sp.GetRequiredService<AgentTelemetryOptions>(),

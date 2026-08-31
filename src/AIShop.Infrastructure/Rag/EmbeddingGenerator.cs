@@ -44,7 +44,7 @@ public sealed class EmbeddingGenerator : IEmbeddingGenerator<string, Embedding<f
 
     /// <summary>
     /// 加载 ONNX 模型 + vocab 词表。模型缺失 / 加载失败在此抛明确异常（含下载指引），
-    /// 上层（RagIndexer 索引构建失败 → 检索降级关键词路，AI-3）据此降级，不崩溃。
+    /// 上层（ProductSemanticSearch 索引构建失败 → 检索返回无结果提示）据此降级，不崩溃。
     /// </summary>
     /// <param name="modelPath">model.onnx 完整路径。</param>
     /// <param name="vocabPath">vocab.txt 完整路径。</param>

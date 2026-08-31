@@ -126,7 +126,7 @@ public class ModelRouter
             var isOpenAI = ShoppingAssistantAgent.IsOpenAIModel(cfg.Model);
             var telemetryOptions = _sp.GetRequiredService<AgentTelemetryOptions>();
             var agent = new ShoppingAssistantAgent(
-                chatClient, chatHistoryStore, compaction, ProductKeywordMap.Entries, cartTools, isOpenAI, telemetryOptions,
+                chatClient, chatHistoryStore, compaction, cartTools, isOpenAI, telemetryOptions,
                 _sp.GetRequiredService<IPreferenceQueue>(),
                 _sp.GetRequiredService<IServiceScopeFactory>());
             Logger.Information("GetAgent.Lazy: 创建成功 model={ModelName}", key);

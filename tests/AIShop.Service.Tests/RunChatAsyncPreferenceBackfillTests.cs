@@ -89,7 +89,7 @@ public sealed class RunChatAsyncPreferenceBackfillTests : IDisposable
         var cartTools = new CartToolProvider(scopeFactory, new CurrentUserAccessor());
 
         var agent = new ShoppingAssistantAgent(
-            mockClient, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), ProductKeywordMap.Entries, cartTools,
+            mockClient, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), cartTools,
             isOpenAI: false, new AgentTelemetryOptions { Level = AgentTelemetryLevel.None });
 
         var sessionId = Guid.NewGuid();
@@ -135,7 +135,7 @@ public sealed class RunChatAsyncPreferenceBackfillTests : IDisposable
         var cartTools = new CartToolProvider(scopeFactory, new CurrentUserAccessor());
 
         var agent = new ShoppingAssistantAgent(
-            mockClient, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), ProductKeywordMap.Entries, cartTools,
+            mockClient, new ChatHistoryStore(dbFactory), new RoundBasedCompactionPolicy(), cartTools,
             isOpenAI: false, new AgentTelemetryOptions { Level = AgentTelemetryLevel.None });
 
         await agent.RunChatAsync(Guid.NewGuid(), "推荐商品", "t16-user", preferences: null);
