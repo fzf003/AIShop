@@ -29,7 +29,8 @@
        https://hf-mirror.com/Xenova/bge-small-zh-v1.5/resolve/main/tokenizer.json
        复制到输出供 EmbeddingGenerator 加载（RagOptions.EmbeddingModelPath 可配置）。 -->
   <ItemGroup>
-    <Content Include="Rag\Models\bge-small-zh-v1.5\**" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Link 去掉 Rag\ 前缀：模型输出到 Models\bge-small-zh-v1.5\（EmbeddingGenerator 加载路径 = AppContext.BaseDirectory/Models/...） -->
+    <Content Include="Rag\Models\bge-small-zh-v1.5\**" CopyToOutputDirectory="PreserveNewest" Link="Models\bge-small-zh-v1.5\%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 
   <!-- 覆盖传递依赖以修复 NU1903 安全漏洞 -->

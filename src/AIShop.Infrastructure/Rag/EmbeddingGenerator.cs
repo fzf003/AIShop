@@ -46,10 +46,10 @@ public sealed class EmbeddingGenerator : IEmbeddingGenerator<string, Embedding<f
     /// 加载 ONNX 模型 + vocab 词表。模型缺失 / 加载失败在此抛明确异常（含下载指引），
     /// 上层（RagIndexer 索引构建失败 → 检索降级关键词路，AI-3）据此降级，不崩溃。
     /// </summary>
-    /// <param name="modelPath">model.onnx 完整路径（Task 9 AddRag 用 Path.Combine(AppContext.BaseDirectory, RagOptions.EmbeddingModelPath)）。</param>
-    /// <param name="vocabPath">vocab.txt 完整路径（RagOptions.EmbeddingVocabPath）。</param>
-    /// <param name="dimensions">期望输出维度，默认 512（与 [VectorStoreVector(512)] 保持一致，RagOptions.EmbeddingDimensions）。</param>
-    public EmbeddingGenerator(string modelPath, string vocabPath, int dimensions = RagOptions.EmbeddingDimensions)
+    /// <param name="modelPath">model.onnx 完整路径。</param>
+    /// <param name="vocabPath">vocab.txt 完整路径。</param>
+    /// <param name="dimensions">期望输出维度，默认 512（bge-small-zh-v1.5 输出维度，与 [VectorStoreVector(512)] 一致）。</param>
+    public EmbeddingGenerator(string modelPath, string vocabPath, int dimensions = 512)
     {
         if (!File.Exists(modelPath))
         {
@@ -83,7 +83,7 @@ public sealed class EmbeddingGenerator : IEmbeddingGenerator<string, Embedding<f
         var hiddenDim = _session.OutputMetadata[_outputName].Dimensions[2];
         if (hiddenDim != _dimensions)
         {
-            throw new InvalidOperationException($"模型输出维度 {hiddenDim} 与配置 {_dimensions} 不符（bge-small-zh-v1.5 应为 {RagOptions.EmbeddingDimensions}）。");
+            throw new InvalidOperationException($"模型输出维度 {hiddenDim} 与配置 {_dimensions} 不符（bge-small-zh-v1.5 应为 512）。");
         }
 
         // BertOptions 与 bge 训练配置对齐（D-d）：IndividuallyTokenizeCjk 对应 tokenize_chinese_chars=true

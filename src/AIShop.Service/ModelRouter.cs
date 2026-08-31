@@ -125,14 +125,10 @@ public class ModelRouter
             var cartTools = _sp.GetRequiredService<CartToolProvider>();
             var isOpenAI = ShoppingAssistantAgent.IsOpenAIModel(cfg.Model);
             var telemetryOptions = _sp.GetRequiredService<AgentTelemetryOptions>();
-            // 知识检索服务（IRagSearchService，AddRag 注册）可选注入：未注册（RAG 未启用）时为 null，
-            // ShoppingAssistantAgent 不挂载 TextSearchProvider（search_knowledge 工具随之缺席），保持既有行为
-            var ragSearchService = _sp.GetService<IRagSearchService>();
             var agent = new ShoppingAssistantAgent(
                 chatClient, chatHistoryStore, compaction, ProductKeywordMap.Entries, cartTools, isOpenAI, telemetryOptions,
                 _sp.GetRequiredService<IPreferenceQueue>(),
-                _sp.GetRequiredService<IServiceScopeFactory>(),
-                ragSearchService);
+                _sp.GetRequiredService<IServiceScopeFactory>());
             Logger.Information("GetAgent.Lazy: 创建成功 model={ModelName}", key);
             return agent;
         })).Value;

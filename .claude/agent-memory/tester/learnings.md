@@ -130,3 +130,14 @@
 - **QA 修复 3 项（本变更实现外，QA 全程补的）**：① `DeepSeekDelegatingChatClient` 新增 override `GetStreamingResponseAsync`（发前清洗 RemoveEmptyToolCalls/FillMissingToolResults/MergeConsecutiveSameRole，修流式孤儿 FCC → DeepSeek 400 降级丢 token）；② done 事件改 `JsonSerializer.Serialize(chatReply, JsonSerializerOptions.Web)`（camelCase，修前端 data.response 读取失败）；③ 推荐面板字段随 #2 解决。
 - **计数口径**：solution 级 `dotnet test` tail 只显示最后一个项目汇总，303 需三项目相加；本次 tester 只隔离重跑 RunChatStreamAsyncTests（约 2s），未跑全量（协调者已手动全量验证 303）。
 - **无 flaky 记录**：ServiceDefaultsDebugTests 本次未跑（未在全量中复现），延续既有判断。
+
+## tester 会话：rag-feature 出 test-report（2026-08-30）
+
+- **当前全量测试数 393/393**（AIShop.Service.Tests 178 + AIShop.Api.Tests 204 + AIShop.McpServer.Tests 11，全绿 0 失败 0 跳过）；分项目权威计数 `dotnet test tests/AIShop.Service.Tests --no-build`（178）/ `tests/AIShop.Api.Tests --no-build`（204，solution 级 run 尾行「测试总数: 204」只是 Api 项目）/ `tests/AIShop.McpServer.Tests --no-build`（11）。
+- **RAG 专属测试 48 例**（Service.Tests 内 11 个测试类）：RagSemanticRecallTests 3 + RagSearchServiceTests 7 + RagIndexerTests 9 + RagKnowledgeToolTests 4 + RagAgentToolMountingTests 2 + RagDependencyInjectionTests 3 + EmbeddingGeneratorTests 4 + RrfFusionTests 4 + ProductDocumentTests 3 + ProductDocumentMappingTests 4 + CartToolProviderSearchTests 5；隔离 filter `FullyQualifiedName~Rag|~RrfFusion|~ProductDocument|~EmbeddingGenerator|~CartToolProviderSearch` 实测 48/48。
+- **真实 ONNX 模型测试非 skip**：本机已下载 bge model.onnx + vocab.txt（源码 `src/AIShop.Infrastructure/Rag/Models/bge-small-zh-v1.5/` 与测试输出目录均存在），Service.Tests 0 跳过证明 EmbeddingModelFact 测试真实执行（cos 语义、512 维断言）。模型缺失时 EmbeddingModelFactAttribute 在发现阶段设 Skip 整类跳过（R13 机制已由 EmbeddingModelFactAttributeTests 验证）。
+- **已知 flaky ServiceDefaultsDebugTests 本次未复现**：全量 393 无失败，延续「T0 预置 flaky、与本变更零耦合」判断。
+- **构建命令确认**：`dotnet build -warnaserror`（git bash 单横线）增量 ~12s，0 错误 0 警告（11 项目）。
+- **solution 级 `dotnet test | grep | tail` 坑**：grep 过滤 + tail 只保留末尾项目汇总，三项目计数需分别跑 --no-build 或去掉 tail 抓全。本次最初 `| grep -E "测试总数|..." | tail -60` 只拿到 Api 204，Service/McpServer 汇总被截断。
+- **tester 无 Write/Edit 工具写 test-report.md**：用三块 `cat > / >>` heredoc（quoted 分隔符，各 44/26/36 行 <100）写 openspec 路径成功，写后 Read 回读 106 行无损坏；tasks.md 全勾选，check_gateway 放行。
+- **Fix A/Fix B commit 已核实**：013d176（RagSearchHits.cs Score 注释 + RagSearchService.SearchKnowledgeAsync 非 OCE catch 空结果降级 + 新增 SearchKnowledgeAsync_WhenEmbeddingFails_ReturnsEmpty_NoException）、786dfde（RagIndexer.RebuildAsync 开头 EnsureCollectionDeletedAsync+EnsureCollectionExistsAsync 清空重建 + 两个测试类 EnsureCreated→Migrate + 新增 DirtyRebuild_AfterBusinessDelete_RemovesGhostRecord）。

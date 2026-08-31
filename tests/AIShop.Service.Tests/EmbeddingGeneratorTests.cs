@@ -18,7 +18,7 @@ public sealed class EmbeddingGeneratorTests
         var result = await generator.GenerateAsync(["咖啡机"]);
 
         var vector = Assert.Single(result).Vector;
-        Assert.Equal(RagOptions.EmbeddingDimensions, vector.Length);
+        Assert.Equal(512, vector.Length);
     }
 
     [EmbeddingModelFact]
@@ -32,7 +32,7 @@ public sealed class EmbeddingGeneratorTests
         Assert.Equal(3, result.Count);
         foreach (var embedding in result)
         {
-            Assert.Equal(RagOptions.EmbeddingDimensions, embedding.Vector.Length);
+            Assert.Equal(512, embedding.Vector.Length);
             // L2 normalize 后向量元素全部有限（无 NaN / Infinity）——CLS pooling + 归一化正确性的基本不变量
             Assert.All(embedding.Vector.ToArray(), value => Assert.False(float.IsNaN(value) || float.IsInfinity(value)));
         }
@@ -71,8 +71,8 @@ public sealed class EmbeddingGeneratorTests
 
     private static EmbeddingGenerator CreateGenerator() =>
         new(
-            Path.Combine(AppContext.BaseDirectory, RagOptions.EmbeddingModelPath),
-            Path.Combine(AppContext.BaseDirectory, RagOptions.EmbeddingVocabPath));
+            Path.Combine(AppContext.BaseDirectory, "Models/bge-small-zh-v1.5/model.onnx"),
+            Path.Combine(AppContext.BaseDirectory, "Models/bge-small-zh-v1.5/vocab.txt"));
 
     private static float CosineSimilarity(ReadOnlyMemory<float> a, ReadOnlyMemory<float> b)
     {
@@ -99,8 +99,8 @@ public sealed class EmbeddingModelFactAttribute : FactAttribute
 {
     public EmbeddingModelFactAttribute()
     {
-        var modelPath = Path.Combine(AppContext.BaseDirectory, RagOptions.EmbeddingModelPath);
-        var vocabPath = Path.Combine(AppContext.BaseDirectory, RagOptions.EmbeddingVocabPath);
+        var modelPath = Path.Combine(AppContext.BaseDirectory, "Models/bge-small-zh-v1.5/model.onnx");
+        var vocabPath = Path.Combine(AppContext.BaseDirectory, "Models/bge-small-zh-v1.5/vocab.txt");
         if (!File.Exists(modelPath) || !File.Exists(vocabPath))
         {
             Skip = "bge-small-zh-v1.5 ONNX 模型文件缺失，跳过真实模型测试（R13）。" +

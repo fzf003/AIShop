@@ -10,15 +10,14 @@ namespace AIShop.Service.Tools;
 /// 提供购物车操作工具函数，供 AI Agent 调用。
 /// 用户名由调用方经 <see cref="ICurrentUserAccessor"/> 注入（按执行流传递），LLM 不需要关心。
 /// </summary>
-/// <param name="ragSearchService">
-/// 混合检索服务（Task 10 引入）。可选参数而非必填：RAG 底座由 AddRag 注册（Task 9），
-/// 在 AddRag 落地前 / 未启用 RAG 的宿主中该依赖缺失——此时回退纯关键词匹配，保持既有行为不破坏
-/// （AI-3 降级语义；MS.DI 对带默认值的可选参数按 null 注入）。
+/// <param name="semanticSearch">
+/// 商品语义搜索服务（可选注入）。未注册/检索失败时 search_product 返回无结果提示，不崩溃
+/// （语义搜索由 AddRag 注册；未启用 RAG 的宿主该依赖为 null，行为退化为提示，不破坏既有流程）。
 /// </param>
 public sealed class CartToolProvider(
     IServiceScopeFactory scopeFactory,
     ICurrentUserAccessor currentUserAccessor,
-    IRagSearchService? ragSearchService = null)
+    IProductSemanticSearch? semanticSearch = null)
 {
     /// <summary>在 Agent 运行前注入当前登录用户名（实例方法，内部走 ICurrentUserAccessor）。</summary>
     public void SetCurrentUser(string username) => currentUserAccessor.SetCurrentUser(username);
@@ -26,51 +25,31 @@ public sealed class CartToolProvider(
     private string? GetCurrentUser() => currentUserAccessor.CurrentUser;
 
     /// <summary>
-    /// 按关键词搜索商品，供 AI Agent 调用。
-    /// Task 10 起升级为混合检索：委托 <see cref="IRagSearchService.SearchProductsAsync"/>（关键词命中 ∪ 向量召回，RRF 融合，AR-1）。
-    /// 工具签名与输出格式保持兼容（非 breaking，§9）：`#Id Name — ¥Price`、无结果 `未找到包含「{keyword}」的商品`。
+    /// 按语义搜索商品，供 AI Agent 调用。
+    /// 纯语义检索（bge 向量，DB 端 KNN）：输入自然语言即可召回语义相关商品。
+    /// 工具签名与输出格式保持兼容：`#Id Name — ¥Price`、无结果 `未找到包含「{keyword}」的商品`。
     /// </summary>
     [Description("按名称搜索商品，返回商品名称、ID 和价格。当用户提到商品名时先调用此工具搜索。")]
     public async Task<string> SearchProductAsync(
         [Description("商品名称关键词，支持模糊匹配，如「咖啡」「跑鞋」")] string keyword)
     {
-        if (ragSearchService is not null)
+        if (semanticSearch is not null)
         {
             try
             {
-                // 混合检索路径：Top-N 由 RagSearchService 按 RRF 融合得分降序返回（AI-2 确定性）
-                var hits = await ragSearchService.SearchProductsAsync(keyword);
+                var hits = await semanticSearch.SearchAsync(keyword);
                 return FormatHits(keyword, hits);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                // AI-3 降级：混合检索异常（模型缺失 / 索引未建 / 存储错误）→ 回退纯关键词路兜底，工具层不崩溃；
-                // OperationCanceledException 正常传播（调用方取消语义，与 RagSearchService 同约定）
-                Log.Warning(ex, "search_product 混合检索失败，降级为关键词路：{Keyword}", keyword);
+                // 语义检索异常（模型缺失 / 索引未建 / 存储错误）→ 返回无结果提示，工具层不崩溃；
+                // OperationCanceledException 正常传播（调用方取消语义）
+                Log.Warning(ex, "search_product 语义搜索失败：{Keyword}", keyword);
             }
         }
 
-        // 兜底路径：RAG 服务未注册（AddRag 未落地 / 宿主未启用 RAG）或检索失败 → 纯关键词匹配。
-        // 谓词与 RagSearchService.KeywordRoute 保持一致（AR-3 回归不劣化），改动需两边同步。
-        return KeywordSearch(keyword);
-    }
-
-    /// <summary>纯关键词路兜底：Name.Contains || Tags.Any（与 RagSearchService.KeywordRoute 同谓词，AR-3）。</summary>
-    private string KeywordSearch(string keyword)
-    {
-        using var scope = scopeFactory.CreateScope();
-        var productRepo = scope.ServiceProvider.GetRequiredService<IProductRepository>();
-
-        var matches = productRepo.GetAll()
-            .Where(p => p.Name.Contains(keyword, StringComparison.OrdinalIgnoreCase)
-                     || p.Tags.Any(t => t.Contains(keyword, StringComparison.OrdinalIgnoreCase)))
-            .Select(p => $"#{p.Id} {p.Name} — ¥{p.Price}")
-            .ToList();
-
-        if (matches.Count == 0)
-            return $"未找到包含「{keyword}」的商品";
-
-        return $"找到 {matches.Count} 个商品：\n" + string.Join("\n", matches);
+        // 语义搜索未注册（宿主未启用 RAG）或失败 → 友好提示，不崩溃
+        return $"未找到包含「{keyword}」的商品";
     }
 
     /// <summary>把混合检索结果格式化为工具兼容输出（§9：`#Id Name — ¥Price`；空结果保持无结果文案）。</summary>
