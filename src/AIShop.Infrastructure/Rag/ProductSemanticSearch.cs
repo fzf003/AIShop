@@ -54,6 +54,9 @@ public sealed class ProductSemanticSearch(
         using var scope = scopeFactory.CreateScope();
         var products = scope.ServiceProvider.GetRequiredService<IProductRepository>().GetAll();
 
+        // 幂等建表（新库 / 清理后首次构建需创建 collection 的数据表 + vec 虚拟表）
+        await collection.EnsureCollectionExistsAsync(ct);
+
         // 从商品构建向量记录：Text = 拼接描述（embedding 输入），命中字段（ProductId/Name/Category/Price）冗余存储供检索展示
         var records = products.Select(p => new ProductDocumentRecord
         {
