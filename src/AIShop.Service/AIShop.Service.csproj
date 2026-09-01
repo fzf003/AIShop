@@ -4,14 +4,19 @@
   <ItemGroup>
     <ProjectReference Include="..\AIShop.Core\AIShop.Core.csproj" />
     <ProjectReference Include="..\AIShop.AgentTelemetry\AIShop.AgentTelemetry.csproj" />
+    <ProjectReference Include="..\AIShop.Infrastructure\AIShop.Infrastructure.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <!-- MAF 三包 1.18.0（T2 升级，D5）；DeepSeek.Agents.AI 1.0.4 保持不变（实测与 1.18 兼容） -->
+    <PackageReference Include="CommunityToolkit.VectorData.SqliteVec" />
     <PackageReference Include="DeepSeek.Agents.AI" />
+    <PackageReference Include="Mem0Sharp" />
+
     <PackageReference Include="Microsoft.Agents.AI" />
     <PackageReference Include="Microsoft.Agents.AI.Harness" />
     <PackageReference Include="Microsoft.Agents.AI.OpenAI" />
+
     <!-- P2 步骤 2：移除 Infrastructure 引用后 Serilog 不再传递，需显式声明（版本与 Infrastructure 对齐 4.3.0） -->
     <PackageReference Include="Serilog" />
   </ItemGroup>

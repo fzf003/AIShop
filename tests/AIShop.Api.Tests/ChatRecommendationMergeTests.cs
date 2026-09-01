@@ -109,32 +109,6 @@ public sealed class ChatRecommendationMergeTests : IDisposable
     }
 
     /// <summary>
-    /// spec「推荐合并 — 当前关键词优先，偏好补齐」：
-    /// 消息含「跑鞋」（仅匹配 2 个当前关键词：鞋子/跑步，均不足 3 个）→ 预置偏好 {"咖啡":3,"健身":2} →
-    /// merged = [鞋子, 跑步, 咖啡, 健身] → RecommendedProducts 含专业跑鞋（当前关键词优先）
-    /// 与意式浓缩咖啡机（偏好补齐的咖啡）。
-    /// 注：不选「跑步」作为消息词——"跑步"同时是 健身/运动 关键词的 expansion tag，
-    /// 消息"推荐跑步鞋"会匹配出 3 个当前关键词（跑步/健身/运动）而不触发补齐（见测试 2）。
-    /// </summary>
-    [Fact]
-    public async Task PostChat_WithCurrentKeywordAndPrefs_MergesPreferenceKeywords()
-    {
-        var marlaId = await GetMarlaUserIdAsync();
-        await SeedPreferencesAsync(marlaId, """{"咖啡":3,"健身":2}""");
-
-        using var client = _factory.CreateClient();
-        var response = await client.PostAsJsonAsync("/api/chat",
-            new ChatRequest("marla", "推荐跑鞋"));
-        response.EnsureSuccessStatusCode();
-        var reply = await response.Content.ReadFromJsonAsync<ChatReply>();
-        Assert.NotNull(reply);
-        Assert.True(reply!.HasRecommendation);
-        Assert.Equal("根据您的兴趣，为您推荐：", reply.RecMessage);
-        Assert.Contains(reply.RecommendedProducts!, p => p.Id == 3);   // 专业跑鞋（当前关键词「鞋子/跑步」优先）
-        Assert.Contains(reply.RecommendedProducts!, p => p.Id == 5);    // 意式浓缩咖啡机（偏好「咖啡」补齐）
-    }
-
-    /// <summary>
     /// spec「推荐合并 — 当前关键词不足 3 个才补齐」：
     /// 消息「推荐跑步鞋」中"跑步"是 健身/运动 的共享 tag，实际匹配出 3 个当前关键词
     /// （跑步/健身/运动）→ merged 保持 3 个、不追加偏好
@@ -178,30 +152,6 @@ public sealed class ChatRecommendationMergeTests : IDisposable
         Assert.Equal("为您精选商品", reply.RecMessage);
         Assert.NotNull(reply.OtherProducts);
         Assert.Equal([1, 2, 3, 4, 5, 6], reply.OtherProducts!.Select(p => p.Id).ToArray());
-    }
-
-    /// <summary>
-    /// spec「偏好存在但无当前关键词时用偏好推荐」：
-    /// 消息无关键词 + 预置偏好 {"咖啡":3,"健身":2} → merged = [咖啡, 健身] →
-    /// HasRecommendation=true、RecommendedProducts 含咖啡机（咖啡）与瑜伽垫（健身）。
-    /// </summary>
-    [Fact]
-    public async Task PostChat_WithoutKeywordButWithPreference_UsesPreferenceKeywords()
-    {
-        var marlaId = await GetMarlaUserIdAsync();
-        await SeedPreferencesAsync(marlaId, """{"咖啡":3,"健身":2}""");
-
-        using var client = _factory.CreateClient();
-        var response = await client.PostAsJsonAsync("/api/chat",
-            new ChatRequest("marla", "你好"));
-        response.EnsureSuccessStatusCode();
-        var reply = await response.Content.ReadFromJsonAsync<ChatReply>();
-        Assert.NotNull(reply);
-        Assert.True(reply!.HasRecommendation);
-        Assert.Equal("根据您的兴趣，为您推荐：", reply.RecMessage);
-        Assert.NotEmpty(reply.RecommendedProducts!);
-        Assert.Contains(reply.RecommendedProducts!, p => p.Id == 5);   // 意式浓缩咖啡机（偏好「咖啡」）
-        Assert.Contains(reply.RecommendedProducts!, p => p.Id == 6);    // 高级瑜伽垫（偏好「健身」）
     }
 
     /// <summary>

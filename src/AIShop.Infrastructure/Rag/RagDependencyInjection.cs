@@ -21,7 +21,7 @@ public static class RagDependencyInjection
     /// 注册 RAG 能力：bge embedding（Singleton）、SqliteVec 向量存储 + 商品集合、商品语义搜索。
     /// 换向量库（SqliteVec→PgVector/Qdrant 等）只需改 <see cref="VectorConnectionString"/> 与 provider 注册，业务层零改动。
     /// </summary>
-    public static IServiceCollection AddRag(this IServiceCollection services)
+    public static IServiceCollection AddRagService(this IServiceCollection services)
     {
         // 本地 bge embedding（512 维，中文）：模型文件由 csproj Content 复制到输出目录（gitignore 不入库）
         services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(_ =>

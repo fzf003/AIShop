@@ -1,8 +1,8 @@
 using AIShop.AgentTelemetry;
 using AIShop.Core.Interfaces;
-using AIShop.Core.StaticData;
 using AIShop.Service.Clients;
 using AIShop.Service.Tools;
+using Mem0Sharp;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -25,7 +25,7 @@ public class ModelRouter
     private readonly IReadOnlyDictionary<string, ModelConfig> _modelConfigs;
     private readonly string _activeModel;
     private readonly IServiceProvider _sp;
-    private readonly ConcurrentDictionary<string, Lazy<ShoppingAssistantAgent>> _agents = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, Lazy<IShoppingAssistantAgent>> _agents = new(StringComparer.OrdinalIgnoreCase);
     private readonly bool _enableDebugHandler;
 
     internal sealed record ModelConfig(string Endpoint, string Key, string Model, string Name);
@@ -115,7 +115,7 @@ public class ModelRouter
         if (!containsKey)
             throw new KeyNotFoundException($"模型 '{modelName}' 未注册");
 
-        return _agents.GetOrAdd(modelName, key => new Lazy<ShoppingAssistantAgent>(() =>
+        return _agents.GetOrAdd(modelName, key => new Lazy<IShoppingAssistantAgent>(() =>
         {
             var cfg = _modelConfigs[key];
             Logger.Information("GetAgent.Lazy: 开始创建 model={ModelName} endpoint={Endpoint}", key, cfg.Endpoint);
@@ -126,8 +126,9 @@ public class ModelRouter
             var telemetryOptions = _sp.GetRequiredService<AgentTelemetryOptions>();
             var agent = new ShoppingAssistantAgent(
                 chatClient, chatHistoryStore, compaction, cartTools, telemetryOptions,
-                _sp.GetRequiredService<IPreferenceQueue>(),
-                _sp.GetRequiredService<IServiceScopeFactory>());
+                scopeFactory: _sp.GetRequiredService<IServiceScopeFactory>(),
+                memoryService: _sp.GetService<IMemoryService>(),
+                currentUserAccessor: _sp.GetService<ICurrentUserAccessor>());
             Logger.Information("GetAgent.Lazy: 创建成功 model={ModelName}", key);
             return agent;
         })).Value;
@@ -135,6 +136,9 @@ public class ModelRouter
 
     /// <summary>获取当前激活模型的默认 Agent 实例。</summary>
     public virtual IShoppingAssistantAgent GetDefaultAgent() => GetAgent(_activeModel);
+
+    /// <summary>获取默认模型的 chatClient（供记忆服务等全局用途，与 Agent 同一个创建逻辑）。</summary>
+    public IChatClient GetDefaultChatClient() => CreateChatClient(_modelConfigs[_activeModel]);
 
     private IChatClient CreateChatClient(ModelConfig cfg)
     {

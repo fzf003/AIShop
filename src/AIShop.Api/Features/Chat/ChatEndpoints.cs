@@ -4,7 +4,6 @@ using AIShop.Core.Entities;
 using AIShop.Service;
 using AIShop.Core.Interfaces;
 using AIShop.Core.Services;
-using AIShop.Core.ValueObjects;
 using Microsoft.Extensions.Caching.Memory;
 using Serilog;
 using System.Text.Json;
@@ -73,7 +72,6 @@ public static class ChatEndpoints
             IProductCatalogService catalog,
             ModelRouter router,
             IMemoryCache cache,
-            IPreferenceRepository prefRepo,
             RecommendationService recommendationService,
             CancellationToken ct) =>
         {
@@ -91,10 +89,6 @@ public static class ChatEndpoints
             var sessionId = await sessions.GetOrCreateSessionIdAsync(user.Id, ct);
             var sid = Guid.Parse(sessionId);
 
-            // 会话重建回填：从 DB 加载历史偏好，按权重 Top-5 生成顿号连接文本注入 Agent 上下文
-            var prefs = await prefRepo.GetByUserIdAsync(user.Id, ct);
-            var preferencesText = string.Join("、", prefs?.TopKeywords(5) ?? []);
-
             // 1. Get agent and response (history loaded from SQLite by provider)
             var agentSw = Stopwatch.StartNew();
             AgentChatResult result;
@@ -103,7 +97,7 @@ public static class ChatEndpoints
                 var modelId = req.Model ?? router.ActiveModel;
                 var agent = router.GetAgent(modelId);
                 // R8：会话对象（第二元组元素）已不再被端点使用（agent_result_ 缓存已删），丢弃
-                (result, _) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, userId: user.Id, ct);
+                (result, _) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, null, user.Id, ct);
             }
             catch (KeyNotFoundException knf)
             {
@@ -132,7 +126,7 @@ public static class ChatEndpoints
                     // 重试一次：首次若用非默认模型则换到默认模型；已用默认模型则同模型再试
                     var retryModel = router.ActiveModel;
                     (result, _) = await router.GetAgent(retryModel).RunChatAsync(
-                        sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, userId: user.Id, ct);
+                        sid, req.Message?.Trim() ?? "", req.Username, null, user.Id, ct);
                 }
                 catch (Exception retryEx)
                 {
@@ -175,7 +169,7 @@ public static class ChatEndpoints
 
             // 3. 推荐计算（复用 BuildChatReply：关键词匹配 + 偏好合并 + SplitProducts + 缓存写入 + 偏好入队）
             var userMsg = req.Message ?? "";
-            var chatReply = BuildChatReply(result, userMsg, prefs, catalog, req.Username, cache, recommendationService);
+            var chatReply = BuildChatReply(result, userMsg, catalog, req.Username, cache, recommendationService);
 
             endpointSw.Stop();
             logger.Information(
@@ -196,7 +190,6 @@ public static class ChatEndpoints
             IProductCatalogService catalog,
             ModelRouter router,
             IMemoryCache cache,
-            IPreferenceRepository prefRepo,
             RecommendationService recommendationService,
             CancellationToken ct) =>
         {
@@ -219,9 +212,6 @@ public static class ChatEndpoints
             var sessionId = await sessions.GetOrCreateSessionIdAsync(user.Id, ct);
             var sid = Guid.Parse(sessionId);
 
-            var prefs = await prefRepo.GetByUserIdAsync(user.Id, ct);
-            var preferencesText = string.Join("、", prefs?.TopKeywords(5) ?? []);
-
             // 设置 SSE 响应头
             httpContext.Response.StatusCode = StatusCodes.Status200OK;
             httpContext.Response.ContentType = "text/event-stream";
@@ -239,7 +229,7 @@ public static class ChatEndpoints
                 try
                 {
                     var agent = router.GetAgent(modelId);
-                    streamChunks = agent.RunChatStreamAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, userId: user.Id, ct);
+                    streamChunks = agent.RunChatStreamAsync(sid, req.Message?.Trim() ?? "", req.Username, null, user.Id, ct);
                 }
                 catch (KeyNotFoundException knf)
                 {
@@ -261,7 +251,7 @@ public static class ChatEndpoints
                     try
                     {
                         var retryModel = router.ActiveModel;
-                        streamChunks = router.GetAgent(retryModel).RunChatStreamAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, userId: user.Id, ct);
+                        streamChunks = router.GetAgent(retryModel).RunChatStreamAsync(sid, req.Message?.Trim() ?? "", req.Username, null, user.Id, ct);
                     }
                     catch (Exception retryEx)
                     {
@@ -312,7 +302,7 @@ public static class ChatEndpoints
                     }
                     // 未发 token：维持降级到 RunChatAsync
                     var agent = router.GetAgent(modelId);
-                    var (result, _) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, userId: user.Id, ct);
+                    var (result, _) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, null, user.Id, ct);
                     finalResult = result;
                 }
 
@@ -328,13 +318,13 @@ public static class ChatEndpoints
                     }
                     // 未发 token：维持降级到 RunChatAsync
                     var agent = router.GetAgent(modelId);
-                    var (result, _) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, preferences: preferencesText, userId: user.Id, ct);
+                    var (result, _) = await agent.RunChatAsync(sid, req.Message?.Trim() ?? "", req.Username, null, user.Id, ct);
                     finalResult = result;
                 }
 
                 // 发送 done 事件（完整 ChatReply JSON）
                 var userMsg = req.Message ?? "";
-                var chatReply = BuildChatReply(finalResult, userMsg, prefs, catalog, req.Username, cache, recommendationService);
+                var chatReply = BuildChatReply(finalResult, userMsg, catalog, req.Username, cache, recommendationService);
                 // done 事件用 camelCase 序列化（JsonSerializerOptions.Web），与 token/error 事件及
                 // cart/products 等端点的 camelCase 契约一致——前端统一按 camelCase 读取。
                 // 此前裸 Serialize 输出 PascalCase（record 属性名），前端 data.Response 等读取失败（修复）。
@@ -351,7 +341,6 @@ public static class ChatEndpoints
             RecommendationRequest req,
             IUserRepository users,
             IProductCatalogService catalog,
-            IPreferenceRepository prefRepo,
             IMemoryCache cache,
             RecommendationService recommendationService,
             CancellationToken ct) =>
@@ -380,13 +369,8 @@ public static class ChatEndpoints
                 return Results.Ok(cached);
             }
 
-            // miss（新用户 / 缓存过期）→ 偏好兜底：偏好关键词白名单过滤 + 合并（无当前消息关键词）。
-            // 与 /chat 推荐分支同一套 FilterValidPreferenceKeywords / MergeKeywords / SplitProducts 口径。
-            var prefs = await prefRepo.GetByUserIdAsync(user.Id, ct);
-            var prefKeywords = FilterValidPreferenceKeywords(prefs?.TopKeywords(5), catalog);
-
-            // 无当前消息关键词 → 偏好兜底（推荐编排统一收敛到 RecommendationService，口径与 /chat 一致）
-            var recommendation = recommendationService.Build([], prefKeywords);
+            // miss（新用户 / 缓存过期）→ 无当前消息关键词 → 精选兜底（旧偏好兜底已随 UserPreferences 机制移除）
+            var recommendation = recommendationService.Build([], []);
 
             var recDtos = recommendation.Recommended.Select(ToDto).ToList();
             var otherDtos = recommendation.Other.Select(ToDto).ToList();
@@ -440,26 +424,11 @@ public static class ChatEndpoints
     private static string SanitizeReply(string? reply) => ReplySanitizer.Clean(reply);
 
     /// <summary>
-    /// 偏好关键词白名单过滤（P2-4）：偏好词来自 DB，可能含非法词/空白词。
-    /// 仅保留非空白、且命中商品关键词白名单（KeywordMap）或任一商品 Tag 的词，
-    /// 避免非法偏好词合并后 SplitProducts 返回空推荐却仍标记 HasRecommendation=true（空推荐 UX 退化）。
-    /// </summary>
-    private static string[] FilterValidPreferenceKeywords(string[]? keywords, IProductCatalogService catalog)
-    {
-        var productTags = catalog.All.SelectMany(p => p.Tags).ToHashSet(StringComparer.Ordinal);
-        return (keywords ?? [])
-            .Where(kw => !string.IsNullOrWhiteSpace(kw)
-                && (catalog.KeywordMap.ContainsKey(kw) || productTags.Contains(kw)))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-    }
-
-    /// <summary>
-    /// 构建 ChatReply（T21 提取复用）：关键词匹配 + 偏好合并 + 推荐结果 + 缓存写入 + 偏好入队。
+    /// 构建 ChatReply（T21 提取复用）：关键词匹配 + 推荐结果 + 缓存写入。
     /// /api/chat 与 /api/chat/stream 共用此方法，保证推荐结果一致。
     /// </summary>
     private static ChatReply BuildChatReply(
-        AgentChatResult result, string userMsg, PreferenceProfile? prefs,
+        AgentChatResult result, string userMsg,
         IProductCatalogService catalog, string username,
         IMemoryCache cache, RecommendationService recommendationService)
     {
@@ -486,8 +455,7 @@ public static class ChatEndpoints
         // 不足 3 个时用偏好权重 Top-N 补齐到 ≤5，按序数忽略大小写去重。
         // 偏好词来自 DB，先经白名单过滤（P2-4），避免非法/空白偏好词合并后
         // SplitProducts 返回空推荐却仍标记 HasRecommendation=true。
-        var prefKeywords = FilterValidPreferenceKeywords(prefs?.TopKeywords(5), catalog);
-        var recommendation = recommendationService.Build(validKeywords, prefKeywords);
+        var recommendation = recommendationService.Build(validKeywords, Array.Empty<string>());
 
         var recDtos = recommendation.Recommended.Select(ToDto).ToList();
         var otherDtos = recommendation.Other.Select(ToDto).ToList();

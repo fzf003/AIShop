@@ -4,6 +4,7 @@ using AIShop.Core.Interfaces;
 using AIShop.Core.Services;
 using AIShop.Service.Providers;
 using AIShop.Service.Tools;
+using Mem0Sharp;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Compaction;
 using Microsoft.Extensions.AI;
@@ -103,7 +104,9 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         CartToolProvider cartTools,
         AgentTelemetryOptions telemetryOptions,
         IPreferenceQueue? preferenceQueue = null,
-        IServiceScopeFactory? scopeFactory = null)
+        IServiceScopeFactory? scopeFactory = null,
+        IMemoryService? memoryService = null,
+        ICurrentUserAccessor? currentUserAccessor = null)
     {
         _cartTools = cartTools;
         var instructions = BuildInstructions();
@@ -134,13 +137,19 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             });
 
         // 基于模型上下文窗口自动计算阈值
-        /* var compactionoption = new ContextWindowCompactionStrategy(
+        var compactionoption = new ContextWindowCompactionStrategy(
              maxContextWindowTokens: 128000,  // 你的模型上下文窗口
              maxOutputTokens: 16384,          // 模型最大输出
              toolEvictionThreshold: 0.5,      // 50% 时裁剪旧工具结果
              truncationThreshold: 0.8);       // 80% 时截断最旧消息
-         //new CompactionProvider(compactionoption)
-        */
+
+        // 上下文注入链：Mem0 记忆 Provider（重构替代 PreferenceMemoryProvider）+ 上下文压缩
+        // 记忆服务未注入（IMemoryService 缺）时不挂记忆 Provider，保持既有行为
+        var contextProviders = new List<AIContextProvider>();
+        if (memoryService is not null && currentUserAccessor is not null)
+            contextProviders.Add(new MemoryContextProvider(memoryService, currentUserAccessor));
+        contextProviders.Add(new CompactionProvider(compactionoption));
+
         var options = new HarnessAgentOptions
         {
             Name = "ShoppingAssistant",
@@ -161,9 +170,8 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             DisableAgentModeProvider = true,
             DisableApprovalNotRequiredFunctionBypassing = false,
 
-            // 上下文注入 Provider 链：仅 PreferenceMemoryProvider（既有用户偏好）。
-            // RAG 能力经 search_product 工具暴露（纯语义检索），不向 Agent 注入静态知识/检索上下文
-            AIContextProviders = [new PreferenceMemoryProvider(scopeFactory, preferenceQueue)]
+            // 上下文注入 Provider 链：MemoryContextProvider（Mem0 记忆）+ CompactionProvider
+            AIContextProviders = contextProviders
         };
 
        

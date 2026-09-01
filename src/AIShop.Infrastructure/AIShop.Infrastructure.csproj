@@ -22,6 +22,9 @@
     <PackageReference Include="Microsoft.ML.OnnxRuntime" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" />
     <PackageReference Include="Microsoft.ML.Tokenizers" />
+    <PackageReference Include="Mem0Sharp" />
+
+    <PackageReference Include="Microsoft.Agents.AI" />
   </ItemGroup>
 
   <!-- bge-small-zh-v1.5 ONNX 模型文件（R4：~95MB，gitignore 不提交 git，首次运行前从 hf-mirror 下载）：

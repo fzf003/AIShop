@@ -36,13 +36,8 @@ public static class DependencyInjection
         services.AddSingleton<IChatHistoryStore, ChatHistoryStore>();
         services.AddSingleton<IChatCompactionPolicy, RoundBasedCompactionPolicy>();
 
-        // 偏好持久化（T15，design 4.2/4.4 修正）：PreferenceWriteHostedService 构造函数注入的是
-        // 具体 PreferenceQueue（IPreferenceQueue 无读端，worker 需要读 Channel），故需同时注册
-        // 具体类型与接口映射，两者共享同一单例实例；AddHostedService 注册后台 worker 启动消费队列。
-        services.AddScoped<IPreferenceRepository, PreferenceRepository>();
-        services.AddSingleton<PreferenceQueue>(PreferenceQueue.Create());
-        services.AddSingleton<IPreferenceQueue>(sp => sp.GetRequiredService<PreferenceQueue>());
-        services.AddHostedService<PreferenceWriteHostedService>();
+        // 旧偏好机制（UserPreferences 表 + PreferenceQueue + PreferenceWriteHostedService）已被
+        // Mem0 记忆服务（AddMemoryService）取代，2026-09-02 从 DI 拆除；实现文件保留，仅不再注册。
 
         return services;
     }

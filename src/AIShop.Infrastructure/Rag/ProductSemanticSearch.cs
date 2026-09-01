@@ -23,7 +23,14 @@ public sealed class ProductSemanticSearch(
     public async Task<IReadOnlyList<ProductSearchHit>> SearchAsync(
         string query, string? domain = null, int top = 5, CancellationToken ct = default)
     {
+        var hits = new List<ProductSearchHit>(top);
+
         await EnsureIndexedAsync(ct);
+
+        if(string.IsNullOrWhiteSpace(query))
+        {
+            return hits;
+        }
 
         // ① 查询文本 → 向量（bge-small-zh ONNX，512 维）
         var embedding = (await embeddingGenerator.GenerateAsync([query], null, ct))[0];
@@ -34,7 +41,7 @@ public sealed class ProductSemanticSearch(
             options.Filter = r => r.Domain == domain;
 
         // ③ 向量库 KNN 检索：SqliteVec vec0 在 DB 端算相似度，只返回 top 条命中，不拉全量
-        var hits = new List<ProductSearchHit>(top);
+       
         await foreach (var result in collection.SearchAsync(embedding.Vector, top, options, ct))
         {
             var record = result.Record;

@@ -3,6 +3,7 @@ using AIShop.Core.Interfaces;
 using AIShop.Core.StaticData;
 using AIShop.Infrastructure;
 using AIShop.Infrastructure.Data;
+using AIShop.Infrastructure.MemoryService;
 using AIShop.Api.Features.Cart;
 using AIShop.Api.Features.Chat;
 using AIShop.Api.Middleware;
@@ -44,13 +45,19 @@ try
     builder.Services.AddSwaggerGen();
     builder.Services.AddInfrastructure();
 
+    // Mem0 记忆服务（重构 PreferenceMemoryProvider 的记忆底座，SqliteMemoryStore）
+    builder.Services.AddMemoryService();
+
     // RAG 底座注册（design §5.6，Task 11）：向量存储/embedding/检索/索引 + 启动预构建。
     // 放在 AddInfrastructure 之后（商品语义搜索供 search_product 使用），向量库独立 aishop.rag.db
-    builder.Services.AddRag();
+    builder.Services.AddRagService();
 
     // Register Agent definitions (AIShop.Service/)
     builder.Services.AddSingleton<CartToolProvider>();
     builder.Services.AddSingleton<ModelRouter>();
+
+    // 全局默认 chatClient（Mem0 记忆服务 LlmMemoryExtractor 用，与 Agent 同一创建逻辑）
+    builder.Services.AddSingleton<IChatClient>(sp => sp.GetRequiredService<ModelRouter>().GetDefaultChatClient());
 
     // Agent 遥测：绑定 "AgentTelemetry" 配置节，注册 AgentTelemetryOptions 单例
     // （默认 "Level": "Metadata" 生产安全；排查时改 MetadataAndContent 即可见请求/回复内容，无需重编译）
@@ -117,6 +124,16 @@ try
         catch (Exception ex)
         {
             Log.Warning(ex, "RAG 索引预热失败，首次检索将懒构建兜底");
+        }
+
+        // Mem0 记忆库初始化（建 memories / memory_history 表）
+        try
+        {
+            await scope.ServiceProvider.GetRequiredService<SqliteMemoryStore>().InitializeAsync();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "记忆库初始化失败");
         }
     }
 
