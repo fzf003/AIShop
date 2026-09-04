@@ -34,7 +34,7 @@ public sealed class CartToolProvider(
     [Description("按名称搜索商品，返回商品名称、ID、价格和相关度。当用户提到商品名时先调用此工具搜索。")]
     public async Task<string> SearchProductAsync(
         [Description("商品关键词，如「咖啡」「跑鞋」")] string keyword,
-        [Description("可选：用户明确说的商品类别（厨房用品/健身/数码/家居/服饰等），未明确可省略")] string? category = null)
+        [Description("可选：用户明确说的商品类别（厨房用品/健身/电子产品/家居/服装/鞋类等，须为商品类别，未明确可省略")] string? category = null)
     {
         if (semanticSearch is not null)
         {
@@ -236,7 +236,7 @@ public sealed class CartToolProvider(
             AIFunctionFactory.Create(
                 (Func<string, string?, Task<string>>)SearchProductAsync,
                 "search_product",
-                "搜索商品。keyword=用户要的商品关键词（如咖啡机、耳机）；category=可选商品类别（厨房用品/健身等，"
+                "搜索商品。keyword=用户要的商品关键词（如咖啡机、耳机）；category=可选商品类别（厨房用品/健身/电子产品等，须为真实类别），"
                 + "用户明确说类型时填）。用户明确指定商品类型/类别时必须优先返回该类商品，不得用不相关商品充数；"
                 + "未找到足够相关商品时如实告知，不要硬推。"),
         ];

@@ -22,6 +22,10 @@ public sealed class MemoryContextProvider(
     private readonly IMemoryService _memory = memory;
     private readonly ICurrentUserAccessor _currentUser = currentUser;
 
+    /// <summary>已触发提取的消息 key（"userId|content"）：per-service-call 下同一 user 消息会在工具多轮中
+    /// 被 Store 多次调用，按内容去重保证只提取一次（避免 N×LLM 提取的重复成本与延迟）。</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _extractedKeys = new();
+
     /// <inheritdoc />
     protected override async ValueTask<AIContext> ProvideAIContextAsync(InvokingContext context, CancellationToken cancellationToken = default)
     {
@@ -60,17 +64,19 @@ public sealed class MemoryContextProvider(
         if (userId is null)
             return ValueTask.CompletedTask;
 
-        // 只取用户消息存记忆（偏好从用户意图提取）；物化避免惰性枚举在后台执行时依赖已释放上下文
-        var messages = (context.RequestMessages ?? [])
+        // 只取用户消息存记忆（偏好从用户意图提取）；物化避免惰性枚举在后台执行时依赖已释放上下文。
+        // 去重：同一用户同一消息在 per-service-call 的工具多轮中会被 Store 多次，只提取一次（首次）。
+        var newMessages = (context.RequestMessages ?? [])
             .Where(m => m.Role == ChatRole.User && !string.IsNullOrWhiteSpace(m.Text))
             .Select(m => new Message("user", m.Text))
+            .Where(m => _extractedKeys.TryAdd($"{userId}|{m.Content}", 0))
             .ToList();
 
-        if (messages.Count > 0)
+        if (newMessages.Count > 0)
         {
             // 记忆提取（Infer=true 触发 LlmMemoryExtractor 调 LLM，慢）放后台异步执行，不阻塞对话响应。
             // MemoryService 为 DI 单例（不依赖请求 scope），后台任务安全；异常在此捕获避免 unobserved exception。
-            _ = PersistMemoryAsync(messages, userId, context.Agent.Id);
+            _ = PersistMemoryAsync(newMessages, userId, context.Agent.Id);
         }
         return ValueTask.CompletedTask;
     }

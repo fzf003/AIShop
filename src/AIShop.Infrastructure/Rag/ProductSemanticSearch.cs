@@ -38,9 +38,16 @@ public sealed class ProductSemanticSearch(
         // ① 查询文本 → 向量（bge-small-zh ONNX，512 维）
         var embedding = (await embeddingGenerator.GenerateAsync([query], null, ct))[0];
 
-        // ② domain 过滤（扩展缝）：非空时仅检索该领域记录；当前单 collection 全为 product，传 "product" 等价不过滤
+        // ② 维度过滤：category（商品类别，精确匹配，如"厨房用品"）限定子集；domain（扩展缝）当前全为 product 等价不过滤。
+        // 组合用简单等式（SqliteVec Filter 翻译为 SQL WHERE，实测支持）
         var options = new VectorSearchOptions<ProductDocumentRecord>();
-        if (!string.IsNullOrWhiteSpace(domain))
+        var hasDomain = !string.IsNullOrWhiteSpace(domain);
+        var hasCategory = !string.IsNullOrWhiteSpace(category);
+        if (hasCategory)
+            options.Filter = hasDomain
+                ? r => r.Domain == domain && r.Category == category
+                : r => r.Category == category;
+        else if (hasDomain)
             options.Filter = r => r.Domain == domain;
 
         // ③ 向量库 KNN 检索：SqliteVec vec0 在 DB 端算相似度，只返回 top 条命中，不拉全量
