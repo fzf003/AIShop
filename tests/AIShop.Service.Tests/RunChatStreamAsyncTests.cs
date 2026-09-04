@@ -18,7 +18,7 @@ namespace AIShop.Service.Tests;
 /// <summary>
 /// T11 — RunChatStreamAsync 增量 chunk 顺序 + complete chunk 携带 FullResult（spec Requirement 5）。
 /// T12 — 跨 chunk 商品 ID 清洗（spec Requirement 5「跨 chunk 商品 ID 清洗」Scenario）。
-/// T13 — 会话创建失败降级到 RunChatAsync（spec Requirement 5「会话创建失败降级到 RunChatAsync」Scenario）。
+/// T13 — 会话创建失败 → 原生流式兜底（不降级 RunChatAsync 伪流式，spec Requirement 5 场景）。
 /// 验证链路：
 /// 1. 增量文本边收边 yield：mock IChatClient.GetStreamingResponseAsync 返回分块文本更新，用 TCS 门控
 ///    后续分块（首块立即、剩余块待释放）——若"收集后批量 yield"回归，首个 MoveNextAsync 会因等不到
@@ -219,38 +219,39 @@ public sealed class RunChatStreamAsyncTests : IDisposable
     }
 
     /// <summary>
-    /// 会话创建失败降级到 RunChatAsync（spec Requirement 5「会话创建失败降级到 RunChatAsync」Scenario）：
-    /// 经 T13 测试缝包装真实 agent，使首次 _agent.CreateSessionAsync 抛异常（MAF CreateSessionAsync 纯内存
-    /// 创建 ChatClientAgentSession，不触碰 DB/IChatClient，候选注入点①/②均不可行）。
+    /// 会话创建失败 → 重试后走主路径原生流式（不再降级 RunChatAsync 伪流式）：
+    /// 经 T13 测试缝包装真实 agent，使首次 _agent.CreateSessionAsync 抛异常
+    /// （GetOrCreateSessionAsync 失败 → session null）→ fallback 重试 GetOrCreateSessionAsync（第二次成功）→
+    /// 落入主路径原生流式。重试仍失败则异常传播给端点 IsRetryableAgentFailure 兜底。
     /// 断言：
-    /// 1. RunChatStreamAsync 降级调用 RunChatAsync 并 yield 其回复文本 + IsComplete=true 的 chunk；
-    /// 2. 不向调用方抛异常（降级路径正常结束）；
-    /// 3. 间接证据：非流式 GetResponseAsync 被调用（RunChatAsync 走 RunAsync→GetResponseAsync）、
-    ///    流式 GetStreamingResponseAsync 未被调用（会话创建失败后未进入 RunStreamingAsync 流式路径）。
+    /// 1. 增量文本 chunk（清洗后）+ IsComplete=true 携带完整结果（主路径原生流式）；
+    /// 2. 不向调用方抛异常（重试成功后正常流式结束）；
+    /// 3. 间接证据：走原生流式 GetStreamingResponseAsync（不再降级 RunChatAsync / 不再走 GetResponseAsync）。
     /// </summary>
     [Fact]
-    public async Task RunChatStreamAsync_FallsBackToRunChatAsyncWhenSessionCreationFails()
+    public async Task RunChatStreamAsync_FallsBackToNativeStreamingWhenSessionCreationFails()
     {
         var mockClient = Substitute.For<Meai.IChatClient>();
-        // 正常路径不调用 GetStreamingResponseAsync；配置默认回复以防 FICC 兜底 + 供降级路径返回回复文本
-        mockClient.GetResponseAsync(
-                Arg.Any<IEnumerable<Meai.ChatMessage>>(), Arg.Any<Meai.ChatOptions?>(), Arg.Any<CancellationToken>())
-            .Returns(new Meai.ChatResponse(new Meai.ChatMessage(Meai.ChatRole.Assistant, "降级回复")));
+        // fallback 原生流式：GetStreamingResponseAsync 提供增量文本「降级回复」
         mockClient.GetStreamingResponseAsync(
                 Arg.Any<IEnumerable<Meai.ChatMessage>>(), Arg.Any<Meai.ChatOptions?>(), Arg.Any<CancellationToken>())
-            .Returns(StreamingTextUpdatesAsync(Task.CompletedTask));
+            .Returns(StreamingTextUpdatesAsync(Task.CompletedTask, "降级回复"));
+        mockClient.GetResponseAsync(
+                Arg.Any<IEnumerable<Meai.ChatMessage>>(), Arg.Any<Meai.ChatOptions?>(), Arg.Any<CancellationToken>())
+            .Returns(new Meai.ChatResponse(new Meai.ChatMessage(Meai.ChatRole.Assistant, "不应走非流式降级")));
 
-        // 会话创建失败注入：包装真实 agent，首次 CreateSessionAsync 抛异常，
-        // 后续（降级 RunChatAsync 内部再创建会话）委托给 inner 真实 agent
+        // 会话创建失败注入：首次 CreateSessionAsync 抛异常 → RunChatStreamAsync 内 GetOrCreateSessionAsync 失败
+        // → session null → fallback 重试 GetOrCreateSessionAsync（FailFirstSessionCreationAgent 第二次成功）
+        // → 落入主路径原生流式
         var agent = CreateAgent(mockClient, inner => new FailFirstSessionCreationAgent(inner));
         var sessionId = Guid.NewGuid();
 
-        // 消费完整流——若降级路径向调用方抛异常，此处将因异常失败
+        // 消费完整流——若兜底路径向调用方抛异常，此处将因异常失败
         var chunks = new List<ChatStreamChunk>();
         await foreach (var chunk in agent.RunChatStreamAsync(sessionId, "推荐商品", "t13-user"))
             chunks.Add(chunk);
 
-        // 降级路径 yield 其回复文本 + IsComplete=true 的 chunk，且不向调用方抛异常（正常结束）
+        // 原生流式兜底正常结束：文本增量 chunk（清洗后）+ IsComplete=true 携带完整结果
         Assert.Equal(2, chunks.Count);
         Assert.False(chunks[0].IsComplete);
         Assert.Equal("降级回复", chunks[0].TextDelta);
@@ -258,11 +259,9 @@ public sealed class RunChatStreamAsyncTests : IDisposable
         Assert.NotNull(chunks[1].FullResult);
         Assert.Equal("降级回复", chunks[1].FullResult!.Reply);
 
-        // 间接证据：降级调用 RunChatAsync（非流式 GetResponseAsync 被调用）……
-        _ = mockClient.Received().GetResponseAsync(
-            Arg.Any<IEnumerable<Meai.ChatMessage>>(), Arg.Any<Meai.ChatOptions?>(), Arg.Any<CancellationToken>());
-        // ……且未进入流式路径（GetStreamingResponseAsync 未被调用）
-        mockClient.DidNotReceive().GetStreamingResponseAsync(
+        // 不再降级 RunChatAsync：文本增量来自原生流式 GetStreamingResponseAsync（chunks 断言已证），
+        // 未调用非流式 GetResponseAsync
+        await mockClient.DidNotReceive().GetResponseAsync(
             Arg.Any<IEnumerable<Meai.ChatMessage>>(), Arg.Any<Meai.ChatOptions?>(), Arg.Any<CancellationToken>());
     }
 

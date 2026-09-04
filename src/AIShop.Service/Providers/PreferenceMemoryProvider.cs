@@ -8,6 +8,7 @@ using Microsoft.Extensions.DependencyInjection;
 namespace AIShop.Service.Providers;
 
 /// <summary>
+/// (已废弃)
 /// 会话偏好记忆 Provider — 以 State 为主的用户偏好读写中枢。
 /// 偏好按用户隔离（State 承载 <see cref="State.UserId"/>），同一会话内以 State 为权威来源。
 ///

@@ -1,4 +1,5 @@
 using AIShop.Core.Interfaces;
+using AIShop.Infrastructure.MemoryService;
 using AIShop.Infrastructure.Rag;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;

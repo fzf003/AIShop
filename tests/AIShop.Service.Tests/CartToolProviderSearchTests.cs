@@ -28,9 +28,9 @@ public sealed class CartToolProviderSearchTests
     [Fact]
     public async Task ShouldFormatOutput_WhenSemanticSearchReturnsHits()
     {
-        // 语义检索命中 → 输出格式保持 `#Id Name — ¥Price`（工具契约兼容）
+        // 语义检索命中 → 输出带相关度分 + 类别（[0.90] #5 名称（类别）— ¥价格），LLM 可据此判断匹配强弱
         var semantic = Substitute.For<IProductSemanticSearch>();
-        semantic.SearchAsync("咖啡", Arg.Any<string?>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        semantic.SearchAsync("咖啡", Arg.Any<string?>(), Arg.Any<int>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult<IReadOnlyList<ProductSearchHit>>(
             [
                 new ProductSearchHit(5, "意式浓缩咖啡机", "厨房用品", 349.99m, 0.9),
@@ -39,11 +39,11 @@ public sealed class CartToolProviderSearchTests
 
         var result = await BuildProvider(semantic).SearchProductAsync("咖啡");
 
-        var expected = "找到 2 个商品：\n#5 意式浓缩咖啡机 — ¥349.99\n#3 专业跑鞋 — ¥129.99";
+        var expected = "找到 2 个商品：\n[0.90] #5 意式浓缩咖啡机（厨房用品） — ¥349.99\n[0.80] #3 专业跑鞋（鞋类） — ¥129.99";
         Assert.Equal(expected, result);
 
         // 委托确已到达 IProductSemanticSearch（domain 用默认 null）
-        await semantic.Received(1).SearchAsync("咖啡", Arg.Any<string?>(), Arg.Any<int>(), Arg.Any<CancellationToken>());
+        await semantic.Received(1).SearchAsync("咖啡", Arg.Any<string?>(), Arg.Any<int>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -51,7 +51,7 @@ public sealed class CartToolProviderSearchTests
     {
         // 无命中 → 返回 `未找到包含「{keyword}」的商品`（工具契约文案）
         var semantic = Substitute.For<IProductSemanticSearch>();
-        semantic.SearchAsync("咖啡机", Arg.Any<string?>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        semantic.SearchAsync("咖啡机", Arg.Any<string?>(), Arg.Any<int>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult<IReadOnlyList<ProductSearchHit>>([]));
 
         var result = await BuildProvider(semantic).SearchProductAsync("咖啡机");
@@ -64,7 +64,7 @@ public sealed class CartToolProviderSearchTests
     {
         // 语义检索异常（模型缺失 / 索引未建 / 存储错误）→ 不崩溃，返回无结果提示
         var semantic = Substitute.For<IProductSemanticSearch>();
-        semantic.SearchAsync("咖啡", Arg.Any<string?>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        semantic.SearchAsync("咖啡", Arg.Any<string?>(), Arg.Any<int>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromException<IReadOnlyList<ProductSearchHit>>(new InvalidOperationException("模拟语义检索失败")));
 
         var result = await BuildProvider(semantic).SearchProductAsync("咖啡");

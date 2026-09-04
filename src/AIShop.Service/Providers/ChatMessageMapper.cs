@@ -56,9 +56,12 @@ public static class ChatMessageMapper
             var msg = messages[i];
             var role = msg.Role.ToString() ?? "user";
 
-            // 提取纯文本内容
+            // 提取纯文本内容。
+            // 无分隔拼接：流式回复的每个 TextContent 是同一段回复的无缝 delta 片段
+            //（MAF ToChatResponse 合并 delta 时为每 delta 一个 TextContent），
+            // 用换行拼接会把连续回复拆成每段换行（DB 历史竖排）。原文换行在 delta 内部保留。
             var textContents = msg.Contents.OfType<TextContent>().Select(t => t.Text);
-            var rawText = string.Join(Environment.NewLine, textContents);
+            var rawText = string.Concat(textContents);
 
             string? toolCalls = null;
             string? toolCallId = null;

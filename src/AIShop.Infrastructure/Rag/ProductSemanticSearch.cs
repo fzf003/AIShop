@@ -19,9 +19,12 @@ public sealed class ProductSemanticSearch(
     private readonly SemaphoreSlim _buildLock = new(1, 1);
     private bool _indexed;
 
+    /// <summary>相似度门控下限（实测校准）：相关≈0.80、明显无关≈0.40 → 取 0.5，弱匹配不返回。</summary>
+    private const float MinSimilarity = 0.5f;
+
     /// <inheritdoc />
     public async Task<IReadOnlyList<ProductSearchHit>> SearchAsync(
-        string query, string? domain = null, int top = 5, CancellationToken ct = default)
+        string query, string? domain = null, int top = 5, string? category = null, CancellationToken ct = default)
     {
         var hits = new List<ProductSearchHit>(top);
 
@@ -45,8 +48,13 @@ public sealed class ProductSemanticSearch(
         await foreach (var result in collection.SearchAsync(embedding.Vector, top, options, ct))
         {
             var record = result.Record;
+            // SqliteVec cosine distance（score = 1 - 余弦相似度，越大越不相关，实测校准）→ 转相似度（0-1，高=相关）。
+            // 相似度低于阈值（弱匹配）不返回：避免 LLM 拿到无关商品硬推（校准：相关≈0.80 / 明显无关≈0.40）。
+            var similarity = 1f - (float)(result.Score ?? 0);
+            if (similarity < MinSimilarity)
+                continue;
             hits.Add(new ProductSearchHit(
-                record.ProductId, record.Name, record.Category, (decimal)record.Price, result.Score ?? 0));
+                record.ProductId, record.Name, record.Category, (decimal)record.Price, similarity));
         }
 
         return hits;

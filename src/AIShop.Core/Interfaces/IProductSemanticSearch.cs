@@ -13,8 +13,11 @@ public interface IProductSemanticSearch
     /// <param name="query">用户自然语言查询（如「适合送礼的咖啡机」）</param>
     /// <param name="domain">领域过滤（扩展缝）：非空时仅检索该领域记录（当前仅 "product"）；未来加订单/FAQ 传对应 domain</param>
     /// <param name="top">返回条数</param>
+    /// <param name="category">可选商品类别过滤（如「厨房用品」）：非空时向量 KNN 仅在该类别子集内排序，
+    /// 供用户明确指定类别时的精确召回，避免泛类排前</param>
     /// <param name="ct">取消令牌</param>
-    Task<IReadOnlyList<ProductSearchHit>> SearchAsync(string query, string? domain = null, int top = 5, CancellationToken ct = default);
+    Task<IReadOnlyList<ProductSearchHit>> SearchAsync(
+        string query, string? domain = null, int top = 5, string? category = null, CancellationToken ct = default);
 
     /// <summary>
     /// 确保索引已构建（幂等）。供启动预热调用（加载模型 + 建索引在启动时完成，

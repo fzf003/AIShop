@@ -36,7 +36,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 
     // R4/R5/R9：清洗 LLM 回复中的商品 ID 展示（#5、商品Id:4、商品ID为4 等）
     // 与 ChatEndpoints.cs 中的正则一致，用于流式增量清洗
-    
+
     /// <summary>
     /// 清洗 LLM 回复文本（R4/R5/R9）：去除商品 ID 展示，只清洗 Reply 字符串。
     /// </summary>
@@ -92,7 +92,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
         // R9：固定商品 ID 的唯一合法展示格式，配合服务端 SanitizeReply 精确删除，杜绝 ID 泄漏。
         lines.Add("3. 回复文本中不要出现商品编号。若确需提及，必须且只能使用格式『商品Id:N』（如 商品Id:4）；");
         lines.Add("   任何其他形式（商品ID为4、#4、编号4、ID：4 等）均属违例。");
-        lines.Add("");
+        lines.Add("4. 不要用Markdown格式回复 例如: **畅销悬疑小说** ,如果数据要用《畅销悬疑小说》其他的可以不用直接写名称即可");
         lines.Add("【JSON 输出格式要求】");
         lines.Add($"回复必须使用以下 JSON 格式（工具调用时除外）：");
         lines.Add($"{outputExampleJson}");
@@ -174,7 +174,7 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             AIContextProviders = contextProviders
         };
 
-       
+
 
 
         _agent = new HarnessAgent(chatClient, options);
@@ -350,10 +350,11 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
 
         if (session is null)
         {
-            var (fallbackResult, _) = await RunChatAsync(sessionId, userMessage, username, preferences, userId, ct);
-            yield return new ChatStreamChunk { TextDelta = fallbackResult.Reply, IsComplete = false };
-            yield return new ChatStreamChunk { TextDelta = "", IsComplete = true, FullResult = fallbackResult };
-            yield break;
+            // 首次会话创建失败（可能暂时性）：重试显式创建（GetOrCreateSessionAsync 缓存到 _sessions）。
+            // 不能用 session:null 直接 RunStreamingAsync——MAF 自动建的 session 无 SessionId，
+            // SqliteChatHistoryProvider.DefaultStateInitializer 读 StateBag["SessionId"] 会抛异常。
+            // 重试成功后落入下方主路径原生流式；仍失败则异常传播给端点 IsRetryableAgentFailure 兜底。
+            session = await GetOrCreateSessionAsync(sessionId, ct);
         }
 
         session.StateBag.SetValue("SessionId", sessionId.ToString());

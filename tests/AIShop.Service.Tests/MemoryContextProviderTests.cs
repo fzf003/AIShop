@@ -116,7 +116,7 @@ public sealed class MemoryContextProviderTests
     // ── Store：对话后存记忆 ──
 
     [Fact]
-    public async Task Store_WithUserId_CallsAddAsyncWithMessages()
+    public async Task Store_WithUserId_CallsAddAsyncWithUserMessagesOnly()
     {
         var memory = CreateMemory();
         var provider = CreateProvider(memory, "u1");
@@ -127,12 +127,13 @@ public sealed class MemoryContextProviderTests
 
         await provider.InvokedAsync(context);
 
-        // 本轮 request+response 消息交给 Mem0 自动提取（Infer=true），角色映射 user/assistant
+        // 只存用户消息（不存 assistant 回复），Infer=true 触发提取，Behavior 当前为 Normal（记用户事实）
         await memory.Received(1).AddAsync(
             Arg.Is<IEnumerable<Message>>(msgs =>
-                msgs.Select(m => m.Role).SequenceEqual(new[] { "user", "assistant" })
-                && msgs.Select(m => m.Content).SequenceEqual(new[] { "你好", "模拟回复" })),
-            Arg.Is<MemoryAddOptions>(o => o.UserId == "u1" && o.Infer),
+                msgs.Select(m => m.Role).SequenceEqual(new[] { "user" })
+                && msgs.Select(m => m.Content).SequenceEqual(new[] { "你好" })),
+            Arg.Is<MemoryAddOptions>(o => o.UserId == "u1" && o.Infer
+                && o.Behavior == MemoryBehavior.Normal),
             Arg.Any<CancellationToken>());
     }
 

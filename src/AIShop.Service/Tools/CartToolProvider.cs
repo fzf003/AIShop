@@ -31,15 +31,17 @@ public sealed class CartToolProvider(
     /// 纯语义检索（bge 向量，DB 端 KNN）：输入自然语言即可召回语义相关商品。
     /// 工具签名与输出格式保持兼容：`#Id Name — ¥Price`、无结果 `未找到包含「{keyword}」的商品`。
     /// </summary>
-    [Description("按名称搜索商品，返回商品名称、ID 和价格。当用户提到商品名时先调用此工具搜索。")]
+    [Description("按名称搜索商品，返回商品名称、ID、价格和相关度。当用户提到商品名时先调用此工具搜索。")]
     public async Task<string> SearchProductAsync(
-        [Description("商品名称关键词，支持模糊匹配，如「咖啡」「跑鞋」")] string keyword)
+        [Description("商品关键词，如「咖啡」「跑鞋」")] string keyword,
+        [Description("可选：用户明确说的商品类别（厨房用品/健身/数码/家居/服饰等），未明确可省略")] string? category = null)
     {
         if (semanticSearch is not null)
         {
             try
             {
-                var hits = await semanticSearch.SearchAsync(keyword);
+                // category 非空 → 仅在该类别内语义召回（精确维度优先，向量只在该子集排序，避免泛类排前）
+                var hits = await semanticSearch.SearchAsync(keyword, category: category);
                 return FormatHits(keyword, hits);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -60,8 +62,9 @@ public sealed class CartToolProvider(
         if (hits.Count == 0)
             return $"未找到包含「{keyword}」的商品";
 
+        // 带相关度分 + 类别展示：LLM 可见 [0.94] vs [0.71]，可判断匹配强弱，低分商品不硬推
         return $"找到 {hits.Count} 个商品：\n"
-             + string.Join("\n", hits.Select(h => $"#{h.ProductId} {h.Name} — ¥{h.Price}"));
+             + string.Join("\n", hits.Select(h => $"[{h.Score:F2}] #{h.ProductId} {h.Name}（{h.Category}） — ¥{h.Price}"));
     }
 
     /// <summary>
@@ -228,10 +231,14 @@ public sealed class CartToolProvider(
                 (Func<Guid, Task<string>>)(itemId => RemoveFromCartAsync(itemId)),
                 "remove_from_cart",
                 "从购物车中移除指定商品。参数 itemId=购物车中商品项的ID。"),
+            // 方法组注册（非 lambda）：保留 SearchProductAsync 的参数默认值，category 才是可选参数。
+            // lambda 注册会丢失默认值 → AIFunction schema 把 category 标 required → LLM 不传时调用失败。
             AIFunctionFactory.Create(
-                (Func<string, Task<string>>)(keyword => SearchProductAsync(keyword)),
+                (Func<string, string?, Task<string>>)SearchProductAsync,
                 "search_product",
-                "搜索商品。参数 keyword=商品关键词（如咖啡机、耳机）。用户提到商品名时调用。"),
+                "搜索商品。keyword=用户要的商品关键词（如咖啡机、耳机）；category=可选商品类别（厨房用品/健身等，"
+                + "用户明确说类型时填）。用户明确指定商品类型/类别时必须优先返回该类商品，不得用不相关商品充数；"
+                + "未找到足够相关商品时如实告知，不要硬推。"),
         ];
     }
 }
