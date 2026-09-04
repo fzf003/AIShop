@@ -13,6 +13,8 @@ using Serilog;
 using System.ClientModel;
 using System.ClientModel.Primitives;
 using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Sockets;
 
 namespace AIShop.Service;
 
@@ -164,8 +166,34 @@ public class ModelRouter
         }
         else
         {
+
+            var custhandler = new SocketsHttpHandler
+            {
+                UseProxy = false,
+                Proxy = null,
+                ConnectCallback = async (context, cancellationToken) =>
+                {
+                    var host = context.DnsEndPoint.Host;
+                    var port = context.DnsEndPoint.Port;
+                    var addresses = await Dns.GetHostAddressesAsync(host, cancellationToken);
+                    var ip = addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork)
+                             ?? addresses.FirstOrDefault()
+                             ?? throw new SocketException((int)SocketError.HostNotFound);
+                    var socket = new Socket(ip.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+                    try
+                    {
+                        await socket.ConnectAsync(ip, port, cancellationToken);
+                    }
+                    catch
+                    {
+                        socket.Dispose();
+                        throw;
+                    }
+                    return new NetworkStream(socket, ownsSocket: true);
+                },
+            };
             // OpenAI/Qwen 路径同样接入标准弹性策略；与 DeepSeek 各自构建、不共享同一 DelegatingHandler 实例
-            var dehttpClient = new HttpClient(BuildChatHttpPipeline(handler, _enableDebugHandler)) { Timeout = TimeSpan.FromSeconds(120) };
+            var dehttpClient = new HttpClient(BuildChatHttpPipeline(custhandler, _enableDebugHandler)) { Timeout = TimeSpan.FromSeconds(120) };
             var clientOptions = new OpenAIClientOptions
             {
                 Endpoint = new Uri(cfg.Endpoint),
