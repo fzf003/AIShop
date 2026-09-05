@@ -19,6 +19,14 @@
     <!-- Serilog 结构化日志（Program.cs bootstrap / AddSerilog / WriteTo.Console；版本 CPM 锁定 10.0.0 / 6.1.1） -->
     <PackageReference Include="Serilog.AspNetCore" />
     <PackageReference Include="Serilog.Sinks.Console" />
+    <!-- .env 加载（模型密钥等敏感配置走 .env/环境变量，同 Api；CPM 锁定 3.2.0） -->
+    <PackageReference Include="DotNetEnv" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 测试缝：使 internal AddAguiBaseServices/InitializeAsync 对 AIShop.AguiHost.Tests 可见（宿主级测试直接驱动装配/启动引导）。
+         （property 形式的 <InternalsVisibleTo> 不生成 friend 特性，必须用 item 形式 Include） -->
+    <InternalsVisibleTo Include="AIShop.AguiHost.Tests" />
   </ItemGroup>
 
 </Project>
