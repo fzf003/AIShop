@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 底座引用：AIShop.Service → Infrastructure → Core 传递获得全部底座类型（设计 §2，依赖方向 Core←Infra←Service←AguiHost） -->
+    <ProjectReference Include="..\AIShop.Service\AIShop.Service.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- AG-UI 官方宿主 preview 包：版本已在 Directory.Packages.props 锁定 1.20.0-preview.260831.1，此处仅补引用（不引入 DevUI 包）。
+         AddAGUIServer/MapAGUIServer/AsAIAgent/WithTools 等 AG-UI 装配 API 以本地镜像 preview 源码为准（设计 §4.1） -->
+    <PackageReference Include="Microsoft.Agents.AI.Hosting.AGUI.AspNetCore" />
+    <PackageReference Include="Microsoft.Agents.AI.Hosting.AspNetCore" />
+    <!-- Serilog 结构化日志（Program.cs bootstrap / AddSerilog / WriteTo.Console；版本 CPM 锁定 10.0.0 / 6.1.1） -->
+    <PackageReference Include="Serilog.AspNetCore" />
+    <PackageReference Include="Serilog.Sinks.Console" />
+  </ItemGroup>
+
+</Project>
