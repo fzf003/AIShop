@@ -1,4 +1,8 @@
 using AIShop.AguiHost;
+using AIShop.AguiHost.Agents;
+using AIShop.Service.Tools;
+using Microsoft.Agents.AI.Hosting.AGUI.AspNetCore;
+using Microsoft.Extensions.AI;
 using Serilog;
 
 // Serilog bootstrap 日志（应用配置就绪前的最小记录器，模式对齐 AIShop.Api/Program.cs）
@@ -31,6 +35,16 @@ try
 
     // 启动引导（T3）：MigrateAsync + 幂等播种 marla/steve/fzf003 + 18 商品 + RAG 索引预热（失败仅 Warning）
     await AguiServiceCollectionExtensions.InitializeAsync(app.Services);
+
+    // T5 username 注入中间件（置于 MapAGUIServer 之前）：AGUI forwarded metadata(username) → ICurrentUserAccessor（缺省 guest）
+    app.UseAguiUsernameForwarding();
+
+    // T5 装配新购物 Agent 并映射为 AG-UI SSE 端点 "/"（spec：复用默认 IChatClient + CartToolProvider.CreateTools；
+    // 会话由 AG-UI AgentSessionStore 承载，MapAGUIServer 以 preview 请求管线为准）
+    var agent = AGUIShoppingAgent.Create(
+        app.Services.GetRequiredService<IChatClient>(),
+        app.Services.GetRequiredService<CartToolProvider>());
+    app.MapAGUIServer("/", agent);
 
     await app.RunAsync();
 }
