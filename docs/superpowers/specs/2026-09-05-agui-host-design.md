@@ -43,7 +43,7 @@ AIShop 现有对话能力由 `ShoppingAssistantAgent`（HarnessAgent 外壳）+ 
 ├─ 注册（复用底座扩展，均来自既有 Infra/Service，仅用独立连接串）：
 │     AddInfrastructure("Data Source=agui.db")      ← EF 仓储 + AppDbContext（独立库）
 │     AddMemoryService()                            ← Mem0 记忆（可选挂载）
-│     AddRagService()                               ← RAG 语义检索（search_product 用）
+│     AddRagService("Data Source=agui.rag.db")   ← RAG 语义检索（独立向量库，经 Infra 参数化）
 │     AddSingleton<CartToolProvider> / <ModelRouter>
 │     AddSingleton<IChatClient>(sp => sp.GetRequiredService<ModelRouter>().GetDefaultChatClient())
 │     AgentTelemetryOptions 绑定（同 Api/Program.cs）
@@ -82,7 +82,8 @@ AguiHost 直接引用 Service（传递覆盖 Infra/Core）；不修改任何现�
 
 ## 6. 数据与存储
 
-- **独立 SQLite `agui.db`**（老 `aishop.db` / `aishop.rag.db` 不受影响）；复用 Infra `AppDbContext` + EF Migrations（对齐宿主 MigrateAsync 约定，勿用 EnsureCreated）。
+- **独立 SQLite `agui.db`**（老 `aishop.db` 不受影响）；复用 Infra `AppDbContext` + EF Migrations（对齐宿主 MigrateAsync 约定，勿用 EnsureCreated）。
+- **RAG 向量库隔离（P0，方案 c）**：Infra `RagDependencyInjection.VectorConnectionString` 现为硬编码常量 `aishop.rag.db`（`RagDependencyInjection.cs:16`，`AddRagService()` 无参数）。AguiHost 要语义检索又保隔离，须给 `AddRagService` 加**可选 `connectionString` 参数**（默认 `aishop.rag.db` → 老 Api 零行为变化），AguiHost 传 `Data Source=agui.rag.db` 独立向量库。此为**老代码向后兼容微改**：单独工单 + 老 RAG/检索测试护航。
 - 播种（同老 Seed 语义）：商品（`ProductSeedData`）+ 测试用户 marla/steve/fzf003。
 - 语义检索预热：`EnsureIndexedAsync` 对 `agui.db` 商品建向量索引（失败仅 Warning，懒构建兜底——同 Api/Program.cs）。
 - MVP 聊天历史持久不强制落库（AG-UI 会话/内存承载）；如需可后续接 `IChatHistoryStore`。
@@ -109,7 +110,7 @@ AguiHost 直接引用 Service（传递覆盖 Infra/Core）；不修改任何现�
 2. 起 AguiHost：官方 AGUIClient 发 `"推荐跑步鞋"` → **SSE 流式文本 + 触发 `search_product`**（语义检索命中商品，无崩溃）
 3. 对话 `"把第 1 个加购物车"` → `add_to_cart` 生效；`get_cart_summary` 反映（SQLite `agui.db` 可见）
 4. **回归零影响**：老测试全绿 + `git diff -- src/AIShop.Service/ShoppingAssistantAgent.cs` 为空
-5. 数据隔离：`agui.db` 独立生成，老 `aishop.db` / `aishop.rag.db` 无变化
+5. 数据隔离：`agui.db` / `agui.rag.db` 独立生成，老 `aishop.db` / `aishop.rag.db` 无变化（经 `AddRagService` 可选连接串达成）
 
 ## 10. 后续路线（不进首版）
 
@@ -118,6 +119,7 @@ AG-UI Step02 工具渲染 → Step03 前端工具 → Step04 HITL → Step05 状
 ## 11. 风险与取舍
 
 - **复用底座的新风险**：AguiHost 与老世界共享 Infra/Service，底座变更会传导编译影响；以 `ShoppingAssistantAgent` 零 diff + 独立连接串作为回归护栏。
+- **RAG 隔离依赖 Infra 一处向后兼容参数化**（`AddRagService` 加可选连接串、默认不变）；替代方案 b（共享 `aishop.rag.db`，商品同源可接受）或 a（禁 RAG → search 失效，不取）。动老代码走单独变更 + 老 RAG 测试护航。
 - AG-UI 为 preview 包（1.20.0-preview.*）：API 可能小步变动，实施时以本地镜像源码为准。
 - 记忆/历史 MVP 从简（内存会话）；首版目标是"宿主 + 完整购物链路"跑通。
 - 复用而非自建 → 依赖完整性靠传递引用；实现时应显式确认 Service 引用链满足所需类型（必要时按需补直接引用，仍遵循第 2 节依赖方向）。
