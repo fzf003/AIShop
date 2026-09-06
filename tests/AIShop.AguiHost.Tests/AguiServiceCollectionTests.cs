@@ -65,8 +65,13 @@ public sealed class AguiServiceCollectionTests
         Assert.NotNull(sp.GetRequiredService<IProductSemanticSearch>());
 
         // 全局默认 chatClient = ModelRouter.GetDefaultChatClient()（非 DeepSeek 路径构建离线客户端，不触发网络）。
-        // T11：注册时外包 ReplySanitizingChatClient 服务端清洗中间件（agent 输出离开 AguiHost 前清洗商品编号）
-        Assert.IsType<ReplySanitizingChatClient>(sp.GetRequiredService<IChatClient>());
+        // T11：注册时先外包 ReplySanitizingChatClient 服务端清洗中间件（agent 输出离开 AguiHost 前清洗商品编号）；
+        // 协调收编（用户改动，装配已挂 UseOpenTelemetry）：其后再经 .AsBuilder().UseOpenTelemetry(sourceName).Build()
+        // 外包 OTel 埋点中间件（OpenTelemetryChatClient）。故容器解析出的最外层不再是裸 ReplySanitizingChatClient，
+        // 而是 OpenTelemetryChatClient；清洗语义仍在链内——沿 DelegatingChatClient 链 GetService 可解析回清洗中间件。
+        var chatClient = sp.GetRequiredService<IChatClient>();
+        Assert.Contains("OpenTelemetryChatClient", chatClient.GetType().Name);
+        Assert.NotNull(chatClient.GetService(typeof(ReplySanitizingChatClient)));
     }
 
     [Fact]
