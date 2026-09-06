@@ -9,6 +9,9 @@
   <ItemGroup>
     <!-- 底座引用：AIShop.Service → Infrastructure → Core 传递获得全部底座类型（设计 §2，依赖方向 Core←Infra←Service←AguiHost） -->
     <ProjectReference Include="..\AIShop.Service\AIShop.Service.csproj" />
+    <!-- Dashboard 可观测性（T10）：接入 ServiceDefaults → OTLP trace/metric/log + /health 健康端点（评审补强：
+         未引 ServiceDefaults 时 Aspire Dashboard 看不到 agui 的 trace/log/健康状态；对齐老宿主 AIShop.Api） -->
+    <ProjectReference Include="..\AIShop.ServiceDefaults\AIShop.ServiceDefaults.csproj" />
   </ItemGroup>
 
   <ItemGroup>

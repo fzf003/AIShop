@@ -1,6 +1,7 @@
 using AIShop.AguiHost;
 using AIShop.AguiHost.Agents;
 using AIShop.Service.Tools;
+using AIShop.ServiceDefaults;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.DevUI;
 using Microsoft.Agents.AI.Hosting.AGUI.AspNetCore;
@@ -25,6 +26,11 @@ try
     builder.Services.AddSerilog((sp, lc) => lc
         .ReadFrom.Configuration(builder.Configuration)
         .WriteTo.Console());
+
+    // 可观测性（T10）：对齐老宿主 AIShop.Api，在 AddSerilog 后接入 ServiceDefaults——
+    // OTLP trace/metric/log（Aspire Dashboard 上报）+ 标准 HttpClient 弹性/服务发现 + 健康检查注册。
+    // OTEL_EXPORTER_OTLP_ENDPOINT 由 Aspire 注入，未设置时自动跳过 OTLP exporter（本地零开销）。
+    builder.AddServiceDefaults();
 
     // AG-UI 服务端装配（注册 AG-UI 宿主基础设施与 JSON 序列化上下文；MapAGUIServer 归 T5）
     builder.Services.AddAGUIServer();
@@ -64,6 +70,10 @@ try
     // 重载 = GetRequiredKeyedService<AIAgent>(agentName)，见镜像 AGUIEndpointRouteBuilderExtensions），
     // 映射为 AG-UI SSE 端点 "/"，保持 T5 装配语义（MapAGUIServer 请求管线、username 中间件顺序）不回退。
     app.MapAGUIServer(AGUIShoppingAgent.AgentName, "/");
+
+    // 健康检查端点（T10）：MapDefaultEndpoints 暴露 /health + /alive（ServiceDefaults），供 Aspire Dashboard
+    // 健康探测；走独立路径与 AG-UI "/" 端点、DevUI/OpenAI 路由互不冲突。生产/开发均映射（对齐老宿主 AIShop.Api）。
+    app.MapDefaultEndpoints();
 
     // T7 DevUI 端点映射（IsDevelopment 门）：/devui SPA 面板 + /meta + /v1/entities（实体发现）+ OpenAI wire。
     // 与 MapAGUIServer(AgentName,"/") 路由互不冲突；生产环境不映射即天然关闭（验收 6「非 Development 不暴露」）。

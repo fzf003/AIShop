@@ -83,6 +83,20 @@ public sealed class AguiRequestTests
         mockAccessor.Received(1).SetCurrentUser("guest");
     }
 
+    [Fact]
+    public async Task GetHealth_ReturnsOk_ObservabilityEndpointIsReady()
+    {
+        // T10 ServiceDefaults 可观测性验收：MapDefaultEndpoints 暴露 /health（Aspire Dashboard 健康探测）。
+        // 走 WAF 真实宿主（离线 IChatClient 覆盖，同上方冒烟模式）→ GET /health 返回 200 即健康端点就绪。
+        // 若 WAF 宿主下健康端点行为有出入，按实际断言并在此注释说明（当前实测为 200）。
+        using var factory = CreateFactory(accessorOverride: null);
+        using var client = factory.CreateClient();
+
+        using var response = await client.GetAsync("/health");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
     /// <summary>
     /// 装配 WAF：把 AguiHost Program 的默认 IChatClient 替换为脚本化文本回复的 NSubstitute
     /// （Program 启动即 resolve IChatClient 构造 Agent，替换后可免 Key 离线启动）；
