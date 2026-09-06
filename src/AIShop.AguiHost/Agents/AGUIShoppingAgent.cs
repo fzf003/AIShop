@@ -33,6 +33,13 @@ internal static class AGUIShoppingAgent
     internal const string AgentName = "AGUIShopping";
 
     /// <summary>
+    /// T14 工具循环护栏上限：对齐老 ShoppingAssistantAgent 的 HarnessAgentOptions.MaximumIterationsPerRequest = 3
+    /// （ShoppingAssistantAgent.cs L162）。含义 = 单次请求（单个 AG-UI run，对应老一次 RunChatAsync）内模型请求
+    /// 工具调用的迭代数上限，超限即终止循环而非无限执行，防 FICC/工具失控与无限 token 消耗。
+    /// </summary>
+    internal const int MaximumToolIterations = 3;
+
+    /// <summary>
     /// 自然语言购物人设 instructions（面向 AG-UI 会话）：先 <c>search_product</c> 检索商品 → 命中后用工具输出中的商品
     /// 编号加购 → 查车/改量/移除。全程简体中文、工具驱动，明确不使用旧 <c>Reply/Keywords/Preferences</c> JSON 结构化回复协议。
     /// </summary>
@@ -131,6 +138,11 @@ internal static class AGUIShoppingAgent
 
         var agent = chatClient.AsAIAgent(options);
 
+        // T14（工具循环护栏）：给工具迭代循环设硬上限 3，防模型反复请求工具导致失控循环/无限 token 消耗。
+        // 必须在 Instrument 之前应用——此时 agent 仍是裸 ChatClientAgent（.ChatClient 读面可达），而
+        // OpenTelemetryAgent 装饰器不暴露内层 ChatClient。见 ApplyToolIterationLimit 内注释。
+        ApplyToolIterationLimit(agent);
+
         // T11（agent 遥测埋点）：返回前用 AIShop.AgentTelemetry.AgentTelemetry.Instrument 包装，让 AGUIShopping
         // 执行（Run/RunStreaming）产生 OpenTelemetry span，供 Aspire Dashboard 观察——对齐老 ShoppingAssistantAgent
         // 构造 L188 的 Instrument(agent, SourceName, Level) 用法。Level=None 时裸返回原 ChatClientAgent（不包装饰器），
@@ -139,5 +151,28 @@ internal static class AGUIShoppingAgent
             agent,
             telemetryOptions.SourceName,
             telemetryOptions.Level);
+    }
+
+    /// <summary>
+    /// T14 工具循环护栏：把 <paramref name="agent"/> 的工具迭代上限设为 <see cref="MaximumToolIterations"/>（3）。
+    /// ChatClientAgentOptions 没有老 Harness 的 MaximumIterationsPerRequest 装配旋钮（T14 实证），工具循环跑在 MAF
+    /// 默认中间件注入的 MEAI <see cref="FunctionInvokingChatClient"/>（FICC）里——镜像 ChatClientExtensions.
+    /// WithDefaultAgentMiddleware 以 <c>new FunctionInvokingChatClient(...)</c> 注入、未显式设上限时 MEAI 10.9.0
+    /// 默认 <b>40</b>（10.9.0 XML 文档实证；tasks/早期实证记为 5 系版本差异，以实际包为准）。这里在装配后从 agent
+    /// 自身 ChatClient 管线解析 FICC 实例并设 MaximumIterationsPerRequest=3（与老 MaximumIterationsPerRequest=3 语义
+    /// 对齐：单次请求内工具迭代上限，默认 40 → 收到 3）。MAF WithDefaultAgentMiddleware 构建后即用
+    /// <c>GetService&lt;FunctionInvokingChatClient&gt;()</c> 设 AdditionalTools，此处沿用同一解析缝改迭代上限。
+    /// 解析不到 FICC = 装配形态异常（如 UseProvidedChatClientAsIs 直通未注入 FICC），fail-fast 抛明确异常，
+    /// 避免静默以默认上限运行而护栏失效。
+    /// </summary>
+    /// <param name="agent">已由 <c>chatClient.AsAIAgent(options)</c> 装配的裸 ChatClientAgent（未 Instrument 包装）。</param>
+    /// <exception cref="InvalidOperationException">agent 的 ChatClient 管线解析不到 FICC 时抛出。</exception>
+    internal static void ApplyToolIterationLimit(ChatClientAgent agent)
+    {
+        var functionInvoker = agent.ChatClient.GetService<FunctionInvokingChatClient>()
+            ?? throw new InvalidOperationException(
+                $"AGUIShopping 装配异常：ChatClientAgent 管线未解析到 {nameof(FunctionInvokingChatClient)}，" +
+                $"无法设置工具循环上限 {MaximumToolIterations}。");
+        functionInvoker.MaximumIterationsPerRequest = MaximumToolIterations;
     }
 }
