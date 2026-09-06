@@ -31,7 +31,7 @@ internal static class AguiUsernameForwarder
     internal const string UsernameMetadataKey = "username";
 
     /// <summary>metadata 缺失 username 时的缺省用户（spec「metadata 缺失时按 guest 处理」）。</summary>
-    internal const string DefaultUsername = "guest";
+    internal const string DefaultUsername = "fzf003";
 
     /// <summary>
     /// 从 forwarded metadata（JSON object，如 <c>RunAgentInput.forwardedProps</c>）读取 <c>username</c>。

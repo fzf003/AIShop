@@ -103,7 +103,7 @@ internal static class AGUIShoppingAgent
             ChatOptions = new ChatOptions
             {
                 Instructions = instructions,
-                Tools = cartTools.CreateTools().ToList()
+                Tools = cartTools.CreateTools()
             },
             AIContextProviders = [compactionProvider]
         };

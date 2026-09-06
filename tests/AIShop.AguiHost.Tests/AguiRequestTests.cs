@@ -21,9 +21,11 @@ public sealed class AguiRequestTestsCollection;
 
 /// <summary>
 /// T5 请求级测试：AGUIShoppingAgent 经 MapAGUIServer("/") 暴露为 AG-UI SSE 端点（路由冒烟，非 404）
-/// + username 经 AGUI forwarded metadata 写入 ICurrentUserAccessor（含缺省 guest）的端到端链路。
+/// + username 经 AGUI forwarded metadata 写入 ICurrentUserAccessor（含缺省用户）的端到端链路。
 /// 离线驱动：Program 装配的默认 IChatClient 被 NSubstitute 替换（脚本化文本回复，不触发真实 LLM），
 /// 对应 tasks T5T1/T5T3——preview MapAGUIServer 请求管线不便用真实 LLM 驱动，故用离线 chatClient 覆盖。
+/// 协调收编（用户改动）：缺省用户由 "guest" 改为 seed 用户 "fzf003"（AguiUsernameForwarder.DefaultUsername），
+/// 本类「无 metadata 请求」断言随之改 fzf003；marla 显式携带仍原样断言。
 /// </summary>
 [Collection(nameof(AguiRequestTests))]
 public sealed class AguiRequestTests
@@ -51,11 +53,12 @@ public sealed class AguiRequestTests
     }
 
     [Fact]
-    public async Task PostRoot_ForwardedMetadataUsername_IsWrittenToAccessor_GuestWhenMissing()
+    public async Task PostRoot_ForwardedMetadataUsername_IsWrittenToAccessor_DefaultUsernameWhenMissing()
     {
         // 请求级 username 注入（tasks T5T3，尽力而为）：替换 ICurrentUserAccessor 为 mock，
         // POST 携带 forwardedProps.username=marla → accessor 收到 SetCurrentUser("marla")；
-        // 第二个无 metadata 的请求 → 回退 SetCurrentUser("guest")（spec「metadata 缺失时按 guest 处理」）
+        // 第二个无 metadata 的请求 → 回退 SetCurrentUser("fzf003")（协调收编：缺省用户 guest → seed 用户 fzf003，
+        // 对齐 AguiUsernameForwarder.DefaultUsername；语义仍为「metadata 缺失时按缺省用户处理」）
         var mockAccessor = Substitute.For<ICurrentUserAccessor>();
         using var factory = CreateFactory(mockAccessor);
         using var client = factory.CreateClient();
@@ -71,16 +74,16 @@ public sealed class AguiRequestTests
 
         mockAccessor.Received(1).SetCurrentUser("marla");
 
-        // 请求 2：无 forwarded metadata → 缺省 guest
+        // 请求 2：无 forwarded metadata → 缺省 fzf003
         using (var second = await client.PostAsync(
                    "/",
-                   new StringContent(RunAgentBody("guest-thread", username: null), Encoding.UTF8, "application/json")))
+                   new StringContent(RunAgentBody("default-thread", username: null), Encoding.UTF8, "application/json")))
         {
             Assert.Equal(HttpStatusCode.OK, second.StatusCode);
             Assert.Contains("T5-MARKER", await second.Content.ReadAsStringAsync());
         }
 
-        mockAccessor.Received(1).SetCurrentUser("guest");
+        mockAccessor.Received(1).SetCurrentUser("fzf003");
     }
 
     [Fact]

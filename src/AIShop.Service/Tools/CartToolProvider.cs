@@ -211,7 +211,7 @@ public sealed class CartToolProvider(
     /// 把购物车/商品工具方法注册为 Agent 可调用的 AI 工具（工具名与描述集中定义在工具宿主，
     /// Agent 侧无需逐个注册）。
     /// </summary>
-    public IReadOnlyList<AITool> CreateTools()
+    public List<AITool> CreateTools()
     {
         return
         [

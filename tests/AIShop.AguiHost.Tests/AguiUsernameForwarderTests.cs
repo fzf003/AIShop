@@ -4,8 +4,10 @@ using AIShop.AguiHost;
 namespace AIShop.AguiHost.Tests;
 
 /// <summary>
-/// T5 ResolveUsername 纯函数单测：AGUI forwarded metadata 读 username；缺失/非法一律回退 guest。
+/// T5 ResolveUsername 纯函数单测：AGUI forwarded metadata 读 username；缺失/非法一律回退缺省用户。
 /// 对应 spec「username 经 ICurrentUserAccessor 由 AGUI metadata 注入，缺省 guest」的解析层。
+/// 协调收编（用户改动）：缺省用户由 "guest" 改为 seed 用户 "fzf003"（<see cref="AguiUsernameForwarder.DefaultUsername"/>），
+/// 使未带 username 的 AG-UI 请求默认以可购物用户 fzf003 运行；解析层语义（缺失回退 DefaultUsername）不变。
 /// </summary>
 public sealed class AguiUsernameForwarderTests
 {
@@ -22,16 +24,17 @@ public sealed class AguiUsernameForwarderTests
     }
 
     [Fact]
-    public void ResolveUsername_WhenUsernameMissing_ReturnsNull_AndGuestDefaultIsApplied()
+    public void ResolveUsername_WhenUsernameMissing_ReturnsNull_AndDefaultUsernameIsApplied()
     {
         // metadata 不含 username（forwardedProps 里只有其它字段）→ 解析层返回 null
         var metadata = MetadataOf(new { tenantId = "tenant-123" });
 
         Assert.Null(AguiUsernameForwarder.ResolveUsername(metadata));
 
-        // 缺省 guest（spec「metadata 缺失时按 guest 处理」）：缺省常量 + 解析一次到位 helper 均回退 guest
-        Assert.Equal("guest", AguiUsernameForwarder.DefaultUsername);
-        Assert.Equal("guest", AguiUsernameForwarder.ResolveUsernameOrDefault(metadata));
+        // 缺省用户（协调收编：用户改动 guest → fzf003，seed 用户使购物可用）：缺省常量 + 解析一次到位
+        // helper 均回退 DefaultUsername。语义仍对齐 spec「metadata 缺失时按缺省用户处理」。
+        Assert.Equal("fzf003", AguiUsernameForwarder.DefaultUsername);
+        Assert.Equal("fzf003", AguiUsernameForwarder.ResolveUsernameOrDefault(metadata));
     }
 
     [Fact]
@@ -46,7 +49,7 @@ public sealed class AguiUsernameForwarderTests
     [Fact]
     public void ResolveUsername_WhenUsernameIsBlank_ReturnsNull()
     {
-        // username 为空白串 → 视作缺失 → guest
+        // username 为空白串 → 视作缺失（由调用方应用 DefaultUsername 缺省）
         var metadata = MetadataOf(new { username = "   " });
 
         Assert.Null(AguiUsernameForwarder.ResolveUsername(metadata));
