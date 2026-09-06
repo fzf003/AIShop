@@ -1,3 +1,4 @@
+using AIShop.AgentTelemetry;
 using AIShop.AguiHost;
 using AIShop.AguiHost.Agents;
 using AIShop.Service.Tools;
@@ -56,7 +57,10 @@ try
     builder.Services.AddKeyedSingleton<AIAgent>(AGUIShoppingAgent.AgentName, (sp, _) =>
         AGUIShoppingAgent.Create(
             sp.GetRequiredService<IChatClient>(),
-            sp.GetRequiredService<CartToolProvider>()));
+            sp.GetRequiredService<CartToolProvider>(),
+            // T11（agent 遥测埋点）：把底座绑定（AgentTelemetry 配置节）的遥测选项传给 Create，
+            // 让 AGUIShopping 返回前经 AgentTelemetry.Instrument 包装（对齐老 ShoppingAssistantAgent L188）
+            sp.GetRequiredService<AgentTelemetryOptions>()));
 
     var app = builder.Build();
 

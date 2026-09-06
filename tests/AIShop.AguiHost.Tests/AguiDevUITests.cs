@@ -121,7 +121,11 @@ public sealed class AguiDevUITests
 
         Assert.NotNull(agent);
         Assert.Equal(AGUIShoppingAgent.AgentName, agent.Name);
-        Assert.IsType<ChatClientAgent>(agent);
+
+        // T11（agent 遥测埋点）：Program keyed factory 把 appsettings AgentTelemetry:Level(MetadataAndContent)
+        // 传入 Create → 返回前经 AgentTelemetry.Instrument 包装为 OpenTelemetryAgent（不再裸 ChatClientAgent）。
+        // 仍是 AIAgent，Name/GetService(转发内层 ChatOptions) 保持——AG-UI/DevUI 会话链路不受影响。
+        Assert.Contains("OpenTelemetryAgent", agent.GetType().Name);
     }
 
     /// <summary>从 JSON 对象中读取字符串属性（缺键/非字符串返回 null）。</summary>

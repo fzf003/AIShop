@@ -64,8 +64,9 @@ public sealed class AguiServiceCollectionTests
         // RAG 语义检索服务已注册（AddRagService 生效；连接串指向独立向量库在 InitializeAsync 预热时落盘）
         Assert.NotNull(sp.GetRequiredService<IProductSemanticSearch>());
 
-        // 全局默认 chatClient = ModelRouter.GetDefaultChatClient()（非 DeepSeek 路径构建离线客户端，不触发网络）
-        Assert.NotNull(sp.GetRequiredService<IChatClient>());
+        // 全局默认 chatClient = ModelRouter.GetDefaultChatClient()（非 DeepSeek 路径构建离线客户端，不触发网络）。
+        // T11：注册时外包 ReplySanitizingChatClient 服务端清洗中间件（agent 输出离开 AguiHost 前清洗商品编号）
+        Assert.IsType<ReplySanitizingChatClient>(sp.GetRequiredService<IChatClient>());
     }
 
     [Fact]

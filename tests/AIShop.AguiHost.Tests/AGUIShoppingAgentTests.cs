@@ -1,3 +1,4 @@
+using AIShop.AgentTelemetry;
 using AIShop.AguiHost.Agents;
 using AIShop.Core.Interfaces;
 using AIShop.Service;
@@ -23,7 +24,13 @@ public sealed class AGUIShoppingAgentTests
     private static AIAgent CreateAgent(string? instructionsOverride = null)
     {
         var chatClient = Substitute.For<IChatClient>();
-        return AGUIShoppingAgent.Create(chatClient, CreateCartTools(), instructionsOverride);
+        // AgentTelemetry Level.None：Instrument 裸返回原 ChatClientAgent（不包 OpenTelemetryAgent 装饰器），
+        // 便于下方直接断言装配面（运行时类型/挂载 tools/AIContextProviders）。
+        return AGUIShoppingAgent.Create(
+            chatClient,
+            CreateCartTools(),
+            new AgentTelemetryOptions { Level = AgentTelemetryLevel.None },
+            instructionsOverride: instructionsOverride);
     }
 
     /// <summary>构造真实 CartToolProvider：仅把 5 购物工具挂到 Agent，工具函数体不被调用，故依赖可全部 mock。</summary>
@@ -130,5 +137,24 @@ public sealed class AGUIShoppingAgentTests
         // 阈值对齐老 ShoppingAssistantAgent（128k/16k/0.5/0.8）在 Create 内以具名实参内联，CompactionProvider 不暴露
         // 内嵌 strategy 读面；此处锁定「压缩 provider 已挂 + 独立 stateKey」，阈值由装配代码评审核对。
 #pragma warning restore MAAI001
+    }
+
+    [Fact]
+    public void Create_WithTelemetryMetadataLevel_ReturnsOpenTelemetryAgent()
+    {
+        // T11（agent 遥测埋点）：非 None Level 经 AgentTelemetry.Instrument 包装（对齐老 ShoppingAssistantAgent L188）。
+        // 返回 OpenTelemetryAgent（继承 AIAgent 的装饰器），Name 保持 AGUIShopping；GetService 转发内层 ChatOptions
+        // （5 购物工具挂载面仍可读，证明装配产物可用）。
+        var agent = AGUIShoppingAgent.Create(
+            Substitute.For<IChatClient>(),
+            CreateCartTools(),
+            new AgentTelemetryOptions { Level = AgentTelemetryLevel.Metadata });
+
+        Assert.Contains("OpenTelemetryAgent", agent.GetType().Name);
+        Assert.Equal("AGUIShopping", agent.Name);
+
+        var tools = GetMountedChatOptions(agent).Tools;
+        Assert.NotNull(tools);
+        Assert.Equal(5, tools.Count);
     }
 }

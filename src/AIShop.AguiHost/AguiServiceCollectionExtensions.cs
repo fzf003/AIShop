@@ -56,8 +56,13 @@ internal static class AguiServiceCollectionExtensions
         services.AddSingleton<CartToolProvider>();
         // 模型管道 / 多模型（读 Models 节，Agent 语义检索链路复用）
         services.AddSingleton<ModelRouter>();
-        // 全局默认 chatClient（与 Api/Program.cs 同一创建逻辑；AGUIShoppingAgent 与记忆链路共用）
-        services.AddSingleton<IChatClient>(sp => sp.GetRequiredService<ModelRouter>().GetDefaultChatClient());
+        // 全局默认 chatClient（与 Api/Program.cs 同一创建逻辑；AGUIShoppingAgent 与记忆链路共用）。
+        // T11（服务端回复清洗兜底）：外包一层 ReplySanitizingChatClient 中间件——agent 输出文本（含流式增量）
+        // 离开 AguiHost 前经 Core ReplySanitizer 清洗商品编号（#5 / 商品Id:4 / 商品ID为4 等），与老 Agent
+        // SanitizeReply 同语义。只作用于本宿主 chatClient 单例（AGUIShopping 装配 + 请求复用），
+        // 不影响老 Api/Service 经各自 ModelRouter 构建的实例。
+        services.AddSingleton<IChatClient>(sp =>
+            new ReplySanitizingChatClient(sp.GetRequiredService<ModelRouter>().GetDefaultChatClient()));
 
         // Agent 遥测：绑定 "AgentTelemetry" 配置节，注册 AgentTelemetryOptions 单例（同 Api/Program.cs L62-66）
         var agentTelemetrySection = config.GetSection("AgentTelemetry");

@@ -1,4 +1,5 @@
 #pragma warning disable MAAI001 // 上下文压缩 API（CompactionProvider / ContextWindowCompactionStrategy）为 MAF [Experimental]
+using AIShop.AgentTelemetry;
 using AIShop.Service.Tools;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Compaction;
@@ -67,9 +68,16 @@ internal static class AGUIShoppingAgent
     /// </summary>
     /// <param name="chatClient">底层对话客户端（AguiHost 装配时 = ModelRouter.GetDefaultChatClient() 的 DI 单例）。</param>
     /// <param name="cartTools">5 购物工具工厂（<see cref="CartToolProvider.CreateTools"/>，与老 Agent 同源）。</param>
+    /// <param name="telemetryOptions">Agent 遥测选项（<c>AgentTelemetry</c> 配置节绑定，含 SourceName/Level）；
+    /// 由 Program keyed factory 从 DI 解析传入，测试按需构造。</param>
     /// <param name="instructionsOverride">覆盖人设 instructions（测试注入）；null 时用 <see cref="DefaultInstructions"/>。</param>
-    /// <returns>装配完成的新购物 Agent（<see cref="ChatClientAgent"/>，由 AG-UI AgentSessionStore 承载会话）。</returns>
-    internal static AIAgent Create(IChatClient chatClient, CartToolProvider cartTools, string? instructionsOverride = null)
+    /// <returns>装配完成的新购物 Agent（<see cref="ChatClientAgent"/> 经 <c>AgentTelemetry.Instrument</c> 包装，
+    /// 运行时类型为 <c>OpenTelemetryAgent</c>；Level=None 时裸返回 <see cref="ChatClientAgent"/>，由 AG-UI AgentSessionStore 承载会话）。</returns>
+    internal static AIAgent Create(
+        IChatClient chatClient,
+        CartToolProvider cartTools,
+        AgentTelemetryOptions telemetryOptions,
+        string? instructionsOverride = null)
     {
         var instructions = instructionsOverride ?? DefaultInstructions;
 
@@ -100,6 +108,15 @@ internal static class AGUIShoppingAgent
             AIContextProviders = [compactionProvider]
         };
 
-        return chatClient.AsAIAgent(options);
+        var agent = chatClient.AsAIAgent(options);
+
+        // T11（agent 遥测埋点）：返回前用 AIShop.AgentTelemetry.AgentTelemetry.Instrument 包装，让 AGUIShopping
+        // 执行（Run/RunStreaming）产生 OpenTelemetry span，供 Aspire Dashboard 观察——对齐老 ShoppingAssistantAgent
+        // 构造 L188 的 Instrument(agent, SourceName, Level) 用法。Level=None 时裸返回原 ChatClientAgent（不包装饰器），
+        // 其余级别包装为 OpenTelemetryAgent（继承 AIAgent，与 ChatClientAgent 无继承关系，故返回类型为 AIAgent）。
+        return AIShop.AgentTelemetry.AgentTelemetry.Instrument(
+            agent,
+            telemetryOptions.SourceName,
+            telemetryOptions.Level);
     }
 }
