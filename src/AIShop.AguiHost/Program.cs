@@ -1,8 +1,10 @@
 using AIShop.AgentTelemetry;
 using AIShop.AguiHost;
 using AIShop.AguiHost.Agents;
+using AIShop.Core.Interfaces;
 using AIShop.Service.Tools;
 using AIShop.ServiceDefaults;
+using Mem0Sharp;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.DevUI;
 using Microsoft.Agents.AI.Hosting.AGUI.AspNetCore;
@@ -65,7 +67,29 @@ try
             sp.GetRequiredService<CartToolProvider>(),
             // T11（agent 遥测埋点）：把底座绑定（AgentTelemetry 配置节）的遥测选项传给 Create，
             // 让 AGUIShopping 返回前经 AgentTelemetry.Instrument 包装（对齐老 ShoppingAssistantAgent L188）
-            sp.GetRequiredService<AgentTelemetryOptions>()));
+            sp.GetRequiredService<AgentTelemetryOptions>(),
+            // T13（Mem0 跨会话记忆）：记忆服务（可空，解析失败降级不挂记忆）+ 当前用户访问器。
+            // 当前用户访问器非空解析：AGUI username 中间件（UseAguiUsernameForwarding）在 run 前 SetCurrentUser，
+            // MemoryContextProvider 依赖它按用户读写记忆（缺省用户 = seed fzf003，见 AguiUsernameForwarder）。
+            memoryService: ResolveMemoryService(sp),
+            currentUser: sp.GetRequiredService<ICurrentUserAccessor>()));
+
+    // T13：解析 Mem0 记忆服务（IMemoryService）。IMemoryService 单例构造会 new LocalBgeEmbeddingGenerator(modelDir)
+    // ——构造即 new InferenceSession(model.onnx) 加载本地 bge ONNX 模型（~94MB，Models/bge-small-zh-v1.5）；
+    // 输出目录缺模型或加载异常时解析会抛异常，此处 try/catch 降级为不挂记忆 provider（返回 null → Create 仅挂压缩），
+    // 其余购物功能不受影响（对齐 RAG 预热降级语义），避免 AguiHost 启动/首次装配即崩。
+    IMemoryService? ResolveMemoryService(IServiceProvider sp)
+    {
+        try
+        {
+            return sp.GetService<IMemoryService>();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "记忆服务解析失败（本地 bge 模型缺失/加载异常），AGUIShopping 降级为不挂记忆 provider");
+            return null;
+        }
+    }
 
     var app = builder.Build();
 

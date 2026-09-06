@@ -68,7 +68,9 @@ public sealed class AguiStartupSeedingTests : IDisposable
     {
         var dbPath = NewDbPath("ef");
         var ragPath = NewDbPath("rag");
-        using (var sp = BuildProvider($"Data Source={dbPath}", $"Data Source={ragPath}"))
+        // T13 起 AddAguiBaseServices 挂 AddMemoryService（SqliteMemoryStore 为 IAsyncDisposable 单例，
+        // InitializeAsync 预热会实例化）→ 容器须 await using 释放，同步 Dispose 会抛 InvalidOperationException
+        await using (var sp = BuildProvider($"Data Source={dbPath}", $"Data Source={ragPath}"))
         {
             // 启动引导：MigrateAsync 建 schema → 幂等播种 → RAG 预热（内部 try/catch，失败仅 Warning 不抛）
             await AguiServiceCollectionExtensions.InitializeAsync(sp);
@@ -93,15 +95,15 @@ public sealed class AguiStartupSeedingTests : IDisposable
         var efConnection = $"Data Source={dbPath}";
         var ragConnection = $"Data Source={ragPath}";
 
-        // 第一次启动（全新库）
-        using (var sp1 = BuildProvider(efConnection, ragConnection))
+        // 第一次启动（全新库）；T13 起容器含 IAsyncDisposable 单例 store → await using 释放
+        await using (var sp1 = BuildProvider(efConnection, ragConnection))
         {
             await AguiServiceCollectionExtensions.InitializeAsync(sp1);
         }
         SqliteConnection.ClearAllPools();
 
         // 第二次启动（既有库，模拟重复启动/多实例）：MigrateAsync 幂等跳过、AnyAsync 判空不重复播种
-        using (var sp2 = BuildProvider(efConnection, ragConnection))
+        await using (var sp2 = BuildProvider(efConnection, ragConnection))
         {
             await AguiServiceCollectionExtensions.InitializeAsync(sp2);
         }
@@ -119,7 +121,7 @@ public sealed class AguiStartupSeedingTests : IDisposable
     {
         var dbPath = NewDbPath("ef");
         var ragPath = NewDbPath("rag");
-        using var sp = BuildProvider($"Data Source={dbPath}", $"Data Source={ragPath}");
+        await using var sp = BuildProvider($"Data Source={dbPath}", $"Data Source={ragPath}");
 
         // 先播种 + 预热索引（tempRag 建好向量索引）
         await AguiServiceCollectionExtensions.InitializeAsync(sp);

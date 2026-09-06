@@ -1,6 +1,9 @@
 #pragma warning disable MAAI001 // 上下文压缩 API（CompactionProvider / ContextWindowCompactionStrategy）为 MAF [Experimental]
 using AIShop.AgentTelemetry;
+using AIShop.Core.Interfaces;
+using AIShop.Service.Providers;
 using AIShop.Service.Tools;
+using Mem0Sharp;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Compaction;
 using Microsoft.Extensions.AI;
@@ -71,13 +74,18 @@ internal static class AGUIShoppingAgent
     /// <param name="telemetryOptions">Agent 遥测选项（<c>AgentTelemetry</c> 配置节绑定，含 SourceName/Level）；
     /// 由 Program keyed factory 从 DI 解析传入，测试按需构造。</param>
     /// <param name="instructionsOverride">覆盖人设 instructions（测试注入）；null 时用 <see cref="DefaultInstructions"/>。</param>
+    /// <param name="memoryService">Mem0 记忆服务（T13，可选）；与 <paramref name="currentUser"/> 均非 null 时挂载
+    /// <see cref="MemoryContextProvider"/>（跨会话记忆读注入 + 轮后写入触发），null 时维持仅上下文压缩装配。</param>
+    /// <param name="currentUser">当前用户访问器（T13，可选）；<see cref="MemoryContextProvider"/> 依赖其按用户读写记忆。</param>
     /// <returns>装配完成的新购物 Agent（<see cref="ChatClientAgent"/> 经 <c>AgentTelemetry.Instrument</c> 包装，
     /// 运行时类型为 <c>OpenTelemetryAgent</c>；Level=None 时裸返回 <see cref="ChatClientAgent"/>，由 AG-UI AgentSessionStore 承载会话）。</returns>
     internal static AIAgent Create(
         IChatClient chatClient,
         CartToolProvider cartTools,
         AgentTelemetryOptions telemetryOptions,
-        string? instructionsOverride = null)
+        string? instructionsOverride = null,
+        IMemoryService? memoryService = null,
+        ICurrentUserAccessor? currentUser = null)
     {
         var instructions = instructionsOverride ?? DefaultInstructions;
 
@@ -94,9 +102,22 @@ internal static class AGUIShoppingAgent
                 truncationThreshold: 0.8),
             stateKey: "AGUIShopping-Compaction");
 
+        // AIContextProviders：压缩 provider 恒挂；记忆 provider 条件挂载（记忆服务 + 当前用户访问器均可用时）。
+        var contextProviders = new List<AIContextProvider> { compactionProvider };
+
+        // Mem0 跨会话记忆（T13）：记忆服务与用户访问器均非 null 时，把 MemoryContextProvider（AIShop.Service.Providers，
+        // 老 ShoppingAssistantAgent 同款 Provider）追加进 AIContextProviders，与 CompactionProvider 并列。
+        // 读写时机由 ChatClientAgent 驱动：run 开始 Provide（语义召回当前用户记忆注入 Instructions）、run 结束
+        // Store（把本轮用户消息经 Mem0 提取落独立记忆库，见 Service/Providers/MemoryContextProvider）。两依赖任一
+        // 为 null（如记忆模型缺失降级）→ 不挂记忆、仅保留上下文压缩（T4/T8 装配断言不回退）。
+        if (memoryService is not null && currentUser is not null)
+        {
+            contextProviders.Add(new MemoryContextProvider(memoryService, currentUser));
+        }
+
         // AG-UI 官方宿主形态：位置签名 AsAIAgent(instructions, name, description, tools, ...) 实为包一层
         // ChatClientAgentOptions；这里直接构造 ChatClientAgentOptions（Name/ChatOptions/AIContextProviders），
-        // 以便把压缩 provider 经 AIContextProviders 挂入。ChatOptions.Tools 承载 5 购物工具。
+        // 以便把压缩/记忆 provider 经 AIContextProviders 挂入。ChatOptions.Tools 承载 5 购物工具。
         var options = new ChatClientAgentOptions
         {
             Name = AgentName,
@@ -105,7 +126,7 @@ internal static class AGUIShoppingAgent
                 Instructions = instructions,
                 Tools = cartTools.CreateTools()
             },
-            AIContextProviders = [compactionProvider]
+            AIContextProviders = contextProviders
         };
 
         var agent = chatClient.AsAIAgent(options);

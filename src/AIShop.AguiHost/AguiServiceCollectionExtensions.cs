@@ -5,6 +5,7 @@ using AIShop.Core.Interfaces;
 using AIShop.Core.StaticData;
 using AIShop.Infrastructure;
 using AIShop.Infrastructure.Data;
+using AIShop.Infrastructure.MemoryService;
 using AIShop.Service;
 using AIShop.Service.Tools;
 using Microsoft.Agents.AI.Hosting;
@@ -16,10 +17,10 @@ using Serilog;
 namespace AIShop.AguiHost;
 
 /// <summary>
-/// AguiHost 底座 DI 装配与启动引导（agui-host T3）。
-/// 底座注册与 AIShop.Api/Program.cs 同源（AddInfrastructure / AddRagService / ModelRouter / AgentTelemetry 绑定），
-/// 差异仅在：① 业务库/向量库换为 AguiHost 独立连接串（<c>agui.db</c>/<c>agui.rag.db</c>，数据隔离 spec 验收 5）；
-/// ② 不挂 <c>AddMemoryService()</c>（其 SqliteMemoryStore 写死 aishop.db，见 <see cref="AddAguiBaseServices"/> 内注释）。
+/// AguiHost 底座 DI 装配与启动引导（agui-host T3 + T13）。
+/// 底座注册与 AIShop.Api/Program.cs 同源（AddInfrastructure / AddRagService / AddMemoryService / ModelRouter /
+/// AgentTelemetry 绑定），差异仅在：业务库/向量库/记忆库换为 AguiHost 独立连接串或文件（<c>agui.db</c>/
+/// <c>agui.rag.db</c>/<c>agui.memory.db</c>，数据隔离 spec 验收 5；老 aishop.db / aishop.rag.db 零接触）。
 /// internal + InternalsVisibleTo 暴露给 AIShop.AguiHost.Tests，供宿主级测试直接驱动装配/启动引导。
 /// </summary>
 internal static class AguiServiceCollectionExtensions
@@ -33,21 +34,27 @@ internal static class AguiServiceCollectionExtensions
     /// <summary>AguiHost 独立会话库连接串（T12，缺省回退点）。老 aishop.db 零接触。</summary>
     internal const string DefaultSessionDbConnection = "Data Source=agui.sessions.db";
 
+    /// <summary>AguiHost 独立记忆库路径（T13，缺省回退点；SqliteMemoryStore 按路径建库）。老 aishop.db 零接触。</summary>
+    internal const string DefaultMemoryDatabasePath = "agui.memory.db";
+
     /// <summary>
-    /// 注册 AguiHost 底座 DI：EF 仓储（独立业务库）+ RAG 语义检索（独立向量库）+ 购物工具工厂/模型路由/全局默认
-    /// <see cref="IChatClient"/> + Agent 遥测配置绑定。装配契约（spec §4.2/§4.3）：
-    /// <c>AddInfrastructure(dbConnection)</c> / <c>AddRagService(ragConnection)</c>，参数缺省时回退
-    /// <see cref="DefaultDbConnection"/>/<see cref="DefaultRagConnection"/>。
+    /// 注册 AguiHost 底座 DI：EF 仓储（独立业务库）+ RAG 语义检索（独立向量库）+ Mem0 记忆（独立记忆库）+
+    /// 购物工具工厂/模型路由/全局默认 <see cref="IChatClient"/> + Agent 遥测配置绑定。装配契约（spec §4.2/§4.3/§13.2）：
+    /// <c>AddInfrastructure(dbConnection)</c> / <c>AddRagService(ragConnection)</c> / <c>AddMemoryService(memoryDatabasePath)</c>，
+    /// 参数缺省时回退 <see cref="DefaultDbConnection"/>/<see cref="DefaultRagConnection"/>/<see cref="DefaultMemoryDatabasePath"/>。
     /// </summary>
     /// <param name="services">服务集合。</param>
     /// <param name="config">应用配置（读 AgentTelemetry 节绑定遥测选项；Models 节供 ModelRouter 延迟解析）。</param>
     /// <param name="dbConnection">EF 业务库连接串；null 时用 <see cref="DefaultDbConnection"/>。</param>
     /// <param name="ragConnection">RAG 向量库连接串；null 时用 <see cref="DefaultRagConnection"/>。</param>
+    /// <param name="memoryDatabasePath">Mem0 记忆库路径（<c>SqliteMemoryStore</c> 按路径建库）；null 时用
+    /// <see cref="DefaultMemoryDatabasePath"/>。老 <c>AddMemoryService()</c> 无参默认 aishop.db 不受影响。</param>
     internal static IServiceCollection AddAguiBaseServices(
         this IServiceCollection services,
         IConfiguration config,
         string? dbConnection = null,
-        string? ragConnection = null)
+        string? ragConnection = null,
+        string? memoryDatabasePath = null)
     {
         // 独立 SQLite 业务库 agui.db：复用 Infra AppDbContext + EF 仓储（MigrateAsync 由 InitializeAsync 执行，勿 EnsureCreated）
         dbConnection ??= DefaultDbConnection;
@@ -79,8 +86,13 @@ internal static class AguiServiceCollectionExtensions
 
 
 
-        // 本宿主 MVP 不挂 AddMemoryService()：其 SqliteMemoryStore 写死 aishop.db，挂载会触碰老库违反数据隔离
-        // （spec 验收 5），且「AGUI 专属用户画像记忆」属 spec 非目标；如需会话/画像记忆属后续路线（复用 Mem0）。
+        // Mem0 记忆（T13，挂独立记忆库）：老 AddMemoryService() 写死 aishop.db 会触碰老库违反数据隔离（spec 验收 5），
+        // 经 T13 Infra 参数化后传入本宿主独立记忆库路径（缺省 agui.memory.db）——memories / memory_history 表由
+        // SqliteMemoryStore.InitializeAsync 自建（InitializeAsync 预热，失败仅 Warning）。IMemoryService 单例解析会
+        // 加载本地 bge ONNX 模型（Models/bge-small-zh-v1.5），模型缺失时在 Program keyed factory 降级不挂记忆 provider
+        // （见 Program.cs ResolveMemoryService 注释），启动不因模型缺失而崩。
+        memoryDatabasePath ??= DefaultMemoryDatabasePath;
+        services.AddMemoryService(memoryDatabasePath);
 
         return services;
     }
@@ -107,7 +119,8 @@ internal static class AguiServiceCollectionExtensions
 
     /// <summary>
     /// 启动引导（Program top-level 与宿主级测试共用）：MigrateAsync（勿 EnsureCreated）→ 幂等播种
-    /// marla/steve/fzf003 + ProductSeedData 18 商品 → RAG 向量索引预热（EnsureIndexedAsync，失败仅 Warning）。
+    /// marla/steve/fzf003 + ProductSeedData 18 商品 → RAG 向量索引预热（EnsureIndexedAsync，失败仅 Warning）→
+    /// Mem0 记忆库建表（SqliteMemoryStore.InitializeAsync，失败仅 Warning）。
     /// 若已注册会话 store（AddAguiSessionStore）则预热其 agent_sessions 表（幂等建表，失败仅 Warning）。
     /// 语义对齐 AIShop.Api/Program.cs 的启动逻辑。
     /// </summary>
@@ -152,6 +165,20 @@ internal static class AguiServiceCollectionExtensions
         catch (Exception ex)
         {
             Log.Warning(ex, "RAG 索引预热失败，首次检索将懒构建兜底");
+        }
+
+        // 预热 Mem0 记忆库（T13）：幂等建 memories / memory_history 表，使首个记忆读写不承担 DDL。
+        // 只解析 SqliteMemoryStore（不解析 IMemoryService——后者会加载本地 bge ONNX 模型，属运行时懒加载），
+        // 建表失败仅 Warning（如路径不可写），store 首次访问仍会自建表兜底（同 Api/Program.cs L129-137）。
+        try
+        {
+            var memoryStore = scope.ServiceProvider.GetService<SqliteMemoryStore>();
+            if (memoryStore is not null)
+                await memoryStore.InitializeAsync();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "记忆库初始化失败");
         }
 
         // 预热会话持久化 store（T12，若已经 AddAguiSessionStore 注册）：幂等建 agent_sessions 表，使首个会话
