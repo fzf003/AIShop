@@ -69,9 +69,11 @@ try
     // 与 MapAGUIServer(AgentName,"/") 路由互不冲突；生产环境不映射即天然关闭（验收 6「非 Development 不暴露」）。
     if (app.Environment.IsDevelopment())
     {
-        app.MapDevUI();
+        // DevUI 会话通道：OpenAI Responses/Conversations wire 供 DevUI 面板发起会话（官方样例 AgentWebChat /
+        // DevUIAspireIntegration 成对出现）——与上方服务注册配套，勿注释、勿删除（注释会触发 S125，DevUI 会话不可用）。
         app.MapOpenAIResponses();
         app.MapOpenAIConversations();
+        app.MapDevUI();
     }
 
     await app.RunAsync();

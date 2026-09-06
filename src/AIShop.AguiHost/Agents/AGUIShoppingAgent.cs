@@ -1,15 +1,19 @@
+#pragma warning disable MAAI001 // 上下文压缩 API（CompactionProvider / ContextWindowCompactionStrategy）为 MAF [Experimental]
 using AIShop.Service.Tools;
 using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Compaction;
 using Microsoft.Extensions.AI;
 
 namespace AIShop.AguiHost.Agents;
 
 /// <summary>
-/// AGUIShoppingAgent 装配（agui-host T4）：从零设计的新购物 <see cref="ChatClientAgent"/>。
-/// 形态 = <c>chatClient.AsAIAgent(name: "AGUIShopping", instructions, tools)</c>，工具复用
+/// AGUIShoppingAgent 装配（agui-host T4 + T8）：从零设计的新购物 <see cref="ChatClientAgent"/>。
+/// 形态 = <c>chatClient.AsAIAgent(name: "AGUIShopping", instructions, tools)</c>（T8 起经
+/// <see cref="ChatClientAgentOptions"/> 重载构造，等价于位置签名并额外挂 AIContextProviders），工具复用
 /// <see cref="CartToolProvider.CreateTools()"/>（5 购物工具，与老 Agent 同源）。
 /// 会话由 AG-UI <c>AgentSessionStore</c>（ThreadId）承载，无自管 session 字典、无 StateBag 偏好注入；
 /// 不复用旧 ShoppingAssistantAgent 的 HarnessAgent 外壳与 <c>Reply + Keywords + Preferences</c> JSON 回复协议。
+/// T8 起装配 <see cref="CompactionProvider"/> 上下文压缩（阈值对齐老 ShoppingAssistantAgent），见 Create 内注释。
 /// </summary>
 /// <remarks>
 /// AG-UI 为 preview 包（Microsoft.Agents.AI 1.20.0）：核心包 <b>没有 <c>WithTools</c></b> 扩展，
@@ -40,12 +44,20 @@ internal static class AGUIShoppingAgent
         - remove_from_cart：从购物车移除某个商品条目。
 
         请遵循以下工作方式：
-        1. 用户提出购物/寻找请求 → 先 search_product，命中后在回复中说明商品名称、编号与价格，再按用户意图推进购买。
+        1. 用户提出购物/寻找请求 → 先 search_product，命中后在回复中说明商品名称与价格（不要在回复中出现商品内部编号），再按用户意图推进购买。
         2. 用户表达要买/加购某商品 → 用检索结果中的商品编号直接 add_to_cart，不要反复确认；
            已加购过的商品不要重复加购，如需调整数量改用 update_cart_quantity。
         3. 用户查看购物车 → get_cart_summary；改数量/移除 → 相应工具，不要用自然语言假装完成。
         4. 每次执行工具后给用户一句自然的文字反馈（加购成功、车内现有商品等），不要沉默，也不要用冗长解释替代行动。
         5. 用户身份与购物车由系统自动关联，无需向用户询问任何登录信息。
+
+        6. 面向用户的回复输出规约（用户明确要求，优先级最高）：
+           - 一律为简体中文纯文本，禁止任何 Markdown 标记：不要用加粗或斜体（**、*、__），
+             不要用列表符号（-、*、数字加点的项目列表），不要用标题（#），不要用代码块（```）。
+           - 简洁自然：每执行完一步工具后，紧跟一句自然的文字说明结果（如「已为您加入购物车」「购物车当前共 1 件，合计 ¥129.99」），
+             不要输出分点清单，不要输出 Markdown 列表，不要长篇大论。
+           - 不要在回复中向用户展示任何商品内部编号 / 商品 ID（工具检索结果里的编号仅用于内部加购等操作）。
+             需要指代某件商品时，只使用商品名称与价格即可，例如「专业跑鞋，¥129.99」，不要写成「专业跑鞋（编号 3）」。
         """;
 
     /// <summary>
@@ -61,11 +73,33 @@ internal static class AGUIShoppingAgent
     {
         var instructions = instructionsOverride ?? DefaultInstructions;
 
-        // AG-UI 官方宿主形态：AsAIAgent 位置签名 = (instructions, name, description, tools, ...)，
-        // 故 name/instructions/tools 全部具名传递；tools 经 IList{AITool} 挂到 Agent 默认 ChatOptions。
-        return chatClient.AsAIAgent(
-            name: AgentName,
-            instructions: instructions,
-            tools: cartTools.CreateTools().ToList());
+        // 上下文压缩（T8，评审补齐缺口）：现装配无压缩、长对话上下文会无限膨胀；老 ShoppingAssistantAgent 挂了
+        // CompactionProvider + ContextWindowCompactionStrategy。此处对齐老 Agent 阈值（maxContextWindowTokens:
+        // 128000 / maxOutputTokens: 16384 / toolEvictionThreshold: 0.5 / truncationThreshold: 0.8）。
+        // stateKey 显式给 "AGUIShopping-Compaction"：CompactionProvider 状态存 AgentSession.StateBag，缺省按策略
+        // 类型名（ContextWindowCompactionStrategy）作 key，多个 agent 同 session 会话会互相覆盖，显式 key 隔离。
+        var compactionProvider = new CompactionProvider(
+            new ContextWindowCompactionStrategy(
+                maxContextWindowTokens: 128000,
+                maxOutputTokens: 16384,
+                toolEvictionThreshold: 0.5,
+                truncationThreshold: 0.8),
+            stateKey: "AGUIShopping-Compaction");
+
+        // AG-UI 官方宿主形态：位置签名 AsAIAgent(instructions, name, description, tools, ...) 实为包一层
+        // ChatClientAgentOptions；这里直接构造 ChatClientAgentOptions（Name/ChatOptions/AIContextProviders），
+        // 以便把压缩 provider 经 AIContextProviders 挂入。ChatOptions.Tools 承载 5 购物工具。
+        var options = new ChatClientAgentOptions
+        {
+            Name = AgentName,
+            ChatOptions = new ChatOptions
+            {
+                Instructions = instructions,
+                Tools = cartTools.CreateTools().ToList()
+            },
+            AIContextProviders = [compactionProvider]
+        };
+
+        return chatClient.AsAIAgent(options);
     }
 }

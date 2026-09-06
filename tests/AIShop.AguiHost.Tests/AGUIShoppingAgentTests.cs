@@ -3,6 +3,7 @@ using AIShop.Core.Interfaces;
 using AIShop.Service;
 using AIShop.Service.Tools;
 using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Compaction;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using NSubstitute;
@@ -105,5 +106,29 @@ public sealed class AGUIShoppingAgentTests
         var tools = GetMountedChatOptions(agent).Tools;
         Assert.NotNull(tools);
         Assert.Equal(5, tools.Count);
+    }
+
+    [Fact]
+    public void Create_AttachesContextCompactionProvider_WithExplicitStateKey()
+    {
+#pragma warning disable MAAI001 // CompactionProvider 为 MAF [Experimental]，测试内引用类型亦触发诊断
+        var agent = CreateAgent();
+
+        // 上下文压缩装配（T8，评审补齐缺口）：现 AsAIAgent(name, instructions, tools) 无压缩，长对话上下文会无限
+        // 膨胀。ChatClientAgent 公开 AIContextProviders 列表（GetService(typeof(ChatClientAgentOptions)) 亦可达），
+        // 应恰好含一个 CompactionProvider——此前列表为空/未挂，装配改变即被本用例锁定。
+        var chatClientAgent = Assert.IsType<ChatClientAgent>(agent);
+        Assert.NotNull(chatClientAgent.AIContextProviders);
+        var compactionProviders = chatClientAgent.AIContextProviders.OfType<CompactionProvider>().ToList();
+
+        // 上下文压缩应恰挂一个 CompactionProvider（此前 AsAIAgent 位置签名无 AIContextProviders）
+        Assert.Single(compactionProviders);
+
+        // stateKey 显式 "AGUIShopping-Compaction"（非缺省策略类型名），避免多 agent 同 session 共享 StateBag 撞 key。
+        Assert.Equal(new[] { "AGUIShopping-Compaction" }, compactionProviders[0].StateKeys);
+
+        // 阈值对齐老 ShoppingAssistantAgent（128k/16k/0.5/0.8）在 Create 内以具名实参内联，CompactionProvider 不暴露
+        // 内嵌 strategy 读面；此处锁定「压缩 provider 已挂 + 独立 stateKey」，阈值由装配代码评审核对。
+#pragma warning restore MAAI001
     }
 }
