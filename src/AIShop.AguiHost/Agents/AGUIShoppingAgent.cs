@@ -15,6 +15,9 @@ namespace AIShop.AguiHost.Agents;
 /// AG-UI 为 preview 包（Microsoft.Agents.AI 1.20.0）：核心包 <b>没有 <c>WithTools</c></b> 扩展，
 /// 挂工具经 <see cref="ChatClientExtensions.AsAIAgent"/> 的 <c>tools</c> 参数直接写入 Agent 默认
 /// <see cref="ChatOptions"/>（API 面以本地镜像 preview 源码为准）。
+/// T7 起 AguiHost/Program.cs 不再直接调用本方法构造局部 agent，而是把它作为 <b>keyed factory body</b>
+/// 经 <c>AddKeyedSingleton&lt;AIAgent&gt;(AgentName, ...)</c> 注册进 DI（签名不变）：供 AG-UI <c>MapAGUIServer(agentName, pattern)</c>
+/// 按名解析与 DevUI <c>/v1/entities</c> 实体发现共用同一装配产物。
 /// </remarks>
 internal static class AGUIShoppingAgent
 {

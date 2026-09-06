@@ -12,10 +12,14 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- AG-UI 官方宿主 preview 包：版本已在 Directory.Packages.props 锁定 1.20.0-preview.260831.1，此处仅补引用（不引入 DevUI 包）。
-         AddAGUIServer/MapAGUIServer/AsAIAgent/WithTools 等 AG-UI 装配 API 以本地镜像 preview 源码为准（设计 §4.1） -->
+    <!-- AG-UI 官方宿主 preview 包 + DevUI 开发面板 + OpenAI wire（T7）：版本已在 Directory.Packages.props 锁定
+         （AGUI/Hosting.AspNetCore/DevUI = 1.20.0-preview.260831.1，Hosting.OpenAI = 1.20.0-alpha.260831.1），此处仅补引用。
+         AddAGUIServer/MapAGUIServer/AsAIAgent 等 AG-UI 装配 API 与 AddDevUI/MapDevUI/AddOpenAI*/MapOpenAI*
+         以本地镜像 preview 源码为准（设计 §4.1/§4.6；Hosting.OpenAI 为 alpha 非 preview） -->
     <PackageReference Include="Microsoft.Agents.AI.Hosting.AGUI.AspNetCore" />
     <PackageReference Include="Microsoft.Agents.AI.Hosting.AspNetCore" />
+    <PackageReference Include="Microsoft.Agents.AI.DevUI" />
+    <PackageReference Include="Microsoft.Agents.AI.Hosting.OpenAI" />
     <!-- Serilog 结构化日志（Program.cs bootstrap / AddSerilog / WriteTo.Console；版本 CPM 锁定 10.0.0 / 6.1.1） -->
     <PackageReference Include="Serilog.AspNetCore" />
     <PackageReference Include="Serilog.Sinks.Console" />
@@ -27,6 +31,12 @@
     <!-- 测试缝：使 internal AddAguiBaseServices/InitializeAsync 对 AIShop.AguiHost.Tests 可见（宿主级测试直接驱动装配/启动引导）。
          （property 形式的 <InternalsVisibleTo> 不生成 friend 特性，必须用 item 形式 Include） -->
     <InternalsVisibleTo Include="AIShop.AguiHost.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update=".env">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>
