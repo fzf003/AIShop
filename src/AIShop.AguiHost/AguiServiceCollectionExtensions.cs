@@ -1,5 +1,6 @@
 using AIShop.AgentTelemetry;
 using AIShop.AguiHost.Agents;
+using AIShop.AguiHost.Model;
 using AIShop.Core.Entities;
 using AIShop.Core.Interfaces;
 using AIShop.Core.StaticData;
@@ -68,6 +69,12 @@ internal static class AguiServiceCollectionExtensions
         services.AddSingleton<CartToolProvider>();
         // 模型管道 / 多模型（读 Models 节，Agent 语义检索链路复用）
         services.AddSingleton<ModelRouter>();
+
+        // C5 M1（agui-model-switch）：AguiHost 自建「模型 → 底层客户端」工厂（读 Models 节 + ActiveModel 缺省，
+        // 每模型懒建缓存 + 每客户端 OTel 外包；见 src/AIShop.AguiHost/Model/）。M1 仅【增量注册工厂类型】——
+        // 老 ModelRouter 仍是下方全局 IChatClient seam 的来源（RouterChatClient 尚未接线、无人解析本工厂），
+        // M4 才切换装配面（移除 ModelRouter 注册 + 全局 IChatClient = 工厂 GetDefaultClient）。
+        services.AddSingleton<IModelChatClientFactory, AguiModelClientFactory>();
 
 
         // Agent 遥测：绑定 "AgentTelemetry" 配置节，注册 AgentTelemetryOptions 单例（同 Api/Program.cs L62-66）
