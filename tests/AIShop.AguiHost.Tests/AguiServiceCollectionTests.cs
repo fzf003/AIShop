@@ -64,14 +64,16 @@ public sealed class AguiServiceCollectionTests
         // RAG 语义检索服务已注册（AddRagService 生效；连接串指向独立向量库在 InitializeAsync 预热时落盘）
         Assert.NotNull(sp.GetRequiredService<IProductSemanticSearch>());
 
-        // 全局默认 chatClient = ModelRouter.GetDefaultChatClient()（非 DeepSeek 路径构建离线客户端，不触发网络）。
-        // T11：注册时先外包 ReplySanitizingChatClient 服务端清洗中间件（agent 输出离开 AguiHost 前清洗商品编号）；
-        // 协调收编（用户改动，装配已挂 UseOpenTelemetry）：其后再经 .AsBuilder().UseOpenTelemetry(sourceName).Build()
-        // 外包 OTel 埋点中间件（OpenTelemetryChatClient）。故容器解析出的最外层不再是裸 ReplySanitizingChatClient，
-        // 而是 OpenTelemetryChatClient；清洗语义仍在链内——沿 DelegatingChatClient 链 GetService 可解析回清洗中间件。
+        // 全局默认 chatClient = ModelRouter.GetDefaultChatClient()（非 DeepSeek 路径构建离线客户端，不触发网络），
+        // 外层仅 OTel 遥测包装（.AsBuilder().UseOpenTelemetry(sourceName) → OpenTelemetryChatClient）。
+        // C3（修复工单，方案 2）：全局模型 seam【不含】ReplySanitizingChatClient——记忆服务（IMemoryService 内部
+        // 经 GetRequiredService<IChatClient>() 取本单例做提取/冲突消解/精排）不能用「面向用户的商品编号清洗」剥落
+        // 记忆文本；清洗已隔离到 AGUIShopping 专属 chatClient（Program keyed factory 外包，见 AguiDevUITests
+        // KeyedAIAgent_..._CarriesReplySanitizingChatClient 断言）。
         var chatClient = sp.GetRequiredService<IChatClient>();
         Assert.Contains("OpenTelemetryChatClient", chatClient.GetType().Name);
-        Assert.NotNull(chatClient.GetService(typeof(ReplySanitizingChatClient)));
+        // 全局纯净：沿 DelegatingChatClient 链 GetService 解析不到清洗中间件（模型 seam 不被展示规则污染）
+        Assert.Null(chatClient.GetService(typeof(ReplySanitizingChatClient)));
     }
 
     [Fact]

@@ -75,13 +75,15 @@ internal static class AguiServiceCollectionExtensions
         services.Configure<AgentTelemetryOptions>(agentTelemetrySection);
         services.AddSingleton(sp => sp.GetRequiredService<IOptions<AgentTelemetryOptions>>().Value);
 
-        // 全局默认 chatClient（与 Api/Program.cs 同一创建逻辑；AGUIShoppingAgent 与记忆链路共用）。
-        // T11（服务端回复清洗兜底）：外包一层 ReplySanitizingChatClient 中间件——agent 输出文本（含流式增量）
-        // 离开 AguiHost 前经 Core ReplySanitizer 清洗商品编号（#5 / 商品Id:4 / 商品ID为4 等），与老 Agent
-        // SanitizeReply 同语义。只作用于本宿主 chatClient 单例（AGUIShopping 装配 + 请求复用），
-        // 不影响老 Api/Service 经各自 ModelRouter 构建的实例。
+        // 全局默认 chatClient（与 Api/Program.cs 同一创建逻辑）：模型 seam，被 AGUIShopping 装配与记忆服务
+        // （IMemoryService 内部 GetRequiredService<IChatClient>()，见 Infra MemoryDependencyInjection）共用。
+        // C3（修复工单，方案 2）：本单例【不再外包 ReplySanitizingChatClient】——保持纯净（仅外层 OTel 遥测包装）。
+        // 理由：记忆提取 / 冲突消解 / 精排若走「面向用户的商品编号清洗」中间件，会把回复文本中的商品编号剥落，
+        // 污染落库记忆（Mem0 提取的是模型可见的完整内容）。清洗是展示层规则，只应作用于面向用户的 agent 输出，
+        // 故隔离到 AGUIShopping 专属 chatClient 路径显式外包（见 Program.cs keyed factory 的 agent 实参），
+        // 记忆 / 内部链路一律走下方纯净 seam。遥测（UseOpenTelemetry）与清洗无关，保留在全局包装上。
         services.AddSingleton<IChatClient>(sp =>
-            new ReplySanitizingChatClient(sp.GetRequiredService<ModelRouter>().GetDefaultChatClient())
+            sp.GetRequiredService<ModelRouter>().GetDefaultChatClient()
             .AsBuilder().UseOpenTelemetry(sourceName: sp.GetRequiredService<IOptions<AgentTelemetryOptions>>().Value.SourceName).Build());
 
 

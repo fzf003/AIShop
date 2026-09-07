@@ -128,6 +128,28 @@ public sealed class AguiDevUITests
         Assert.Contains("OpenTelemetryAgent", agent.GetType().Name);
     }
 
+    [Fact]
+    public void KeyedAIAgent_AguiShopping_UnderlyingChatClient_CarriesReplySanitizingChatClient()
+    {
+        // C3（修复工单，方案 2）：回复清洗从全局 IChatClient 隔离到 AGUIShopping 专属 chatClient——Program keyed
+        // factory 以 new ReplySanitizingChatClient(sp.GetRequiredService<IChatClient>()) 作为 Create 的 chatClient
+        // 实参（清洗只作用于 agent 输出文本；工具 FRC 不过洗，模型内部仍见商品编号用于加购）。本断言锁住装配路径：
+        // keyed AIAgent 解析出的 agent（OpenTelemetryAgent，GetService 转发内层 ChatClientAgent → 其 ChatClient
+        // 管线）应能沿 DelegatingChatClient 链解析回 ReplySanitizingChatClient（agent 链带清洗）。对照
+        // AguiServiceCollectionTests 的「全局纯净（不含清洗中间件）」断言，二者共同证明清洗只存在于 agent 专属路径。
+        using var factory = CreateFactory("Development");
+
+        var agent = factory.Services.GetRequiredKeyedService<AIAgent>(AGUIShoppingAgent.AgentName);
+        Assert.NotNull(agent);
+        Assert.Equal(AGUIShoppingAgent.AgentName, agent.Name);
+
+        // agent.GetService(IChatClient) → 内层 ChatClientAgent.GetService 返回 this.ChatClient（LLM 管线）；
+        // 非空即证明底层 chatClient 可达（不至于因 Instrument 包装丢失内层管线读面）。
+        Assert.NotNull(agent.GetService(typeof(Meai.IChatClient)));
+        // 清洗中间件在 AGUIShopping 专属 chatClient 链上（GetService 沿 Delegating 链解析命中）
+        Assert.NotNull(agent.GetService(typeof(ReplySanitizingChatClient)));
+    }
+
     /// <summary>从 JSON 对象中读取字符串属性（缺键/非字符串返回 null）。</summary>
     private static string? GetJsonPropertyString(JsonElement element, string propertyName)
         => element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String

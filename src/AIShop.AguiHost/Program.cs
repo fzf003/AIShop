@@ -63,7 +63,12 @@ try
     // （实体枚举 = GetKeyedServices<AIAgent>(KeyedService.AnyKey)，见镜像 DevUI EntitiesApiExtensions）。
     builder.Services.AddKeyedSingleton<AIAgent>(AGUIShoppingAgent.AgentName, (sp, _) =>
         AGUIShoppingAgent.Create(
-            sp.GetRequiredService<IChatClient>(),
+            // C3（修复工单，方案 2）：AGUIShopping 专属 chatClient = 在全局纯净模型 seam（见 AddAguiBaseServices）
+            // 之上外包 ReplySanitizingChatClient（服务端回复清洗兜底，T11 语义不变：agent 输出文本——含流式增量——
+            // 离开本 Agent 前经 Core ReplySanitizer 清洗商品编号）。清洗只作用于 assistant 输出的 TextContent，
+            // 工具调用/工具结果（FRC）原样透传——模型内部仍见商品编号用于 add_to_cart；记忆链路（IMemoryService）
+            // 走全局纯净 seam，不被展示规则污染。
+            new ReplySanitizingChatClient(sp.GetRequiredService<IChatClient>()),
             sp.GetRequiredService<CartToolProvider>(),
             // T11（agent 遥测埋点）：把底座绑定（AgentTelemetry 配置节）的遥测选项传给 Create，
             // 让 AGUIShopping 返回前经 AgentTelemetry.Instrument 包装（对齐老 ShoppingAssistantAgent L188）
