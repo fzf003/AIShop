@@ -8,6 +8,7 @@ using AIShop.ServiceDefaults;
 using Mem0Sharp;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.DevUI;
+using Microsoft.Agents.AI.Hosting;
 using Microsoft.Agents.AI.Hosting.AGUI.AspNetCore;
 using Microsoft.Extensions.AI;
 using Serilog;
@@ -47,12 +48,16 @@ try
     {
         builder.Services.AddOpenAIResponses();
         builder.Services.AddOpenAIConversations();
-        builder.Services.AddDevUI();
+        builder.Services.AddDevUI(opt =>
+        {
+            opt.AllowRemoteAccess = true;
+
+        });
     }
 
     // 底座 DI 装配（T3 + C5）：AddInfrastructure("Data Source=agui.db") + AddRagService("Data Source=agui.rag.db")
     // + CartToolProvider/自建模型工厂与 RouterChatClient/默认 IChatClient + AgentTelemetryOptions 绑定
-    // （缺省连接串见扩展内常量；C5 起不再注册老 Service ModelRouter）
+    // （缺省连接串见扩展内常量；C5 起不再注册老 Service ModelRouter）。
     builder.Services.AddAguiBaseServices(builder.Configuration);
 
     // 会话历史持久化（T12）：keyed AgentSessionStore（key = "AGUIShopping"）指向独立会话库 agui.sessions.db，
@@ -63,27 +68,16 @@ try
     // T7 keyed AIAgent 注册：AGUIShopping 以 keyed AIAgent（key = AgentName）注册进 DI（独立于 IsDevelopment 门，
     // AG-UI "/" 端点在所有环境都按名解析）。这是 DevUI /v1/entities 能发现该实体、且 AG-UI 端点不因 keyed 化丢失的前提
     // （实体枚举 = GetKeyedServices<AIAgent>(KeyedService.AnyKey)，见镜像 DevUI EntitiesApiExtensions）。
-    builder.Services.AddKeyedSingleton<AIAgent>(AGUIShoppingAgent.AgentName, (sp, _) =>
+    builder.Services.AddAIAgent(AGUIShoppingAgent.AgentName, (sp, name) =>
         AGUIShoppingAgent.Create(
-            // C3（回复清洗隔离到 agent 专属链）+ C5 M4（agui-model-switch）：AGUIShopping 专属 chatClient =
-            // new ReplySanitizingChatClient(RouterChatClient)——回复清洗（C3）仍在 agent 专属链外层，覆盖 Router
-            // 切到的任一模型输出（含流式增量：离开本 Agent 前经 Core ReplySanitizer 清洗商品编号；清洗只作用于
-            // assistant 输出的 TextContent，工具调用/工具结果 FRC 原样透传——模型内部仍见商品编号用于 add_to_cart）；
-            // RouterChatClient（C5）在清洗之下，按本轮 forwardedProps.model（无 model → ActiveModel 缺省）把对话
-            // 委托到 IModelChatClientFactory 对应模型底层（spec Req7：单一 keyed agent 不变，仅底层换 Router）。
-            // 记忆链路（IMemoryService）走全局纯净 seam（工厂 GetDefaultClient，见 AddAguiBaseServices），不被展示规则污染。
-            new ReplySanitizingChatClient(sp.GetRequiredService<RouterChatClient>()),
+             new ReplySanitizingChatClient(sp.GetRequiredService<RouterChatClient>()),
             sp.GetRequiredService<CartToolProvider>(),
-            // T11（agent 遥测埋点）：把底座绑定（AgentTelemetry 配置节）的遥测选项传给 Create，
-            // 让 AGUIShopping 返回前经 AgentTelemetry.Instrument 包装（对齐老 ShoppingAssistantAgent L188）
             sp.GetRequiredService<AgentTelemetryOptions>(),
-            // T13（Mem0 跨会话记忆）：记忆服务（可空，解析失败降级不挂记忆）+ 当前用户访问器。
-            // 当前用户访问器非空解析：AGUI username 中间件（UseAguiUsernameForwarding）在 run 前 SetCurrentUser，
-            // MemoryContextProvider 依赖它按用户读写记忆（缺省用户 = seed fzf003，见 AguiUsernameForwarder）。
             memoryService: ResolveMemoryService(sp),
-            currentUser: sp.GetRequiredService<ICurrentUserAccessor>()));
+            currentUser: sp.GetRequiredService<ICurrentUserAccessor>())
+        );
 
-    // T13：解析 Mem0 记忆服务（IMemoryService）。IMemoryService 单例构造会 new LocalBgeEmbeddingGenerator(modelDir)
+     // 解析 Mem0 记忆服务（IMemoryService）。IMemoryService 单例构造会 new LocalBgeEmbeddingGenerator(modelDir)
     // ——构造即 new InferenceSession(model.onnx) 加载本地 bge ONNX 模型（~94MB，Models/bge-small-zh-v1.5）；
     // 输出目录缺模型或加载异常时解析会抛异常，此处 try/catch 降级为不挂记忆 provider（返回 null → Create 仅挂压缩），
     // 其余购物功能不受影响（对齐 RAG 预热降级语义），避免 AguiHost 启动/首次装配即崩。

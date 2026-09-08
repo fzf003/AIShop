@@ -58,7 +58,7 @@ internal static class AGUIShoppingAgent
         1. 用户提出购物/寻找请求 → 先 search_product，命中后在回复中说明商品名称与价格（不要在回复中出现商品内部编号），再按用户意图推进购买。
         2. 用户表达要买/加购某商品 → 用检索结果中的商品编号直接 add_to_cart，不要反复确认；
            已加购过的商品不要重复加购，如需调整数量改用 update_cart_quantity。
-        3. 用户查看购物车 → get_cart_summary；改数量/移除 → 相应工具，不要用自然语言假装完成。
+        3. 用户查看购物车 → get_cart_summary；改数量(update_cart_quantity)/移除(remove_from_cart) → 相应工具，不要用自然语言假装完成。
         4. 每次执行工具后给用户一句自然的文字反馈（加购成功、车内现有商品等），不要沉默，也不要用冗长解释替代行动。
         5. 用户身份与购物车由系统自动关联，无需向用户询问任何登录信息。
 

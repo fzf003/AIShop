@@ -14,7 +14,7 @@ namespace AIShop.AguiHost.Tests;
 /// <summary>
 /// T4 AGUIShoppingAgent 装配测试：从零设计的 ChatClientAgent 形态（不复用旧 HarnessAgent 外壳）、
 /// 名称 AGUIShopping、自然语言购物人设（不含旧 Reply+Keywords+Preferences JSON 协议关键字）、
-/// 5 购物工具（CartToolProvider.CreateTools）已挂载。
+/// CartToolProvider.CreateTools() 暴露的全部工具（5 购物工具 + 用户收编追加的 DateTime/Weather/Stock 3 通用工具）已挂载。
 /// 离线链路：NSubstitute <see cref="IChatClient"/> + 真实 <see cref="CartToolProvider"/>（mock
 /// IServiceScopeFactory/ICurrentUserAccessor，semanticSearch 缺省 null —— 工具创建不触碰 DB）。
 /// </summary>
@@ -33,7 +33,7 @@ public sealed class AGUIShoppingAgentTests
             instructionsOverride: instructionsOverride);
     }
 
-    /// <summary>构造真实 CartToolProvider：仅把 5 购物工具挂到 Agent，工具函数体不被调用，故依赖可全部 mock。</summary>
+    /// <summary>构造真实 CartToolProvider：把 CreateTools() 暴露的全部工具挂到 Agent，工具函数体不被调用，故依赖可全部 mock。</summary>
     private static CartToolProvider CreateCartTools()
     {
         var scopeFactory = Substitute.For<IServiceScopeFactory>();
@@ -85,15 +85,21 @@ public sealed class AGUIShoppingAgentTests
     }
 
     [Fact]
-    public void Create_AttachesAllFiveCartTools_FromCartToolProvider()
+    public void Create_AttachesAllToolsFromCartToolProvider()
     {
         var agent = CreateAgent();
         var tools = GetMountedChatOptions(agent).Tools;
 
-        // 5 购物工具已挂载（复用 CartToolProvider.CreateTools，与老 Agent 同源）：加购/改量/查车/移除/搜索
+        // CartToolProvider.CreateTools() 暴露的全部工具已挂载（复用与老 Agent 同源的工具宿主）：
+        // 5 购物工具（搜索/加购/改量/查车/移除）+ 用户收编追加的 3 通用工具（get_current_datetime/
+        // get_weather_forecast/get_stock_quote）——断言精确全集，新增工具漏挂/多挂都会被本用例锁定。
         Assert.NotNull(tools);
         var names = tools.Select(t => t.Name).ToArray();
-        var expected = new[] { "search_product", "add_to_cart", "update_cart_quantity", "get_cart_summary", "remove_from_cart" };
+        var expected = new[]
+        {
+            "search_product", "add_to_cart", "update_cart_quantity", "get_cart_summary", "remove_from_cart",
+            "get_current_datetime", "get_weather_forecast", "get_stock_quote",
+        };
         Assert.Equal(expected.Length, names.Length);
         Assert.Equal(
             expected.OrderBy(x => x, StringComparer.Ordinal),
@@ -109,10 +115,10 @@ public sealed class AGUIShoppingAgentTests
         // instructionsOverride 生效时覆盖默认人设（供宿主/测试按需注入）
         Assert.Equal(overrideInstructions, GetMountedChatOptions(agent).Instructions);
 
-        // 覆盖人设不改变工具挂载（5 购物工具仍来自 CartToolProvider.CreateTools）
+        // 覆盖人设不改变工具挂载（全部工具仍来自 CartToolProvider.CreateTools，当前 8 个）
         var tools = GetMountedChatOptions(agent).Tools;
         Assert.NotNull(tools);
-        Assert.Equal(5, tools.Count);
+        Assert.Equal(8, tools.Count);
     }
 
     [Fact]
@@ -144,7 +150,7 @@ public sealed class AGUIShoppingAgentTests
     {
         // T11（agent 遥测埋点）：非 None Level 经 AgentTelemetry.Instrument 包装（对齐老 ShoppingAssistantAgent L188）。
         // 返回 OpenTelemetryAgent（继承 AIAgent 的装饰器），Name 保持 AGUIShopping；GetService 转发内层 ChatOptions
-        // （5 购物工具挂载面仍可读，证明装配产物可用）。
+        // （全部工具挂载面仍可读，证明装配产物可用）。
         var agent = AGUIShoppingAgent.Create(
             Substitute.For<IChatClient>(),
             CreateCartTools(),
@@ -155,6 +161,6 @@ public sealed class AGUIShoppingAgentTests
 
         var tools = GetMountedChatOptions(agent).Tools;
         Assert.NotNull(tools);
-        Assert.Equal(5, tools.Count);
+        Assert.Equal(8, tools.Count);
     }
 }

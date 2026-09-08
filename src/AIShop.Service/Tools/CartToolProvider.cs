@@ -171,7 +171,7 @@ public sealed class CartToolProvider(
         var totalPrice = cart.TotalPrice;
 
         var lines = cart.Items
-            .Select(i => $"{i.ProductName} x{i.Quantity} = ¥{i.ProductPrice * i.Quantity:F2}")
+            .Select(i => $"Id:{i.Id}-{i.ProductName}-{i.ProductId}- x{i.Quantity} = ¥{i.ProductPrice * i.Quantity:F2}")
             .ToList();
 
         return $"您的购物车共 {totalItems} 件商品，总计 ¥{totalPrice:F2}\n"
@@ -239,6 +239,10 @@ public sealed class CartToolProvider(
                 "搜索商品。keyword=用户要的商品关键词（如咖啡机、耳机）；category=可选商品类别（厨房用品/健身/电子产品等，须为真实类别），"
                 + "用户明确说类型时填）。用户明确指定商品类型/类别时必须优先返回该类商品，不得用不相关商品充数；"
                 + "未找到足够相关商品时如实告知，不要硬推。"),
+
+            DateTimeTool.Create(),
+            WeatherTool.Create(),
+            StockTool.Create()
         ];
     }
 }
