@@ -58,12 +58,18 @@ try
     // 底座 DI 装配（T3 + C5）：AddInfrastructure("Data Source=agui.db") + AddRagService("Data Source=agui.rag.db")
     // + CartToolProvider/自建模型工厂与 RouterChatClient/默认 IChatClient + AgentTelemetryOptions 绑定
     // （缺省连接串见扩展内常量；C5 起不再注册老 Service ModelRouter）。
-    builder.Services.AddAguiBaseServices(builder.Configuration);
+    // T16 seam（连接串可选读）：业务库/向量库连接串改读可选配置键 Agui:DbConnection / Agui:RagConnection，
+    // 缺省（键不存在或为空）→ null → 扩展内常量回退——产品逻辑零变化，仅供宿主级测试注入临时库隔离。
+    builder.Services.AddAguiBaseServices(
+        builder.Configuration,
+        dbConnection: builder.Configuration["Agui:DbConnection"],
+        ragConnection: builder.Configuration["Agui:RagConnection"]);
 
     // 会话历史持久化（T12）：keyed AgentSessionStore（key = "AGUIShopping"）指向独立会话库 agui.sessions.db，
     // 取代默认 ephemeral（Noop）——MapAGUIServer 按 agent.Name keyed 解析命中，流结束 SaveSessionAsync 落库、
     // 同 ThreadId 下次 GetSessionAsync 还原（重启不丢上下文）。缺省连接串见 AddAguiSessionStore/扩展内常量。
-    builder.Services.AddAguiSessionStore();
+    // T16 seam：会话库连接串改读可选配置键 Agui:SessionConnection，缺省 → null → 扩展内常量回退（行为零变化）。
+    builder.Services.AddAguiSessionStore(builder.Configuration["Agui:SessionConnection"]);
 
     // T7 keyed AIAgent 注册：AGUIShopping 以 keyed AIAgent（key = AgentName）注册进 DI（独立于 IsDevelopment 门，
     // AG-UI "/" 端点在所有环境都按名解析）。这是 DevUI /v1/entities 能发现该实体、且 AG-UI 端点不因 keyed 化丢失的前提
