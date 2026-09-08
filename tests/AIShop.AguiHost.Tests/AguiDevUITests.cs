@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text.Json;
 using AIShop.AguiHost.Agents;
+using AIShop.AguiHost.Model;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.DevUI;
 using Microsoft.AspNetCore.Hosting;
@@ -26,7 +27,8 @@ public sealed class AguiDevUITestsCollection;
 ///  2) Development 下 /v1/entities 可发现 keyed AIAgent "AGUIShopping"（实体枚举 = GetKeyedServices&lt;AIAgent&gt;(AnyKey)，镜像 DevUI EntitiesApiExtensions）；
 ///  3) 非 Development（Production）不暴露 /devui 与 /v1/entities（404）；
 ///  4) keyed AIAgent 注册独立于 IsDevelopment 门可解析（AG-UI "/" 端点不因 keyed 化丢失的前提，MapAGUIServer 按名解析）。
-/// 离线驱动：IChatClient 替换为脚本化文本回复的 NSubstitute（不触发真实 LLM 会话，仅元数据/路由层），同 AguiRequestTests。
+/// 离线驱动：模型 seam 替换为 <see cref="IModelChatClientFactory"/> stub（C5 M4 起离线 override 点从全局 IChatClient
+/// 迁到工厂接口，spec Req11；stub 让所有 modelId 返回脚本化文本 mock，不触发真实 LLM 会话，仅元数据/路由层），同 AguiRequestTests。
 /// WAF TestServer 的 RemoteIpAddress 为 null（非 loopback）→ DevUI auth filter 默认 403，
 /// 故 Configure&lt;DevUIOptions&gt; 覆写 AllowRemoteAccess=true（DevUI 自身默认 loopback 属上游库行为，非本仓代码）。
 /// </summary>
@@ -131,12 +133,15 @@ public sealed class AguiDevUITests
     [Fact]
     public void KeyedAIAgent_AguiShopping_UnderlyingChatClient_CarriesReplySanitizingChatClient()
     {
-        // C3（修复工单，方案 2）：回复清洗从全局 IChatClient 隔离到 AGUIShopping 专属 chatClient——Program keyed
-        // factory 以 new ReplySanitizingChatClient(sp.GetRequiredService<IChatClient>()) 作为 Create 的 chatClient
-        // 实参（清洗只作用于 agent 输出文本；工具 FRC 不过洗，模型内部仍见商品编号用于加购）。本断言锁住装配路径：
+        // C3（回复清洗隔离到 agent 专属链）+ C5 M4（RouterChatClient 装配）：回复清洗从全局 IChatClient 隔离到
+        // AGUIShopping 专属 chatClient——Program keyed factory 以 new ReplySanitizingChatClient(
+        // sp.GetRequiredService<RouterChatClient>()) 作为 Create 的 chatClient 实参（C3 不回退：清洗仍在 agent 专属链
+        // 最外层，只作用于 agent 输出文本；工具 FRC 不过洗，模型内部仍见商品编号用于加购）。本断言锁住装配路径：
         // keyed AIAgent 解析出的 agent（OpenTelemetryAgent，GetService 转发内层 ChatClientAgent → 其 ChatClient
-        // 管线）应能沿 DelegatingChatClient 链解析回 ReplySanitizingChatClient（agent 链带清洗）。对照
-        // AguiServiceCollectionTests 的「全局纯净（不含清洗中间件）」断言，二者共同证明清洗只存在于 agent 专属路径。
+        // 管线）应能沿 DelegatingChatClient 链解析回 ReplySanitizingChatClient（agent 链带清洗）。RouterChatClient
+        // 位于清洗之下（每轮选模型，见 spec Req7），其入链装配证明由请求级 model 切换测试承担（GetService 沿链不自返回
+        // RouterChatClient 实例——直接实现 IChatClient、GetService 转发到当轮目标，design §5.3/实施期确认项 ③）。
+        // 对照 AguiServiceCollectionTests 的「全局纯净（不含清洗中间件）」断言，二者共同证明清洗只存在于 agent 专属路径。
         using var factory = CreateFactory("Development");
 
         var agent = factory.Services.GetRequiredKeyedService<AIAgent>(AGUIShoppingAgent.AgentName);
@@ -158,20 +163,23 @@ public sealed class AguiDevUITests
 
     /// <summary>
     /// 装配指定环境的 WAF：Program 在对应环境跑完整启动逻辑（IsDevelopment 门决定是否注册/映射 DevUI+OpenAI wire）；
-    /// 替换默认 IChatClient 为脚本化文本回复的 NSubstitute（免 Key 离线启动），并覆写 DevUIOptions.AllowRemoteAccess=true
-    /// （TestServer RemoteIpAddress 为 null → DevUI auth filter 403；仅测试宿主需要，DevUI 默认 loopback 属上游库行为）。
+    /// 替换模型 seam 为 <see cref="IModelChatClientFactory"/> stub（C5 M4 起离线 override 点从全局 IChatClient 迁到
+    /// 工厂接口——agent 聊天底层经 RouterChatClient → 工厂；stub 让所有 modelId 返回脚本化文本 mock，免 Key/真实 LLM），
+    /// 并覆写 DevUIOptions.AllowRemoteAccess=true（TestServer RemoteIpAddress 为 null → DevUI auth filter 403；
+    /// 仅测试宿主需要，DevUI 默认 loopback 属上游库行为）。
     /// </summary>
     private static WebApplicationFactory<Program> CreateFactory(string environment)
     {
         var mockChat = CreateMockChatClient();
+        var stubFactory = new StubModelChatClientFactory(mockChat);
 
         return new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseEnvironment(environment);
             builder.ConfigureServices(services =>
             {
-                services.RemoveAll<Meai.IChatClient>();
-                services.AddSingleton<Meai.IChatClient>(mockChat);
+                services.RemoveAll<IModelChatClientFactory>();
+                services.AddSingleton<IModelChatClientFactory>(stubFactory);
 
                 services.Configure<DevUIOptions>(options => options.AllowRemoteAccess = true);
             });

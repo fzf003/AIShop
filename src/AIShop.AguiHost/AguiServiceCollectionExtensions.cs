@@ -7,7 +7,6 @@ using AIShop.Core.StaticData;
 using AIShop.Infrastructure;
 using AIShop.Infrastructure.Data;
 using AIShop.Infrastructure.MemoryService;
-using AIShop.Service;
 using AIShop.Service.Tools;
 using Microsoft.Agents.AI.Hosting;
 using Microsoft.EntityFrameworkCore;
@@ -18,9 +17,10 @@ using Serilog;
 namespace AIShop.AguiHost;
 
 /// <summary>
-/// AguiHost 底座 DI 装配与启动引导（agui-host T3 + T13）。
-/// 底座注册与 AIShop.Api/Program.cs 同源（AddInfrastructure / AddRagService / AddMemoryService / ModelRouter /
-/// AgentTelemetry 绑定），差异仅在：业务库/向量库/记忆库换为 AguiHost 独立连接串或文件（<c>agui.db</c>/
+/// AguiHost 底座 DI 装配与启动引导（agui-host T3 + T13 + C5）。
+/// 底座注册与 AIShop.Api/Program.cs 同源（AddInfrastructure / AddRagService / AddMemoryService / AgentTelemetry
+/// 绑定；模型 seam 为 AguiHost 自建 IModelChatClientFactory/RouterChatClient，本宿主不注册老 Service ModelRouter），
+/// 差异仅在：业务库/向量库/记忆库换为 AguiHost 独立连接串或文件（<c>agui.db</c>/
 /// <c>agui.rag.db</c>/<c>agui.memory.db</c>，数据隔离 spec 验收 5；老 aishop.db / aishop.rag.db 零接触）。
 /// internal + InternalsVisibleTo 暴露给 AIShop.AguiHost.Tests，供宿主级测试直接驱动装配/启动引导。
 /// </summary>
@@ -40,12 +40,13 @@ internal static class AguiServiceCollectionExtensions
 
     /// <summary>
     /// 注册 AguiHost 底座 DI：EF 仓储（独立业务库）+ RAG 语义检索（独立向量库）+ Mem0 记忆（独立记忆库）+
-    /// 购物工具工厂/模型路由/全局默认 <see cref="IChatClient"/> + Agent 遥测配置绑定。装配契约（spec §4.2/§4.3/§13.2）：
-    /// <c>AddInfrastructure(dbConnection)</c> / <c>AddRagService(ragConnection)</c> / <c>AddMemoryService(memoryDatabasePath)</c>，
-    /// 参数缺省时回退 <see cref="DefaultDbConnection"/>/<see cref="DefaultRagConnection"/>/<see cref="DefaultMemoryDatabasePath"/>。
+    /// 购物工具工厂/自建模型工厂与 RouterChatClient/全局默认 <see cref="IChatClient"/> + Agent 遥测配置绑定。
+    /// 装配契约（spec §4.2/§4.3/§13.2）：<c>AddInfrastructure(dbConnection)</c> / <c>AddRagService(ragConnection)</c> /
+    /// <c>AddMemoryService(memoryDatabasePath)</c>，参数缺省时回退 <see cref="DefaultDbConnection"/>/
+    /// <see cref="DefaultRagConnection"/>/<see cref="DefaultMemoryDatabasePath"/>。
     /// </summary>
     /// <param name="services">服务集合。</param>
-    /// <param name="config">应用配置（读 AgentTelemetry 节绑定遥测选项；Models 节供 ModelRouter 延迟解析）。</param>
+    /// <param name="config">应用配置（读 AgentTelemetry 节绑定遥测选项；Models 节 + ActiveModel 供 AguiModelClientFactory 解析）。</param>
     /// <param name="dbConnection">EF 业务库连接串；null 时用 <see cref="DefaultDbConnection"/>。</param>
     /// <param name="ragConnection">RAG 向量库连接串；null 时用 <see cref="DefaultRagConnection"/>。</param>
     /// <param name="memoryDatabasePath">Mem0 记忆库路径（<c>SqliteMemoryStore</c> 按路径建库）；null 时用
@@ -67,31 +68,33 @@ internal static class AguiServiceCollectionExtensions
 
         // 购物工具工厂（5 购物工具复用，与老 Agent 同源）：注入 IServiceScopeFactory + ICurrentUserAccessor + IProductSemanticSearch
         services.AddSingleton<CartToolProvider>();
-        // 模型管道 / 多模型（读 Models 节，Agent 语义检索链路复用）
-        services.AddSingleton<ModelRouter>();
 
-        // C5 M1（agui-model-switch）：AguiHost 自建「模型 → 底层客户端」工厂（读 Models 节 + ActiveModel 缺省，
-        // 每模型懒建缓存 + 每客户端 OTel 外包；见 src/AIShop.AguiHost/Model/）。M1 仅【增量注册工厂类型】——
-        // 老 ModelRouter 仍是下方全局 IChatClient seam 的来源（RouterChatClient 尚未接线、无人解析本工厂），
-        // M4 才切换装配面（移除 ModelRouter 注册 + 全局 IChatClient = 工厂 GetDefaultClient）。
+        // C5（agui-model-switch，M4 收口装配面）：AguiHost 自建「模型 → 底层客户端」工厂 + 逐轮选模型上下文/
+        // 委托客户端，取代老 Service ModelRouter 作为 AguiHost 的模型 seam（老 ModelRouter 零改动、本宿主不再注册）。
+        //  - IModelChatClientFactory/AguiModelClientFactory：读 Models 节 + ActiveModel 缺省；每模型底层懒建缓存 +
+        //    每客户端 OTel 外包（Router 切到任一模型 gen_ai 都在；全局 IChatClient seam 也经本工厂 GetDefaultClient）。
+        //  - IActiveModelProvider/ActiveModelProvider：AsyncLocal 单例「当前请求激活模型」上下文（M3 中间件写入、
+        //    值按执行流隔离、不跨请求泄漏，仿 ICurrentUserAccessor）。
+        //  - RouterChatClient：agent 专属链底层 delegating IChatClient，按本轮 ActiveModel 委托工厂对应模型底层。
         services.AddSingleton<IModelChatClientFactory, AguiModelClientFactory>();
-
+        services.AddSingleton<IActiveModelProvider, ActiveModelProvider>();
+        services.AddSingleton<RouterChatClient>();
 
         // Agent 遥测：绑定 "AgentTelemetry" 配置节，注册 AgentTelemetryOptions 单例（同 Api/Program.cs L62-66）
         var agentTelemetrySection = config.GetSection("AgentTelemetry");
         services.Configure<AgentTelemetryOptions>(agentTelemetrySection);
         services.AddSingleton(sp => sp.GetRequiredService<IOptions<AgentTelemetryOptions>>().Value);
 
-        // 全局默认 chatClient（与 Api/Program.cs 同一创建逻辑）：模型 seam，被 AGUIShopping 装配与记忆服务
-        // （IMemoryService 内部 GetRequiredService<IChatClient>()，见 Infra MemoryDependencyInjection）共用。
-        // C3（修复工单，方案 2）：本单例【不再外包 ReplySanitizingChatClient】——保持纯净（仅外层 OTel 遥测包装）。
-        // 理由：记忆提取 / 冲突消解 / 精排若走「面向用户的商品编号清洗」中间件，会把回复文本中的商品编号剥落，
-        // 污染落库记忆（Mem0 提取的是模型可见的完整内容）。清洗是展示层规则，只应作用于面向用户的 agent 输出，
-        // 故隔离到 AGUIShopping 专属 chatClient 路径显式外包（见 Program.cs keyed factory 的 agent 实参），
-        // 记忆 / 内部链路一律走下方纯净 seam。遥测（UseOpenTelemetry）与清洗无关，保留在全局包装上。
+        // 全局默认 chatClient（模型 seam）：被 AGUIShopping 专属链之下与记忆服务（IMemoryService 内部
+        // GetRequiredService<IChatClient>()，见 Infra MemoryDependencyInjection）共用。
+        // M4（C5）起 = AguiModelClientFactory.GetDefaultClient()（ActiveModel 底层；OTel 已内置于工厂每客户端，
+        // 此处不再 .UseOpenTelemetry 二次外包）。C3 语义延续——本 seam 纯净、【不含】ReplySanitizingChatClient：
+        // 记忆提取 / 冲突消解 / 精排若走「面向用户的商品编号清洗」中间件，会把回复文本中的商品编号剥落污染
+        // 落库记忆（Mem0 提取的是模型可见的完整内容）；清洗是展示层规则，只应作用于面向用户的 agent 输出，
+        // 故隔离到 AGUIShopping 专属 chatClient 路径（Program keyed factory：ReplySanitizingChatClient(RouterChatClient)）。
+        // 记忆 / 内部链路一律走本纯净 seam。
         services.AddSingleton<IChatClient>(sp =>
-            sp.GetRequiredService<ModelRouter>().GetDefaultChatClient()
-            .AsBuilder().UseOpenTelemetry(sourceName: sp.GetRequiredService<IOptions<AgentTelemetryOptions>>().Value.SourceName).Build());
+            sp.GetRequiredService<IModelChatClientFactory>().GetDefaultClient());
 
 
 

@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using AIShop.AguiHost;
 using AIShop.AguiHost.Agents;
+using AIShop.AguiHost.Model;
 using Microsoft.Agents.AI.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
@@ -90,14 +91,18 @@ public sealed class AguiSessionResumeTests : IDisposable
         Assert.Contains("RESUME-MARKER", allSecondInputText);
     }
 
-    /// <summary>构造 WAF：替换 IChatClient 为脚本化 chatClient，并把会话 store 覆写到共享临时库（同 <see cref="_sessionDbPath"/>）。</summary>
+    /// <summary>
+    /// 构造 WAF：替换模型 seam 为 <see cref="IModelChatClientFactory"/> stub（C5 M4 起离线 override 点从全局 IChatClient
+    /// 迁到工厂接口——agent 聊天底层经 RouterChatClient → 工厂；stub 让 mockChat 成为所有 modelId 的底层），并把会话
+    /// store 覆写到共享临时库（同 <see cref="_sessionDbPath"/>）。
+    /// </summary>
     private static WebApplicationFactory<Program> CreateFactory(string sessionConnection, Meai.IChatClient mockChat)
     {
         return new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
             builder.ConfigureServices(services =>
             {
-                services.RemoveAll<Meai.IChatClient>();
-                services.AddSingleton<Meai.IChatClient>(mockChat);
+                services.RemoveAll<IModelChatClientFactory>();
+                services.AddSingleton<IModelChatClientFactory>(new StubModelChatClientFactory(mockChat));
 
                 // 覆写 Program AddAguiSessionStore 的默认 store：RemoveAll 默认注册后以临时库路径重注册
                 // 具体 store + keyed AgentSessionStore（key = "AGUIShopping"），MapAGUIServer 按 agent.Name 命中。

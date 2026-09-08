@@ -1,6 +1,7 @@
 using AIShop.AgentTelemetry;
 using AIShop.AguiHost;
 using AIShop.AguiHost.Agents;
+using AIShop.AguiHost.Model;
 using AIShop.Core.Interfaces;
 using AIShop.Service.Tools;
 using AIShop.ServiceDefaults;
@@ -49,8 +50,9 @@ try
         builder.Services.AddDevUI();
     }
 
-    // 底座 DI 装配（T3）：AddInfrastructure("Data Source=agui.db") + AddRagService("Data Source=agui.rag.db")
-    // + CartToolProvider/ModelRouter/默认 IChatClient + AgentTelemetryOptions 绑定（缺省连接串见扩展内常量）
+    // 底座 DI 装配（T3 + C5）：AddInfrastructure("Data Source=agui.db") + AddRagService("Data Source=agui.rag.db")
+    // + CartToolProvider/自建模型工厂与 RouterChatClient/默认 IChatClient + AgentTelemetryOptions 绑定
+    // （缺省连接串见扩展内常量；C5 起不再注册老 Service ModelRouter）
     builder.Services.AddAguiBaseServices(builder.Configuration);
 
     // 会话历史持久化（T12）：keyed AgentSessionStore（key = "AGUIShopping"）指向独立会话库 agui.sessions.db，
@@ -63,12 +65,14 @@ try
     // （实体枚举 = GetKeyedServices<AIAgent>(KeyedService.AnyKey)，见镜像 DevUI EntitiesApiExtensions）。
     builder.Services.AddKeyedSingleton<AIAgent>(AGUIShoppingAgent.AgentName, (sp, _) =>
         AGUIShoppingAgent.Create(
-            // C3（修复工单，方案 2）：AGUIShopping 专属 chatClient = 在全局纯净模型 seam（见 AddAguiBaseServices）
-            // 之上外包 ReplySanitizingChatClient（服务端回复清洗兜底，T11 语义不变：agent 输出文本——含流式增量——
-            // 离开本 Agent 前经 Core ReplySanitizer 清洗商品编号）。清洗只作用于 assistant 输出的 TextContent，
-            // 工具调用/工具结果（FRC）原样透传——模型内部仍见商品编号用于 add_to_cart；记忆链路（IMemoryService）
-            // 走全局纯净 seam，不被展示规则污染。
-            new ReplySanitizingChatClient(sp.GetRequiredService<IChatClient>()),
+            // C3（回复清洗隔离到 agent 专属链）+ C5 M4（agui-model-switch）：AGUIShopping 专属 chatClient =
+            // new ReplySanitizingChatClient(RouterChatClient)——回复清洗（C3）仍在 agent 专属链外层，覆盖 Router
+            // 切到的任一模型输出（含流式增量：离开本 Agent 前经 Core ReplySanitizer 清洗商品编号；清洗只作用于
+            // assistant 输出的 TextContent，工具调用/工具结果 FRC 原样透传——模型内部仍见商品编号用于 add_to_cart）；
+            // RouterChatClient（C5）在清洗之下，按本轮 forwardedProps.model（无 model → ActiveModel 缺省）把对话
+            // 委托到 IModelChatClientFactory 对应模型底层（spec Req7：单一 keyed agent 不变，仅底层换 Router）。
+            // 记忆链路（IMemoryService）走全局纯净 seam（工厂 GetDefaultClient，见 AddAguiBaseServices），不被展示规则污染。
+            new ReplySanitizingChatClient(sp.GetRequiredService<RouterChatClient>()),
             sp.GetRequiredService<CartToolProvider>(),
             // T11（agent 遥测埋点）：把底座绑定（AgentTelemetry 配置节）的遥测选项传给 Create，
             // 让 AGUIShopping 返回前经 AgentTelemetry.Instrument 包装（对齐老 ShoppingAssistantAgent L188）
@@ -103,6 +107,11 @@ try
 
     // T5 username 注入中间件（置于 MapAGUIServer 之前）：AGUI forwarded metadata(username) → ICurrentUserAccessor（缺省 guest）
     app.UseAguiUsernameForwarding();
+
+    // C5 M3 model 注入中间件（置于 username 之后、MapAGUIServer 之前）：AGUI forwardedProps.model → IActiveModelProvider
+    // （无 model → 显式 SetActiveModel(null)，「缺省 = ActiveModel」由 RouterChatClient 读取侧解析）。与 username
+    // 中间件各自缓冲读同一请求体、互不干扰（AG-UI body 小，二次 JSON 解析可接受，design §6.1）。
+    app.UseAguiModelForwarding();
 
     // T7 keyed MapAGUIServer：按 agentName 从 DI 解析 keyed AIAgent（preview 提供 (string agentName, string pattern)
     // 重载 = GetRequiredKeyedService<AIAgent>(agentName)，见镜像 AGUIEndpointRouteBuilderExtensions），
