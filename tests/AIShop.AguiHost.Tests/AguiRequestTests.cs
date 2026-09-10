@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text;
 using System.Text.Json.Nodes;
 using AIShop.AguiHost;
@@ -30,8 +30,8 @@ public sealed class AguiRequestTestsCollection;
 /// 不触发真实 LLM）；C5 M4 起离线 override 点从全局 IChatClient 迁到该工厂接口（spec Req11——agent 聊天底层经
 /// RouterChatClient → 工厂，stub 让所有 modelId 返回脚本化 mock；全局纯净 IChatClient seam = 工厂 GetDefaultClient
 /// 亦变 mock）。对应 tasks T5T1/T5T3 + C5 请求级用例——preview MapAGUIServer 请求管线不便用真实 LLM 驱动。
-/// 协调收编（用户改动）：缺省用户由 "guest" 改为 seed 用户 "fzf003"（AguiUsernameForwarder.DefaultUsername），
-/// 本类「无 metadata 请求」断言随之改 fzf003；marla 显式携带仍原样断言。
+/// 缺省用户为 seed 用户 "steve"（AguiUsernameForwarder.DefaultUsername），
+/// 本类「无 metadata 请求」断言随之用 steve；marla 显式携带仍原样断言。
 /// </summary>
 [Collection(nameof(AguiRequestTests))]
 public sealed class AguiRequestTests
@@ -63,7 +63,7 @@ public sealed class AguiRequestTests
     {
         // 请求级 username 注入（tasks T5T3，尽力而为）：替换 ICurrentUserAccessor 为 mock，
         // POST 携带 forwardedProps.username=marla → accessor 收到 SetCurrentUser("marla")；
-        // 第二个无 metadata 的请求 → 回退 SetCurrentUser("fzf003")（协调收编：缺省用户 guest → seed 用户 fzf003，
+        // 第二个无 metadata 的请求 → 回退 SetCurrentUser("steve")（缺省用户为 seed 用户 steve，
         // 对齐 AguiUsernameForwarder.DefaultUsername；语义仍为「metadata 缺失时按缺省用户处理」）
         var mockAccessor = Substitute.For<ICurrentUserAccessor>();
         using var factory = CreateFactory(mockAccessor);
@@ -80,7 +80,7 @@ public sealed class AguiRequestTests
 
         mockAccessor.Received(1).SetCurrentUser("marla");
 
-        // 请求 2：无 forwarded metadata → 缺省 fzf003
+        // 请求 2：无 forwarded metadata → 缺省 steve
         using (var second = await client.PostAsync(
                    "/",
                    new StringContent(RunAgentBody("default-thread", username: null), Encoding.UTF8, "application/json")))
@@ -89,7 +89,7 @@ public sealed class AguiRequestTests
             Assert.Contains("T5-MARKER", await second.Content.ReadAsStringAsync());
         }
 
-        mockAccessor.Received(1).SetCurrentUser("fzf003");
+        mockAccessor.Received(1).SetCurrentUser("steve");
     }
 
     [Fact]

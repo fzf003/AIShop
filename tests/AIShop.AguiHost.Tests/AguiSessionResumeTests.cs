@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text;
 using System.Text.Json.Nodes;
 using AIShop.AguiHost;
@@ -146,7 +146,7 @@ public sealed class AguiSessionResumeTests : IDisposable
     private static string TextOf(Meai.ChatMessage message)
         => string.Concat(message.Contents.OfType<Meai.TextContent>().Select(c => c.Text));
 
-    /// <summary>构造 AG-UI RunAgentInput 形状的请求体 JSON（username 由 username 中间件缺省 guest，会话仅按 ThreadId 续接）。</summary>
+    /// <summary>构造 AG-UI RunAgentInput 形状的请求体 JSON（username 由 username 中间件缺省 steve，会话仅按 ThreadId 续接）。</summary>
     private static string RunAgentBody(string threadId, string userMessage)
     {
         var root = new JsonObject

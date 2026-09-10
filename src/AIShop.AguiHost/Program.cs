@@ -1,4 +1,4 @@
-using AIShop.AgentTelemetry;
+﻿using AIShop.AgentTelemetry;
 using AIShop.AguiHost;
 using AIShop.AguiHost.Agents;
 using AIShop.AguiHost.Model;
@@ -105,7 +105,7 @@ try
     // 启动引导（T3）：MigrateAsync + 幂等播种 marla/steve/fzf003 + 18 商品 + RAG 索引预热（失败仅 Warning）
     await AguiServiceCollectionExtensions.InitializeAsync(app.Services);
 
-    // T5 username 注入中间件（置于 MapAGUIServer 之前）：AGUI forwarded metadata(username) → ICurrentUserAccessor（缺省 guest）
+    // T5 username 注入中间件（置于 MapAGUIServer 之前）：AGUI forwarded metadata(username) → ICurrentUserAccessor（缺省 steve）
     app.UseAguiUsernameForwarding();
 
     // C5 M3 model 注入中间件（置于 username 之后、MapAGUIServer 之前）：AGUI forwardedProps.model → IActiveModelProvider

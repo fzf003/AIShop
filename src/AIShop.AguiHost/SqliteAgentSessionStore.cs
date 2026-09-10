@@ -101,7 +101,7 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
         // 序列化会话（含 StateBag / InMemoryChatHistoryProvider 消息历史）为 JSON，随后整行落库
         JsonElement json = await agent.SerializeSessionAsync(session, cancellationToken: cancellationToken).ConfigureAwait(false);
         var storeId = GetStoreId(agent.Name, sessionStoreId);
-        var updatedAt = DateTimeOffset.UtcNow.ToString("O");
+        var updatedAt = DateTimeOffset.Now.ToString("O");
 
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -175,11 +175,19 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT session_json FROM agent_sessions WHERE store_id = $storeId";
         command.Parameters.AddWithValue("$storeId", storeId);
 
-        var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-        return result as string;
+         await using var reader = await command.ExecuteReaderAsync(System.Data.CommandBehavior.SingleRow,cancellationToken).ConfigureAwait(false);
+
+        if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return reader.IsDBNull(0) ? "{}" : reader.GetString(0);
+        }
+
+        return "{}";
+  
     }
 }

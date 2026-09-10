@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.Json;
 using AIShop.Core.Interfaces;
 using Microsoft.AspNetCore.Builder;
@@ -10,9 +10,9 @@ namespace AIShop.AguiHost;
 /// <summary>
 /// AG-UI username 注入装配（agui-host T5）。
 /// 把 AG-UI <c>RunAgentInput</c> 请求的 forwarded metadata（preview wire 键为顶层 <c>forwardedProps</c>）
-/// 中携带的 <c>username</c> 解析出来，写入 <see cref="ICurrentUserAccessor"/>（缺省 <see cref="DefaultUsername"/> = guest），
+/// 中携带的 <c>username</c> 解析出来，写入 <see cref="ICurrentUserAccessor"/>（缺省 <see cref="DefaultUsername"/> = steve），
 /// 使购物工具经 <c>ICurrentUserAccessor.CurrentUser</c> 读到同一用户（spec「username 经 ICurrentUserAccessor 由
-/// AGUI metadata 注入，缺省 guest」）。
+/// AGUI metadata 注入，缺省用户」）。
 /// </summary>
 /// <remarks>
 /// 挂点说明（以 MAF 1.20 preview <c>MapAGUIServer</c> 请求管线为准）：preview 的 <c>MapAGUIServer("/", agent)</c>
@@ -20,7 +20,7 @@ namespace AIShop.AguiHost;
 /// 的中间件/isolation 挂点（<c>AgentIsolationKeyProvider</c> 面向 ThreadId 会话隔离，不读 body username）。
 /// 因此本类提供两个层次：① <see cref="ResolveUsername"/> —— 纯函数（可单测），从 forwarded metadata 读 username；
 /// ② <see cref="UseAguiUsernameForwarding"/> —— 装配中间件，置于 <c>MapAGUIServer</c> 之前，缓冲读同一请求体、
-/// 解析 metadata 并在 agent 运行前把 username（或 guest）写入 <see cref="ICurrentUserAccessor"/>。
+/// 解析 metadata 并在 agent 运行前把 username（或缺省用户）写入 <see cref="ICurrentUserAccessor"/>。
 /// </remarks>
 internal static class AguiUsernameForwarder
 {
@@ -30,12 +30,12 @@ internal static class AguiUsernameForwarder
     /// <summary>forwarded metadata 中的 username 键。</summary>
     internal const string UsernameMetadataKey = "username";
 
-    /// <summary>metadata 缺失 username 时的缺省用户（spec「metadata 缺失时按 guest 处理」）。</summary>
-    internal const string DefaultUsername = "fzf003";
+    /// <summary>metadata 缺失 username 时的缺省用户（spec「metadata 缺失时按 steve 处理」）。</summary>
+    internal const string DefaultUsername = "steve";
 
     /// <summary>
     /// 从 forwarded metadata（JSON object，如 <c>RunAgentInput.forwardedProps</c>）读取 <c>username</c>。
-    /// 缺失该键 / 值非字符串 / 空白 / metadata 非 object → 返回 null（表示「应由调用方应用 guest 缺省」）。
+    /// 缺失该键 / 值非字符串 / 空白 / metadata 非 object → 返回 null（表示「应由调用方应用缺省用户」）。
     /// </summary>
     internal static string? ResolveUsername(JsonElement forwardedMetadata)
     {
@@ -52,7 +52,7 @@ internal static class AguiUsernameForwarder
         return string.IsNullOrWhiteSpace(username) ? null : username;
     }
 
-    /// <summary>解析 + guest 缺省一次到位（装配点用）：metadata 缺失/非法时回退 <see cref="DefaultUsername"/>。</summary>
+    /// <summary>解析 + 缺省用户一次到位（装配点用）：metadata 缺失/非法时回退 <see cref="DefaultUsername"/>。</summary>
     internal static string ResolveUsernameOrDefault(JsonElement forwardedMetadata)
         => ResolveUsername(forwardedMetadata) ?? DefaultUsername;
 
@@ -73,7 +73,7 @@ internal static class AguiUsernameForwarder
                 return;
             }
 
-            // 从请求体 forwarded metadata 解析 username；读体/解析失败视为「无 metadata」→ guest（不阻断请求）
+            // 从请求体 forwarded metadata 解析 username；读体/解析失败视为「无 metadata」→ 缺省用户（不阻断请求）
             string? username = null;
             try
             {
@@ -104,11 +104,11 @@ internal static class AguiUsernameForwarder
             }
             catch (Exception ex) when (ex is JsonException or IOException)
             {
-                // 非法 JSON / 读体失败：视为无 forwarded metadata → guest；交由端点按自身契约返回 4xx
+                // 非法 JSON / 读体失败：视为无 forwarded metadata → 缺省用户；交由端点按自身契约返回 4xx
                 username = null;
             }
 
-            // 执行流级注入：metadata 缺失 → guest（购物工具经 CurrentUser 读取同一用户，无需感知用户来源）
+            // 执行流级注入：metadata 缺失 → 缺省用户（购物工具经 CurrentUser 读取同一用户，无需感知用户来源）
             var accessor = context.RequestServices.GetRequiredService<ICurrentUserAccessor>();
             accessor.SetCurrentUser(username ?? DefaultUsername);
 

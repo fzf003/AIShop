@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -16,7 +16,7 @@ namespace AIShop.AguiHost.Model;
 /// <remarks>
 /// 与 username 中间件（<see cref="AguiUsernameForwarder.UseAguiUsernameForwarding"/>）同款独立中间件（不并入），
 /// 两个 concern 独立、测试缝独立；代价是请求体二次 JSON 解析（AG-UI body 小，可接受，design §6.1）。
-/// 关键差异：username 缺失时回退缺省用户（<c>fzf003</c>）；model 缺失/非法时【不注入缺省模型值】，而是
+/// 关键差异：username 缺失时回退缺省用户（<c>steve</c>）；model 缺失/非法时【不注入缺省模型值】，而是
 /// <see cref="IActiveModelProvider.SetActiveModel"/>(null) 显式清空——「缺省 = ActiveModel」由
 /// <see cref="RouterChatClient"/> 在读取侧解析（单一数据源：ActiveModel 配置的归属是工厂/Router，不是中间件）。
 /// </remarks>
