@@ -125,6 +125,11 @@ internal static class AguiServiceCollectionExtensions
     /// L113 <c>GetKeyedService&lt;AgentSessionStore&gt;(aiAgent.Name)</c>），取代默认 ephemeral 的 Noop 存储：
     /// SSE 流结束 <c>SaveSessionAsync</c> 落库、同 ThreadId 下次 <c>GetSessionAsync</c> 还原（重启不丢上下文）。
     /// 数据隔离：独立会话库（缺省 <see cref="DefaultSessionDbConnection"/>，不得为老 aishop.db）。
+    /// <para>
+    /// S6（agui-session-prod）：一并注册 <see cref="SessionCleanupService"/> 后台周期清理（<c>AddHostedService</c>）——
+    /// 与 store/options 同生，宿主 <c>StartAsync</c> 时启动清理循环（启动即清一次 → 默认每 12h 再清）。
+    /// 裸 <c>ServiceCollection</c> 未启动 host 时仅完成注册、无副作用（不触发任何 DB 访问）。
+    /// </para>
     /// </summary>
     /// <param name="services">服务集合。</param>
     /// <param name="config">应用配置；非 null 时绑定 "Agui" 节的 <see cref="AguiSessionOptions"/>（S3）。多余键被
@@ -157,6 +162,10 @@ internal static class AguiServiceCollectionExtensions
         // keyed AgentSessionStore 解析具体单例：MapAGUIServer 按 agent.Name 解析命中（keyed 注册是命中前提）
         services.AddKeyedSingleton<AgentSessionStore>(AGUIShoppingAgent.AgentName,
             static (sp, _) => sp.GetRequiredService<SqliteAgentSessionStore>());
+        // S6（agui-session-prod）：后台周期清理 hosted service（与 store 同生）——宿主启动即清一次过期会话行，
+        // 之后按 AguiSessionOptions.EffectiveCleanupInterval（默认 12h）周期再清（spec R5）。
+        // 裸 ServiceCollection 未启动 host 时仅注册、无副作用；依赖 SqliteAgentSessionStore/IOptions/ILogger 均可解析。
+        services.AddHostedService<SessionCleanupService>();
         return services;
     }
 
