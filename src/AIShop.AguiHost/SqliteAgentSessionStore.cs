@@ -44,6 +44,12 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
         )
         """;
 
+    /// <summary>TTL 阈值查询所用 <c>updated_at</c> 索引 DDL（幂等；既有库首启即补建，spec R6）。</summary>
+    private const string CreateIndexSql =
+        """
+        CREATE INDEX IF NOT EXISTS idx_agent_sessions_updated_at ON agent_sessions (updated_at)
+        """;
+
     private readonly string _connectionString;
     private readonly AguiSessionOptions _options;
     private readonly CompactionStrategy _compactionStrategy;
@@ -76,9 +82,13 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
     internal AguiSessionOptions Options => _options;
 
     /// <summary>
-    /// 幂等建表（启动预热或首次访问兜底）。AguiHost 启动引导（<see cref="AguiServiceCollectionExtensions.InitializeAsync"/>）
+    /// 幂等建表 + 建索引（启动预热或首次访问兜底）。AguiHost 启动引导（<see cref="AguiServiceCollectionExtensions.InitializeAsync"/>）
     /// 会预热调用一次，使首个会话请求不承担 DDL；测试亦可直调。重复调用零副作用。
     /// </summary>
+    /// <remarks>
+    /// 建表后追加 <c>CREATE INDEX IF NOT EXISTS idx_agent_sessions_updated_at</c>（spec R6「updated_at 索引」）——
+    /// 支撑 <see cref="CleanupExpiredAsync"/> 与惰性 TTL 的阈值查询；既有库首次启动即补建（幂等）。
+    /// </remarks>
     /// <param name="cancellationToken">取消标记。</param>
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
@@ -94,7 +104,12 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
             await using var connection = new SqliteConnection(_connectionString);
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
             await using var command = connection.CreateCommand();
+
             command.CommandText = CreateTableSql;
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            // 建表后幂等建索引（既有库首启补建；spec R6）。
+            command.CommandText = CreateIndexSql;
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
             _initialized = true;
@@ -149,8 +164,16 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
     }
 
     /// <inheritdoc />
-    /// <remarks>命中 → <c>agent.DeserializeSessionAsync</c> 还原为<b>独立新实例</b>（每次调用独立快照，符合
-    /// <see cref="AgentSessionStore.GetSessionAsync"/> 隔离契约）；未命中 → <c>agent.CreateSessionAsync</c>（等价 Noop 语义）。</remarks>
+    /// <remarks>
+    /// 命中且未过期 → <c>agent.DeserializeSessionAsync</c> 还原为<b>独立新实例</b>（每次调用独立快照，符合
+    /// <see cref="AgentSessionStore.GetSessionAsync"/> 隔离契约）；无行 → <c>agent.CreateSessionAsync</c>（等价 Noop 语义）。
+    /// <para>
+    /// S5（agui-session-prod）惰性 TTL 兜底（design §5.4 / spec R4）：一次查询取 <c>session_json + updated_at</c>，
+    /// 若 TTL 启用（<see cref="AguiSessionOptions.IsTtlEnabled"/>）且 <c>updated_at</c> 早于闲置阈值，该行视为过期
+    /// → best-effort 删行（失败仅 Warning，后台批次兜底）并当<b>新会话</b>返回。过期与否单一归一语义来自选项类派生属性，
+    /// store 内不再自行判断 <c>&lt;= 0</c>（handoff-S3 决策 1）。
+    /// </para>
+    /// </remarks>
     public override async ValueTask<AgentSession> GetSessionAsync(
         AIAgent agent,
         string sessionStoreId,
@@ -160,10 +183,19 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
         await EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
 
         var storeId = GetStoreId(agent.Name, sessionStoreId);
-        var sessionJson = await ReadSessionJsonAsync(storeId, cancellationToken).ConfigureAwait(false);
+        var row = await ReadSessionRowAsync(storeId, cancellationToken).ConfigureAwait(false);
 
-        if (sessionJson is null)
+        // 无行 → 新会话（修正旧 ReadSessionJsonAsync 无行返回 "{}" 的行为，spec R4）。
+        if (row is null)
+            return await agent.CreateSessionAsync(cancellationToken).ConfigureAwait(false);
+
+        var (sessionJson, updatedAt) = row.Value;
+
+        // 惰性 TTL 过期兜底：TTL 启用且 updated_at 早于 cutoff（字符串序即时间序，见 GetExpiryCutoff）。
+        if (_options.IsTtlEnabled && updatedAt is not null &&
+            string.CompareOrdinal(updatedAt, GetExpiryCutoff(_options.SessionTtlDays)) < 0)
         {
+            await DeleteExpiredRowBestEffortAsync(storeId, cancellationToken).ConfigureAwait(false);
             return await agent.CreateSessionAsync(cancellationToken).ConfigureAwait(false);
         }
 
@@ -183,12 +215,62 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
         await EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
 
         var storeId = GetStoreId(agent.Name, sessionStoreId);
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = "DELETE FROM agent_sessions WHERE store_id = $storeId";
-        command.Parameters.AddWithValue("$storeId", storeId);
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await DeleteRowAsync(storeId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 分批删除 <c>updated_at</c> 早于阈值的过期会话行（agui-session-prod S5，design §5.5 / spec R6）。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 每批删除以 <c>store_id IN (SELECT ... WHERE updated_at &lt; $cutoff LIMIT $batch)</c> 限定批量、
+    /// <b>每批独立连接</b>（短事务，SQLite autocommit 单语句原子），循环至单批 <c>affected &lt; batchSize</c>（删净），
+    /// 返回累计删除数——避免一次性删海量行长时间持锁、阻塞并行会话写入。
+    /// </para>
+    /// <para>
+    /// <paramref name="ttlDays"/> <c>&lt;= 0</c> 直接返回 0（禁用 TTL）；<paramref name="batchSize"/> <c>&lt;= 0</c>
+    /// 返回 0（防御除零/死循环）。
+    /// </para>
+    /// </remarks>
+    /// <param name="ttlDays">闲置生存天数阈值；<c>&lt;= 0</c> 表示禁用（不删）。</param>
+    /// <param name="batchSize">单批删除上限（避免长锁），默认 500。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    /// <returns>累计删除的会话行数。</returns>
+    internal async ValueTask<int> CleanupExpiredAsync(
+        int ttlDays,
+        int batchSize = 500,
+        CancellationToken cancellationToken = default)
+    {
+        if (ttlDays <= 0 || batchSize <= 0)
+            return 0;
+
+        await EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
+
+        var cutoff = GetExpiryCutoff(ttlDays);
+        int totalDeleted = 0;
+        while (true)
+        {
+            await using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var command = connection.CreateCommand();
+            command.CommandText =
+                """
+                DELETE FROM agent_sessions
+                WHERE store_id IN (
+                    SELECT store_id FROM agent_sessions WHERE updated_at < $cutoff LIMIT $batch
+                )
+                """;
+            command.Parameters.AddWithValue("$cutoff", cutoff);
+            command.Parameters.AddWithValue("$batch", batchSize);
+
+            int affected = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            totalDeleted += affected;
+
+            if (affected < batchSize)
+                break;
+        }
+
+        return totalDeleted;
     }
 
     /// <summary>store_id = "{agentName}:{sessionStoreId}"。用 agent.Name（稳定，重启不变）而非 agent.Id（随机 GUID，每实例不同），
@@ -244,24 +326,61 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
     private async Task EnsureInitializedAsync(CancellationToken cancellationToken)
         => await InitializeAsync(cancellationToken).ConfigureAwait(false);
 
-    /// <summary>读会话 JSON 行；不存在返回 null。</summary>
-    private async Task<string?> ReadSessionJsonAsync(string storeId, CancellationToken cancellationToken)
+    /// <summary>读会话行（<c>session_json</c> + <c>updated_at</c>）；不存在返回 null（供惰性 TTL 判定行是否存在）。</summary>
+    private async Task<(string SessionJson, string? UpdatedAt)?> ReadSessionRowAsync(string storeId, CancellationToken cancellationToken)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT session_json FROM agent_sessions WHERE store_id = $storeId";
+        command.CommandText = "SELECT session_json, updated_at FROM agent_sessions WHERE store_id = $storeId";
         command.Parameters.AddWithValue("$storeId", storeId);
 
-         await using var reader = await command.ExecuteReaderAsync(System.Data.CommandBehavior.SingleRow,cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(System.Data.CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
 
         if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            return reader.IsDBNull(0) ? "{}" : reader.GetString(0);
+            var sessionJson = reader.IsDBNull(0) ? "{}" : reader.GetString(0);
+            // updated_at 为 NOT NULL；防御式取 null 表示「未知」，判定侧不作过期处理（避免误删）。
+            var updatedAt = reader.IsDBNull(1) ? null : reader.GetString(1);
+            return (sessionJson, updatedAt);
         }
 
-        return "{}";
-  
+        return null;
     }
+
+    /// <summary>按 store_id 删除会话行（DeleteSessionAsync 与惰性 TTL 共用）。</summary>
+    private async Task DeleteRowAsync(string storeId, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM agent_sessions WHERE store_id = $storeId";
+        command.Parameters.AddWithValue("$storeId", storeId);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// best-effort 删除惰性 TTL 命中的过期行（design §5.4）：删除失败仅记 Warning，不阻断
+    /// <c>CreateSessionAsync</c> 返回新会话——该行会由后台批次 <see cref="CleanupExpiredAsync"/> 兜底。
+    /// </summary>
+    private async Task DeleteExpiredRowBestEffortAsync(string storeId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await DeleteRowAsync(storeId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // 删除失败不阻断「当新会话返回」（spec R4 场景 1）：仅告警，后台批次将再次尝试。
+            Log.Warning(ex, "惰性 TTL 删除过期会话行失败，已按新会话返回（后台批次将兜底）");
+        }
+    }
+
+    /// <summary>
+    /// TTL 过期阈值（字符串序即时间序，design §5.4 / §9）。
+    /// 与写入侧 <see cref="SaveSessionAsync"/> 的 <c>DateTimeOffset.Now.ToString("O")</c> <b>同本地偏移、同定宽</b>，
+    /// 故字符串 Ordinal 比较等价于时间比较。<b>不得改用 UtcNow</b>（与写入侧偏移不一致会破坏该不变量）。
+    /// </summary>
+    private static string GetExpiryCutoff(int ttlDays) => DateTimeOffset.Now.AddDays(-ttlDays).ToString("O");
 }
