@@ -71,7 +71,11 @@ try
     // 取代默认 ephemeral（Noop）——MapAGUIServer 按 agent.Name keyed 解析命中，流结束 SaveSessionAsync 落库、
     // 同 ThreadId 下次 GetSessionAsync 还原（重启不丢上下文）。缺省连接串见 AddAguiSessionStore/扩展内常量。
     // T16 seam：会话库连接串改读可选配置键 Agui:SessionConnection，缺省 → null → 扩展内常量回退（行为零变化）。
-    builder.Services.AddAguiSessionStore(builder.Configuration["Agui:SessionConnection"]);
+    // S3：传 builder.Configuration 供绑定 Agui:SessionTtlDays / SessionCleanupIntervalHours / SessionMaxRounds
+    // （未提供则回退类默认 30/12/12）。
+    builder.Services.AddAguiSessionStore(
+        builder.Configuration,
+        builder.Configuration["Agui:SessionConnection"]);
 
     // T7 keyed AIAgent 注册：AGUIShopping 以 keyed AIAgent（key = AgentName）注册进 DI（独立于 IsDevelopment 门，
     // AG-UI "/" 端点在所有环境都按名解析）。这是 DevUI /v1/entities 能发现该实体、且 AG-UI 端点不因 keyed 化丢失的前提

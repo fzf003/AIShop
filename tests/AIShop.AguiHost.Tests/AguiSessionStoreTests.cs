@@ -173,7 +173,7 @@ public sealed class AguiSessionStoreTests : IDisposable
         var config = new ConfigurationBuilder().Build();
         services.AddSingleton(config);
         services.AddAguiBaseServices(config, $"Data Source={efDbPath}", $"Data Source={ragDbPath}");
-        services.AddAguiSessionStore(sessionConnection);
+        services.AddAguiSessionStore(sessionDbConnection: sessionConnection);
 
         using var sp = services.BuildServiceProvider();
         var store = sp.GetKeyedService<AgentSessionStore>(AGUIShoppingAgent.AgentName);

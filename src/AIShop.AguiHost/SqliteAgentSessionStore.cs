@@ -41,19 +41,26 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
         """;
 
     private readonly string _connectionString;
+    private readonly AguiSessionOptions _options;
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private bool _initialized;
 
     /// <summary>初始化 <see cref="SqliteAgentSessionStore"/>。</summary>
     /// <param name="connectionString">SQLite 连接串（独立会话库，如 <c>Data Source=agui.sessions.db</c>，不得为老 aishop.db）。</param>
+    /// <param name="options">会话配置（TTL / 清理周期 / 快照轮数上限）；null 时回退 <see cref="AguiSessionOptions"/> 类默认（30/12/12），
+    /// 保持既有 <c>new SqliteAgentSessionStore(conn)</c> 调用点源码兼容（S3）。</param>
     /// <exception cref="ArgumentNullException"><paramref name="connectionString"/> 为 null。</exception>
-    public SqliteAgentSessionStore(string connectionString)
+    public SqliteAgentSessionStore(string connectionString, AguiSessionOptions? options = null)
     {
         _connectionString = connectionString ?? throw new ArgumentNullException(nameof(connectionString));
+        _options = options ?? new AguiSessionOptions();
     }
 
     /// <summary>会话库连接串（供测试断言指向独立库、非老 aishop.db）。</summary>
     internal string ConnectionString => _connectionString;
+
+    /// <summary>会话配置（S4/S5 消费 TTL / 清理周期 / 快照轮数上限；测试可断言绑定生效）。</summary>
+    internal AguiSessionOptions Options => _options;
 
     /// <summary>
     /// 幂等建表（启动预热或首次访问兜底）。AguiHost 启动引导（<see cref="AguiServiceCollectionExtensions.InitializeAsync"/>）

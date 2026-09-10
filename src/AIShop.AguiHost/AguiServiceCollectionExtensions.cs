@@ -126,11 +126,27 @@ internal static class AguiServiceCollectionExtensions
     /// 数据隔离：独立会话库（缺省 <see cref="DefaultSessionDbConnection"/>，不得为老 aishop.db）。
     /// </summary>
     /// <param name="services">服务集合。</param>
+    /// <param name="config">应用配置；非 null 时绑定 "Agui" 节的 <see cref="AguiSessionOptions"/>（S3）。多余键被
+    /// binder 忽略，<c>Agui:DbConnection</c> / <c>Agui:SessionConnection</c> 等不受影响；null 时不绑定，store 用类默认。</param>
     /// <param name="sessionDbConnection">会话库连接串；null 时用 <see cref="DefaultSessionDbConnection"/>。</param>
-    internal static IServiceCollection AddAguiSessionStore(this IServiceCollection services, string? sessionDbConnection = null)
+    internal static IServiceCollection AddAguiSessionStore(
+        this IServiceCollection services,
+        IConfiguration? config = null,
+        string? sessionDbConnection = null)
     {
+        // S3（agui-session-prod）：绑定 "Agui" 节的会话配置（SessionTtlDays / SessionCleanupIntervalHours /
+        // SessionMaxRounds）。config 为 null（纯底座测试 / 未接线宿主）时跳过绑定，IOptions 仍解析为类默认 30/12/12。
+        if (config is not null)
+            services.Configure<AguiSessionOptions>(config.GetSection("Agui"));
+        else
+            services.AddOptions<AguiSessionOptions>(); // 无配置也注册选项基础设施，保证工厂所需 IOptions<AguiSessionOptions> 可解析（回退类默认）
+
         sessionDbConnection ??= DefaultSessionDbConnection;
-        services.AddSingleton(new SqliteAgentSessionStore(sessionDbConnection));
+        // S3：store 注册为工厂 lambda，经 IOptions 取绑定后的 AguiSessionOptions 注入构造
+        // （null 配置 → 类默认；选项绑定发生在容器构建后，工厂解析期读取正是绑定完成时点）。
+        services.AddSingleton(sp => new SqliteAgentSessionStore(
+            sessionDbConnection,
+            sp.GetRequiredService<IOptions<AguiSessionOptions>>().Value));
         // keyed AgentSessionStore 解析具体单例：MapAGUIServer 按 agent.Name 解析命中（keyed 注册是命中前提）
         services.AddKeyedSingleton<AgentSessionStore>(AGUIShoppingAgent.AgentName,
             static (sp, _) => sp.GetRequiredService<SqliteAgentSessionStore>());
