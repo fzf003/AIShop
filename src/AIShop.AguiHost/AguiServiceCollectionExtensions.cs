@@ -13,6 +13,7 @@ using Microsoft.Agents.AI.Compaction;
 using Microsoft.Agents.AI.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Serilog;
 
@@ -142,11 +143,17 @@ internal static class AguiServiceCollectionExtensions
             services.AddOptions<AguiSessionOptions>(); // 无配置也注册选项基础设施，保证工厂所需 IOptions<AguiSessionOptions> 可解析（回退类默认）
 
         sessionDbConnection ??= DefaultSessionDbConnection;
+        // S4（agui-session-prod）：确保压缩策略可解析——AddAguiBaseServices（S1）已注册时为 no-op，store 经
+        // GetRequiredService 取到与 AGUIShopping Agent 侧【同一单例】（spec R1「复用装配同一实例」）；仅经本扩展
+        // 装配的裸容器（如 AguiSessionOptionsTests 的选项绑定场景）补注册，使工厂恒可解析。
+        services.TryAddSingleton<ContextWindowCompactionStrategy>(_ => AguiCompaction.CreateStrategy());
         // S3：store 注册为工厂 lambda，经 IOptions 取绑定后的 AguiSessionOptions 注入构造
         // （null 配置 → 类默认；选项绑定发生在容器构建后，工厂解析期读取正是绑定完成时点）。
+        // S4：第三参注入共享压缩策略单例，供 SaveSessionAsync 落库前收敛快照使用。
         services.AddSingleton(sp => new SqliteAgentSessionStore(
             sessionDbConnection,
-            sp.GetRequiredService<IOptions<AguiSessionOptions>>().Value));
+            sp.GetRequiredService<IOptions<AguiSessionOptions>>().Value,
+            sp.GetRequiredService<ContextWindowCompactionStrategy>()));
         // keyed AgentSessionStore 解析具体单例：MapAGUIServer 按 agent.Name 解析命中（keyed 注册是命中前提）
         services.AddKeyedSingleton<AgentSessionStore>(AGUIShoppingAgent.AgentName,
             static (sp, _) => sp.GetRequiredService<SqliteAgentSessionStore>());

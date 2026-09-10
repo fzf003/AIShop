@@ -1,7 +1,11 @@
+#pragma warning disable MAAI001 // CompactionStrategy 为 MAF [Experimental]（上下文压缩 API，会话快照收敛）
 using System.Text.Json;
 using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Compaction;
 using Microsoft.Agents.AI.Hosting;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.AI;
+using Serilog;
 
 namespace AIShop.AguiHost;
 
@@ -42,6 +46,7 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
 
     private readonly string _connectionString;
     private readonly AguiSessionOptions _options;
+    private readonly CompactionStrategy _compactionStrategy;
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private bool _initialized;
 
@@ -49,11 +54,19 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
     /// <param name="connectionString">SQLite 连接串（独立会话库，如 <c>Data Source=agui.sessions.db</c>，不得为老 aishop.db）。</param>
     /// <param name="options">会话配置（TTL / 清理周期 / 快照轮数上限）；null 时回退 <see cref="AguiSessionOptions"/> 类默认（30/12/12），
     /// 保持既有 <c>new SqliteAgentSessionStore(conn)</c> 调用点源码兼容（S3）。</param>
+    /// <param name="compactionStrategy">落库前快照收敛所用压缩策略；null 时回退 <see cref="AguiCompaction.CreateStrategy"/>（S4）。
+    /// 生产经 DI 注入与 <c>AGUIShoppingAgent</c> 侧同一单例，保证策略/阈值单一来源（spec R1「复用装配同一实例」）。</param>
     /// <exception cref="ArgumentNullException"><paramref name="connectionString"/> 为 null。</exception>
-    public SqliteAgentSessionStore(string connectionString, AguiSessionOptions? options = null)
+    public SqliteAgentSessionStore(
+        string connectionString,
+        AguiSessionOptions? options = null,
+        CompactionStrategy? compactionStrategy = null)
     {
         _connectionString = connectionString ?? throw new ArgumentNullException(nameof(connectionString));
         _options = options ?? new AguiSessionOptions();
+        // null → AguiCompaction.CreateStrategy()：与 AGUIShoppingAgent.Create 同一缺省语义（阈值/策略唯一来源），
+        // 保证既有直构调用点源码兼容且未注入时不产生第二套阈值（S4）。
+        _compactionStrategy = compactionStrategy ?? AguiCompaction.CreateStrategy();
     }
 
     /// <summary>会话库连接串（供测试断言指向独立库、非老 aishop.db）。</summary>
@@ -94,7 +107,11 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
 
     /// <inheritdoc />
     /// <remarks>镜像 <c>InMemoryAgentSessionStore.SaveSessionAsync</c>：<c>agent.SerializeSessionAsync(session)</c> →
-    /// JSON upsert（同 store_id 覆盖旧会话，保证同 ThreadId 多次续聊只保留最新快照）。</remarks>
+    /// JSON upsert（同 store_id 覆盖旧会话，保证同 ThreadId 多次续聊只保留最新快照）。
+    /// <para>
+    /// S4（agui-session-prod）：序列化之前先做<strong>收敛快照</strong>（<see cref="CompactSessionHistoryAsync"/>）——
+    /// 使落库快照大小有界（spec R1）。压缩失败仅告警、<strong>不阻断落库</strong>。
+    /// </para></remarks>
     public override async ValueTask SaveSessionAsync(
         AIAgent agent,
         string sessionStoreId,
@@ -104,6 +121,10 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
         ArgumentNullException.ThrowIfNull(agent);
         ArgumentNullException.ThrowIfNull(session);
         await EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
+
+        // 收敛快照（仅 InMemoryChatHistoryProvider 路径；其余跳过）——必须在 SerializeSessionAsync 前完成，
+        // 使写回的压缩历史随会话一并落库（spec R1）。
+        await CompactSessionHistoryAsync(agent, session, cancellationToken).ConfigureAwait(false);
 
         // 序列化会话（含 StateBag / InMemoryChatHistoryProvider 消息历史）为 JSON，随后整行落库
         JsonElement json = await agent.SerializeSessionAsync(session, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -173,6 +194,52 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
     /// <summary>store_id = "{agentName}:{sessionStoreId}"。用 agent.Name（稳定，重启不变）而非 agent.Id（随机 GUID，每实例不同），
     /// 保证持久化 key 跨宿主重启稳定；多 agent 共享同一库文件时按名称天然隔离。</summary>
     private static string GetStoreId(string? agentName, string sessionStoreId) => $"{agentName}:{sessionStoreId}";
+
+    /// <summary>
+    /// 落库前对会话历史做收敛快照（agui-session-prod S4，design §4.4 / spec R1-R3）。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 仅当 agent 解析为 <see cref="ChatClientAgent"/> 且其 <see cref="ChatClientAgent.ChatHistoryProvider"/> 为
+    /// <see cref="InMemoryChatHistoryProvider"/> 时才收敛：取其消息历史 → <see cref="SnapshotCompactor"/> 轮归一
+    /// （保轮/工具配对，spec R2；受保护最后 ≥2 轮 + <see cref="AguiSessionOptions.SessionMaxRounds"/> 硬上限，spec R3）
+    /// → <b>确有收缩才</b>写回。其余情况（非该 provider / provider 为 null / 远端托管会话）<b>跳过压缩</b>，
+    /// 按现状序列化，保持既有语义零回归（design §4.4 防御）。
+    /// </para>
+    /// <para>
+    /// <see cref="AIAgent.GetService{TService}(object)"/> 缝可穿透 <c>OpenTelemetryAgent</c> 装饰器（官方同款用法）。
+    /// 压缩异常一律捕获并记 Warning，退化为原样快照落库（spec R1 场景 2，不抛出、不丢会话）。
+    /// </para>
+    /// <para>
+    /// <b>副作用说明</b>：写回会同时收敛活动会话的内存历史（<c>SetMessages</c> 覆盖 StateBag backing list）——
+    /// save 为流结束的终点操作，此时收敛安全且有益（design §4.4）。
+    /// </para>
+    /// </remarks>
+    private async Task CompactSessionHistoryAsync(AIAgent agent, AgentSession session, CancellationToken cancellationToken)
+    {
+        var chatClientAgent = agent.GetService<ChatClientAgent>();
+        if (chatClientAgent?.ChatHistoryProvider is not InMemoryChatHistoryProvider provider)
+            return;
+
+        try
+        {
+            List<ChatMessage> messages = provider.GetMessages(session);
+            int originalCount = messages.Count;
+
+            IReadOnlyList<ChatMessage> compacted = await SnapshotCompactor
+                .CompactAsync(_compactionStrategy, messages, _options.SessionMaxRounds, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+
+            // 确有收缩才写回。快速路径可能返回【传入的同一实例】（引用相等但无收缩），故按 Count 判定，勿只比实例引用。
+            if (compacted.Count < originalCount)
+                provider.SetMessages(session, [.. compacted]);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // 压缩失败不阻断落库（spec R1 场景 2）：仅告警并退化为原样快照（下方 SerializeSessionAsync 原样序列化）。
+            Log.Warning(ex, "会话快照压缩失败，退化为原样快照落库（会话不丢失）");
+        }
+    }
 
     private async Task EnsureInitializedAsync(CancellationToken cancellationToken)
         => await InitializeAsync(cancellationToken).ConfigureAwait(false);
