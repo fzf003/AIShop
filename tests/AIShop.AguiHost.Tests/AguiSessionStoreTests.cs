@@ -189,6 +189,44 @@ public sealed class AguiSessionStoreTests : IDisposable
         Assert.True(File.Exists(sessionDbPath));
     }
 
+    [Fact]
+    public async Task OldDatabases_AreNotTouchedBySessionStoreLifecycle()
+    {
+        // R8 场景 3「老库零接触」（S7 补充断言）：
+        // 1) 会话库【缺省】连接串指向 agui.sessions.db、不含 aishop —— 与老 EF/RAG 库结构性隔离。
+        Assert.Equal("Data Source=agui.sessions.db", AguiServiceCollectionExtensions.DefaultSessionDbConnection);
+        Assert.DoesNotContain("aishop", AguiServiceCollectionExtensions.DefaultSessionDbConnection);
+
+        // 2) 老库文件（aishop.db / aishop.rag.db，若存在于当前工作目录）在完整 store 生命周期前后逐字节不变。
+        var oldDbPaths = new[] { "aishop.db", "aishop.rag.db" }
+            .Select(Path.GetFullPath)
+            .ToArray();
+        var before = SnapshotFiles(oldDbPaths);
+
+        // 跑一遍会触发全部写/读/清理路径的 store 生命周期（仅作用于独立临时会话库）
+        var sessionDbPath = NewDbPath("olddb");
+        var connectionString = $"Data Source={sessionDbPath}";
+        var agent = CreateBareAgent("OldDbAgent");
+        var session = await agent.CreateSessionAsync();
+        Assert.IsType<InMemoryChatHistoryProvider>(agent.ChatHistoryProvider).GetMessages(session)
+            .Add(new Meai.ChatMessage(Meai.ChatRole.User, "触发 store 写路径（不得触碰老库）"));
+
+        var store = new SqliteAgentSessionStore(connectionString);
+        await store.InitializeAsync();
+        await store.SaveSessionAsync(agent, "thread-olddb", session);
+        await store.GetSessionAsync(agent, "thread-olddb");
+        await store.CleanupExpiredAsync(AguiSessionOptions.DefaultSessionTtlDays);
+        await store.DeleteSessionAsync(agent, "thread-olddb");
+
+        Assert.Equal(before, SnapshotFiles(oldDbPaths));
+    }
+
+    /// <summary>快照一组文件的存在性/大小/最后写入时间（供「老库零接触」前后逐项比对）。</summary>
+    private static string[] SnapshotFiles(IEnumerable<string> paths)
+        => [.. paths.Select(p => File.Exists(p)
+            ? $"EXISTS:{p}:{new FileInfo(p).Length}:{File.GetLastWriteTimeUtc(p).Ticks}"
+            : $"MISSING:{p}")];
+
     /// <summary>直连会话库统计某 store_id 的会话行数。</summary>
     private static async Task<long> CountSessionRowsAsync(string connectionString, string storeId)
     {

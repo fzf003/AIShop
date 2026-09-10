@@ -103,15 +103,19 @@ public sealed class SessionCleanupServiceTests : IDisposable
             await service.StopAsync(CancellationToken.None);
         }
 
-        // StopAsync 后后台任务以取消正常结束（未抛出异常、无残留）
-        await executeTask;
-        Assert.True(executeTask.IsCompletedSuccessfully, "StopAsync 后后台任务应干净退出（无异常）");
+        // StopAsync 后后台任务「以取消正常结束」（无故障、无残留）。
+        // 注意：.NET 10 BackgroundService 在 StopAsync 取消 stoppingToken 后，会把 ExecuteTask 标记为 Canceled，
+        // 即便 ExecuteAsync 内已捕获 OperationCanceledException 正常返回（实测：普通 async 方法捕获该异常并返回
+        // 为 RanToCompletion，而 BackgroundService 派生类同构返回却为 Canceled，属基类语义）。
+        // 故 Canceled 与 RanToCompletion 均为「干净退出」，断言「已结束且未故障」，而非要求 RanToCompletion。
+        Assert.True(executeTask.IsCompleted, "StopAsync 后后台任务应已结束（无残留 Task）");
+        Assert.False(executeTask.IsFaulted, $"后台任务不应以异常结束（干净退出）：{executeTask.Exception}");
     }
 
     [Fact]
     public async Task StopAsync_CancelsCleanly_NoResidualTask()
     {
-        // R5「干净退出」：stoppingToken 生效 → 后台任务以取消正常结束、不抛异常
+        // R5「干净退出」：stoppingToken 生效 → 后台任务以取消正常结束、不抛故障
         var sessionDbPath = NewDbPath("sessions");
         var connectionString = $"Data Source={sessionDbPath}";
         var initStore = new SqliteAgentSessionStore(connectionString);
@@ -123,10 +127,14 @@ public sealed class SessionCleanupServiceTests : IDisposable
         await service.StartAsync(CancellationToken.None);
         var executeTask = GetExecuteTask(service);
 
+        // StopAsync（CancellationToken.None）内部 Task.WhenAny(_executeTask, ...) 会等到 ExecuteTask 结束才返回，
+        // 故此处 executeTask 必已完成。.NET 10 BackgroundService 对取消停止的 ExecuteTask 标记为 Canceled
+        // （ExecuteAsync 内已捕获 OCE、无未处理异常）；断言「已结束且未故障」，而非 IsCompletedSuccessfully
+        // （后者要求 RanToCompletion，与「以取消正常结束」语义不符，且在并行负载下必现失败）。
         await service.StopAsync(CancellationToken.None);
 
-        await executeTask;
-        Assert.True(executeTask.IsCompletedSuccessfully, "StopAsync 后后台任务应干净退出（无异常、无残留）");
+        Assert.True(executeTask.IsCompleted, "StopAsync 后后台任务应已结束（无残留 Task）");
+        Assert.False(executeTask.IsFaulted, $"后台任务不应以异常结束（干净退出）：{executeTask.Exception}");
     }
 
     // ---------- 周期 <=0 回退 12h 不忙循环（R7）----------
