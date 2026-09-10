@@ -1,4 +1,5 @@
-﻿using AIShop.AgentTelemetry;
+﻿#pragma warning disable MAAI001 // ContextWindowCompactionStrategy 为 MAF [Experimental]（上下文压缩 API）
+using AIShop.AgentTelemetry;
 using AIShop.AguiHost;
 using AIShop.AguiHost.Agents;
 using AIShop.AguiHost.Model;
@@ -7,6 +8,7 @@ using AIShop.Service.Tools;
 using AIShop.ServiceDefaults;
 using Mem0Sharp;
 using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Compaction;
 using Microsoft.Agents.AI.DevUI;
 using Microsoft.Agents.AI.Hosting;
 using Microsoft.Agents.AI.Hosting.AGUI.AspNetCore;
@@ -80,7 +82,8 @@ try
             sp.GetRequiredService<CartToolProvider>(),
             sp.GetRequiredService<AgentTelemetryOptions>(),
             memoryService: ResolveMemoryService(sp),
-            currentUser: sp.GetRequiredService<ICurrentUserAccessor>())
+            currentUser: sp.GetRequiredService<ICurrentUserAccessor>(),
+            compactionStrategy: sp.GetRequiredService<ContextWindowCompactionStrategy>())
         );
 
      // 解析 Mem0 记忆服务（IMemoryService）。IMemoryService 单例构造会 new LocalBgeEmbeddingGenerator(modelDir)

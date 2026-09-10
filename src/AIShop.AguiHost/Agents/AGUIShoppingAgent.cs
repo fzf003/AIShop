@@ -84,6 +84,9 @@ internal static class AGUIShoppingAgent
     /// <param name="memoryService">Mem0 记忆服务（T13，可选）；与 <paramref name="currentUser"/> 均非 null 时挂载
     /// <see cref="MemoryContextProvider"/>（跨会话记忆读注入 + 轮后写入触发），null 时维持仅上下文压缩装配。</param>
     /// <param name="currentUser">当前用户访问器（T13，可选）；<see cref="MemoryContextProvider"/> 依赖其按用户读写记忆。</param>
+    /// <param name="compactionStrategy">上下文压缩策略（S1，可选）；由 Program keyed factory 注入 DI 单例
+    /// （<see cref="AguiCompaction.CreateStrategy"/> 构造，与 S4 的 store 侧压缩共用同一实例）。null 时回退
+    /// <see cref="AguiCompaction.CreateStrategy"/>（保证阈值单一来源，直构调用点源码兼容）。</param>
     /// <returns>装配完成的新购物 Agent（<see cref="ChatClientAgent"/> 经 <c>AgentTelemetry.Instrument</c> 包装，
     /// 运行时类型为 <c>OpenTelemetryAgent</c>；Level=None 时裸返回 <see cref="ChatClientAgent"/>，由 AG-UI AgentSessionStore 承载会话）。</returns>
     internal static AIAgent Create(
@@ -92,21 +95,19 @@ internal static class AGUIShoppingAgent
         AgentTelemetryOptions telemetryOptions,
         string? instructionsOverride = null,
         IMemoryService? memoryService = null,
-        ICurrentUserAccessor? currentUser = null)
+        ICurrentUserAccessor? currentUser = null,
+        CompactionStrategy? compactionStrategy = null)
     {
         var instructions = instructionsOverride ?? DefaultInstructions;
 
-        // 上下文压缩（T8，评审补齐缺口）：现装配无压缩、长对话上下文会无限膨胀；老 ShoppingAssistantAgent 挂了
-        // CompactionProvider + ContextWindowCompactionStrategy。此处对齐老 Agent 阈值（maxContextWindowTokens:
-        // 128000 / maxOutputTokens: 16384 / toolEvictionThreshold: 0.5 / truncationThreshold: 0.8）。
+        // 上下文压缩（T8，评审补齐缺口 + S1 阈值单一来源）：现装配无压缩、长对话上下文会无限膨胀；老
+        // ShoppingAssistantAgent 挂了 CompactionProvider + ContextWindowCompactionStrategy。阈值上提至
+        // AguiCompaction 单一来源（对齐老 Agent 128000/16384/0.5/0.8，消除配置漂移）：注入者用注入实例
+        // （DI 单例，S4 的 store 侧压缩复用同一实例），未注入（直构调用点）回退 AguiCompaction.CreateStrategy()。
         // stateKey 显式给 "AGUIShopping-Compaction"：CompactionProvider 状态存 AgentSession.StateBag，缺省按策略
         // 类型名（ContextWindowCompactionStrategy）作 key，多个 agent 同 session 会话会互相覆盖，显式 key 隔离。
         var compactionProvider = new CompactionProvider(
-            new ContextWindowCompactionStrategy(
-                maxContextWindowTokens: 128000,
-                maxOutputTokens: 16384,
-                toolEvictionThreshold: 0.5,
-                truncationThreshold: 0.8),
+            compactionStrategy ?? AguiCompaction.CreateStrategy(),
             stateKey: "AGUIShopping-Compaction");
 
         // AIContextProviders：压缩 provider 恒挂；记忆 provider 条件挂载（记忆服务 + 当前用户访问器均可用时）。

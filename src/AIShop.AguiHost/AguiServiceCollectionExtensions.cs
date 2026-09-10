@@ -1,3 +1,4 @@
+#pragma warning disable MAAI001 // ContextWindowCompactionStrategy 为 MAF [Experimental]（上下文压缩 API）
 using AIShop.AgentTelemetry;
 using AIShop.AguiHost.Agents;
 using AIShop.AguiHost.Model;
@@ -8,6 +9,7 @@ using AIShop.Infrastructure;
 using AIShop.Infrastructure.Data;
 using AIShop.Infrastructure.MemoryService;
 using AIShop.Service.Tools;
+using Microsoft.Agents.AI.Compaction;
 using Microsoft.Agents.AI.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
@@ -79,6 +81,12 @@ internal static class AguiServiceCollectionExtensions
         services.AddSingleton<IModelChatClientFactory, AguiModelClientFactory>();
         services.AddSingleton<IActiveModelProvider, ActiveModelProvider>();
         services.AddSingleton<RouterChatClient>();
+
+        // S1（agui-session-prod）压缩阈值单一来源：注册共享的上下文压缩策略单例——阈值定义唯一收敛于
+        // AguiCompaction（对齐老 ShoppingAssistantAgent 128000/16384/0.5/0.8）。AGUIShopping Agent 装配
+        // （Program keyed factory 经 GetRequiredService 注入）与 S4 的会话快照收敛（SqliteAgentSessionStore）
+        // 共用【同一实例】，从结构上消除「阈值两处各写一遍」的配置漂移（见 AguiCompaction 类注释 / spec R1）。
+        services.AddSingleton<ContextWindowCompactionStrategy>(_ => AguiCompaction.CreateStrategy());
 
         // Agent 遥测：绑定 "AgentTelemetry" 配置节，注册 AgentTelemetryOptions 单例（同 Api/Program.cs L62-66）
         var agentTelemetrySection = config.GetSection("AgentTelemetry");
