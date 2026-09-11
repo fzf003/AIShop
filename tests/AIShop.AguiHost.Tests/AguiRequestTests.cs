@@ -2,9 +2,9 @@
 using System.Text;
 using System.Text.Json.Nodes;
 using AIShop.AguiHost;
-using AIShop.AguiHost.Agents;
 using AIShop.AguiHost.Model;
 using AIShop.Core.Interfaces;
+using AIShop.Service;
 using Microsoft.Agents.AI.Hosting;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;

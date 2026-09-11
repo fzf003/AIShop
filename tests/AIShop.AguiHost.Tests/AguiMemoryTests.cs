@@ -2,9 +2,9 @@
 using System.Collections.Concurrent;
 using AIShop.AgentTelemetry;
 using AIShop.AguiHost;
-using AIShop.AguiHost.Agents;
 using AIShop.Core.Interfaces;
 using AIShop.Infrastructure.MemoryService;
+using AIShop.Service;
 using AIShop.Service.Providers;
 using AIShop.Service.Tools;
 using Mem0Sharp;

@@ -1,5 +1,4 @@
 using AIShop.AgentTelemetry;
-using AIShop.AguiHost.Agents;
 using AIShop.Core.Interfaces;
 using AIShop.Service;
 using AIShop.Service.Tools;

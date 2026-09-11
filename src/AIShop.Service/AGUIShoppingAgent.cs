@@ -9,7 +9,7 @@ using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Compaction;
 using Microsoft.Extensions.AI;
 
-namespace AIShop.AguiHost.Agents;
+namespace AIShop.Service;
 
 /// <summary>
 /// AGUIShoppingAgent 装配（agui-host T4 + T8）：从零设计的新购物 <see cref="ChatClientAgent"/>。
@@ -28,23 +28,23 @@ namespace AIShop.AguiHost.Agents;
 /// 经 <c>AddKeyedSingleton&lt;AIAgent&gt;(AgentName, ...)</c> 注册进 DI（签名不变）：供 AG-UI <c>MapAGUIServer(agentName, pattern)</c>
 /// 按名解析与 DevUI <c>/v1/entities</c> 实体发现共用同一装配产物。
 /// </remarks>
-internal static class AGUIShoppingAgent
+public static class AGUIShoppingAgent
 {
     /// <summary>Agent 名称（AG-UI 会话/遥测标识）。</summary>
-    internal const string AgentName = "AGUIShopping";
+    public const string AgentName = "AGUIShopping";
 
     /// <summary>
     /// T14 工具循环护栏上限：对齐老 ShoppingAssistantAgent 的 HarnessAgentOptions.MaximumIterationsPerRequest = 3
     /// （ShoppingAssistantAgent.cs L162）。含义 = 单次请求（单个 AG-UI run，对应老一次 RunChatAsync）内模型请求
     /// 工具调用的迭代数上限，超限即终止循环而非无限执行，防 FICC/工具失控与无限 token 消耗。
     /// </summary>
-    internal const int MaximumToolIterations = 3;
+    public const int MaximumToolIterations = 3;
 
     /// <summary>
     /// 自然语言购物人设 instructions（面向 AG-UI 会话）：先 <c>search_product</c> 检索商品 → 命中后用工具输出中的商品
     /// 编号加购 → 查车/改量/移除。全程简体中文、工具驱动，明确不使用旧 <c>Reply/Keywords/Preferences</c> JSON 结构化回复协议。
     /// </summary>
-    internal const string DefaultInstructions =
+    public const string DefaultInstructions =
         """
         你是 AIShop 线上商城的购物助手。请始终使用简体中文回复，语气自然、简洁，直接帮用户办成事。
 
@@ -90,7 +90,7 @@ internal static class AGUIShoppingAgent
     /// <see cref="AguiCompaction.CreateStrategy"/>（保证阈值单一来源，直构调用点源码兼容）。</param>
     /// <returns>装配完成的新购物 Agent（<see cref="ChatClientAgent"/> 经 <c>AgentTelemetry.Instrument</c> 包装，
     /// 运行时类型为 <c>OpenTelemetryAgent</c>；Level=None 时裸返回 <see cref="ChatClientAgent"/>，由 AG-UI AgentSessionStore 承载会话）。</returns>
-    internal static AIAgent Create(
+    public static AIAgent Create(
         IChatClient chatClient,
         CartToolProvider cartTools,
         AgentTelemetryOptions telemetryOptions,
@@ -169,7 +169,7 @@ internal static class AGUIShoppingAgent
     /// </summary>
     /// <param name="agent">已由 <c>chatClient.AsAIAgent(options)</c> 装配的裸 ChatClientAgent（未 Instrument 包装）。</param>
     /// <exception cref="InvalidOperationException">agent 的 ChatClient 管线解析不到 FICC 时抛出。</exception>
-    internal static void ApplyToolIterationLimit(ChatClientAgent agent)
+    public static void ApplyToolIterationLimit(ChatClientAgent agent)
     {
         var functionInvoker = agent.ChatClient.GetService<FunctionInvokingChatClient>()
             ?? throw new InvalidOperationException(

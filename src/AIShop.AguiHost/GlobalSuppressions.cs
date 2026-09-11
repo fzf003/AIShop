@@ -1,6 +1,3 @@
-// AguiHost 全局 SonarAnalyzer 压制（仅针对 spec 指定命名，收口到最小面）
-using System.Diagnostics.CodeAnalysis;
-
-// S101：类名 AGUIShoppingAgent 首段 AGUI 为全大写缩写，类名由 agui-host spec/tasks 指定（AGUIShoppingAgent，
-// T4/T5/T6 装配契约引用），不按 pascal 改名为 AguiShoppingAgent，故仅对本类型压制。
-[assembly: SuppressMessage("SonarAnalyzer.CSharp", "S101", Justification = "Class name mandated by agui-host spec (AGUIShoppingAgent)", Scope = "type", Target = "~T:AIShop.AguiHost.Agents.AGUIShoppingAgent")]
+// AguiHost 全局 SonarAnalyzer 压制。
+// S101（AGUIShoppingAgent 命名）随类型迁至 AIShop.Service，见 src/AIShop.Service/GlobalSuppressions.cs；
+// 本程序集当前无需压制项。
