@@ -69,6 +69,9 @@ public static class SessionStoreDependencyInjection
         // S6（agui-session-prod）：后台周期清理 hosted service（与 store 同生）——宿主启动即清一次过期会话行，
         // 之后按 AguiSessionOptions.EffectiveCleanupInterval（默认 12h）周期再清（spec R5）。
         // 裸 ServiceCollection 未启动 host 时仅注册、无副作用；依赖 SqliteAgentSessionStore/IOptions/ILogger 均可解析。
+        // 聊天历史轮级清理依赖抽象 IChatHistoryCleaner：此处 TryAdd 默认 no-op（未启用 Sql 聊天历史时无副作用，
+        // 保证服务恒可解析）；启用时 AddAguiChatHistoryProvider 会 Replace 为真实实现（见该扩展）。
+        services.TryAddSingleton<IChatHistoryCleaner, NoopChatHistoryCleaner>();
         services.AddHostedService<SessionCleanupService>();
         return services;
     }

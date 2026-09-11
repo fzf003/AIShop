@@ -43,7 +43,7 @@ namespace AIShop.Service.Agui;
 /// 会丢失派生类型，不可用。
 /// </para>
 /// </remarks>
-public sealed class SqlChatHistoryProvider : ChatHistoryProvider
+public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCleaner
 {
     /// <summary>chat_messages 建表 DDL（幂等；列名 / 表名均为内部受控常量，无用户输入拼接）。design §2.1。</summary>
     private const string CreateTableSql =
@@ -263,6 +263,17 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider
 
         return totalDeletedRounds;
     }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// 供 <see cref="SessionCleanupService"/> 周期调用的维护入口：用配置的
+    /// <see cref="SqlChatHistoryOptions.TtlDays"/> / <see cref="SqlChatHistoryOptions.CleanupBatchSize"/> 委托
+    /// <see cref="CleanupExpiredRoundsAsync"/>。显式接口实现（不经 provider 的公开 API 面暴露）。
+    /// 清理节奏由共享的 <see cref="SessionCleanupService"/> 后台循环统一驱动
+    /// （<see cref="AguiSessionOptions.EffectiveCleanupInterval"/>，默认 12h）。
+    /// </remarks>
+    Task<int> IChatHistoryCleaner.CleanupExpiredRoundsAsync(CancellationToken cancellationToken)
+        => CleanupExpiredRoundsAsync(_options.TtlDays, _options.CleanupBatchSize, cancellationToken);
 
     /// <summary>
     /// 默认状态初始化器：优先采用宿主 <see cref="SqliteAgentSessionStore"/> 写入会话 StateBag 的 AG-UI <c>ThreadId</c>

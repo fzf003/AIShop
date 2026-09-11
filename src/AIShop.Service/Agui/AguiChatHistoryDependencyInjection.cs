@@ -1,6 +1,7 @@
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace AIShop.Service.Agui;
 
@@ -45,6 +46,10 @@ public static class AguiChatHistoryDependencyInjection
         services.AddSingleton<SqlChatHistoryProvider>();
         // 对外以抽象 ChatHistoryProvider 暴露，供 host 经 GetService<ChatHistoryProvider>() 注入 AGUIShoppingAgent.Create。
         services.AddSingleton<ChatHistoryProvider>(sp => sp.GetRequiredService<SqlChatHistoryProvider>());
+        // 聊天历史维护：把默认 no-op（AddAguiSessionStore 中 TryAdd）替换为真实实现（provider 同一单例），
+        // 使 SessionCleanupService 的周期清理在启用 Sql 聊天历史时真正执行轮级 TTL 软删除（design §5 接线）。
+        services.Replace(ServiceDescriptor.Singleton<IChatHistoryCleaner>(
+            sp => sp.GetRequiredService<SqlChatHistoryProvider>()));
         return services;
     }
 }
