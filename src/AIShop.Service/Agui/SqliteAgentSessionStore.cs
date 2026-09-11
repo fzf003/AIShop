@@ -187,7 +187,7 @@ public sealed class SqliteAgentSessionStore : AgentSessionStore
 
         // 无行 → 新会话（修正旧 ReadSessionJsonAsync 无行返回 "{}" 的行为，spec R4）。
         if (row is null)
-            return await agent.CreateSessionAsync(cancellationToken).ConfigureAwait(false);
+            return await CreateSessionTaggedWithConversationIdAsync(agent, sessionStoreId, cancellationToken).ConfigureAwait(false);
 
         var (sessionJson, updatedAt) = row.Value;
 
@@ -196,12 +196,16 @@ public sealed class SqliteAgentSessionStore : AgentSessionStore
             string.CompareOrdinal(updatedAt, GetExpiryCutoff(_options.SessionTtlDays)) < 0)
         {
             await DeleteExpiredRowBestEffortAsync(storeId, cancellationToken).ConfigureAwait(false);
-            return await agent.CreateSessionAsync(cancellationToken).ConfigureAwait(false);
+            return await CreateSessionTaggedWithConversationIdAsync(agent, sessionStoreId, cancellationToken).ConfigureAwait(false);
         }
 
         // JsonElement 只在 JsonDocument 存活期间有效；DeserializeSessionAsync 同步解析完成，await 内 doc 保持存活。
         using var document = JsonDocument.Parse(sessionJson);
-        return await agent.DeserializeSessionAsync(document.RootElement, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var session = await agent.DeserializeSessionAsync(document.RootElement, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        // 把本次取会话所用的 ThreadId 落进会话 StateBag（键已存在则保留），供 SqlChatHistoryProvider 用作 conversation_id。
+        TagConversationId(session, sessionStoreId);
+        return session;
     }
 
     /// <inheritdoc />
@@ -276,6 +280,40 @@ public sealed class SqliteAgentSessionStore : AgentSessionStore
     /// <summary>store_id = "{agentName}:{sessionStoreId}"。用 agent.Name（稳定，重启不变）而非 agent.Id（随机 GUID，每实例不同），
     /// 保证持久化 key 跨宿主重启稳定；多 agent 共享同一库文件时按名称天然隔离。</summary>
     private static string GetStoreId(string? agentName, string sessionStoreId) => $"{agentName}:{sessionStoreId}";
+
+    /// <summary>
+    /// <c>CreateSessionAsync</c> 后打上会话标识（新会话 / 过期重开两条路径共用）。
+    /// </summary>
+    private static async ValueTask<AgentSession> CreateSessionTaggedWithConversationIdAsync(
+        AIAgent agent, string sessionStoreId, CancellationToken cancellationToken)
+    {
+        var session = await agent.CreateSessionAsync(cancellationToken).ConfigureAwait(false);
+        TagConversationId(session, sessionStoreId);
+        return session;
+    }
+
+    /// <summary>
+    /// 把取会话所用的 AG-UI <c>ThreadId</c>（<paramref name="sessionStoreId"/>）写进会话 StateBag 的
+    /// <see cref="AguiSessionStateKeys.ConversationId"/> 键，供 <see cref="SqlChatHistoryProvider"/> 以 ThreadId 作为
+    /// <c>chat_messages.conversation_id</c>（design-sql-chat-history-provider §2.2「会话标识（ThreadId）」、
+    /// §10.3 按 <c>conversation_id='thread-...'</c> 审计）。
+    /// </summary>
+    /// <remarks>
+    /// <b>键已存在时保留、不覆盖</b>：会话行按 <c>{agentName}:{ThreadId}</c> 唯一标识，从该行读出的会话其标识只可能等于本
+    /// ThreadId；保留已有值可 (1) 避免把「标识以其它方式生成的既有会话」的历史按新 key 劈成两段（连续性优先），
+    /// (2) 读路径值未变则不改写会话快照、不产生 session_json 无谓 diff。仅当键缺失 / 空白（新会话、或未接线宿主）时写入当前 ThreadId。
+    /// 取舍备选「总是覆盖」在本特性默认关闭、无存量 <c>chat_messages</c> 行时同样安全，但会牺牲上述连续性并每次改写快照。
+    /// </remarks>
+    private static void TagConversationId(AgentSession session, string sessionStoreId)
+    {
+        if (session.StateBag.TryGetValue<string>(AguiSessionStateKeys.ConversationId, out var existing)
+            && !string.IsNullOrWhiteSpace(existing))
+        {
+            return;
+        }
+
+        session.StateBag.SetValue(AguiSessionStateKeys.ConversationId, sessionStoreId);
+    }
 
     /// <summary>
     /// 落库前对会话历史做收敛快照（agui-session-prod S4，design §4.4 / spec R1-R3）。

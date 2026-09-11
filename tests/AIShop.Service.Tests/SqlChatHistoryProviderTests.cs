@@ -1,6 +1,7 @@
 #pragma warning disable MAAI001 // ChatHistoryProvider.InvokingContext / InvokedContext 构造属 MAF [Experimental]
 using System.Reflection;
 using System.Text.Json;
+using AIShop.Service.Agui;
 using Microsoft.Agents.AI;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.AI;
@@ -329,6 +330,76 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
         Assert.Equal(new[] { "问题1", "回答1" }, result.Select(m => m.Text));
     }
 
+    // ---------- conversation_id == ThreadId（SqliteAgentSessionStore 写、provider 读） ----------
+
+    [Fact]
+    public async Task ConversationId_EqualsThreadIdWrittenBySessionStore()
+    {
+        // 端到端串联：store.GetSessionAsync(ThreadId) 把 ThreadId 写进会话 StateBag 共享键 → provider（默认初始化器）
+        // 读它作为会话标识 → 落库 chat_messages.conversation_id == ThreadId（design §2.2「会话标识（ThreadId）」、
+        // §10.3 按 conversation_id='thread-...' 审计 / 召回）。
+        const string threadId = "thread-abc-123";
+
+        var store = new SqliteAgentSessionStore(_connectionString);
+        await store.InitializeAsync();
+        var session = await store.GetSessionAsync(CreateBareAgent("ConversationAgent"), threadId);
+
+        // store 已把本次取会话的 ThreadId 写入 StateBag 的共享键
+        Assert.True(session.StateBag.TryGetValue<string>(AguiSessionStateKeys.ConversationId, out var tagged));
+        Assert.Equal(threadId, tagged);
+
+        // provider 用【默认】初始化器（读共享键），非测试构造时注入的确定性 initializer
+        var provider = new AIShop.Service.Agui.SqlChatHistoryProvider(
+            new AIShop.Service.Agui.SqlChatHistoryOptions { ConnectionString = _connectionString });
+        await InvokeStoreAsync(provider, session,
+            [new ChatMessage(ChatRole.User, "找跑鞋")],
+            [new ChatMessage(ChatRole.Assistant, "为您找到专业跑鞋")]);
+
+        Assert.Equal(new[] { threadId }, ReadConversationIds());
+    }
+
+    [Fact]
+    public async Task ConversationId_FallsBackToGeneratedId_WhenStateBagHasNoThreadId()
+    {
+        // 未接线（直构 provider、StateBag 无共享键）→ 回退生成 GUID 仍可用、不崩；
+        // 同一会话多次写入落同一 conversation_id（回退 id 在会话内稳定）。
+        var provider = new AIShop.Service.Agui.SqlChatHistoryProvider(
+            new AIShop.Service.Agui.SqlChatHistoryOptions { ConnectionString = _connectionString });
+        var session = new TestSession();
+
+        await InvokeStoreAsync(provider, session,
+            [new ChatMessage(ChatRole.User, "第一轮")], [new ChatMessage(ChatRole.Assistant, "回复一")]);
+        await InvokeStoreAsync(provider, session,
+            [new ChatMessage(ChatRole.User, "第二轮")], [new ChatMessage(ChatRole.Assistant, "回复二")]);
+
+        var id = Assert.Single(ReadConversationIds());
+        Assert.False(string.IsNullOrWhiteSpace(id));
+        Assert.NotEqual(_conversationId, id); // 确系会话内自生成，而非测试注入的确定性 id
+    }
+
+    [Fact]
+    public async Task ConversationId_SurvivesStateBagRoundTrip_StaysThreadId()
+    {
+        // 重启续聊路径：store 取会话（写入 ThreadId）→ StateBag 序列化往返 → 新会话实例 → provider 落库，
+        // conversation_id 仍等于 ThreadId、不漂移。
+        const string threadId = "thread-resume-42";
+
+        var store = new SqliteAgentSessionStore(_connectionString);
+        await store.InitializeAsync();
+        var original = await store.GetSessionAsync(CreateBareAgent("ConversationAgent"), threadId);
+
+        using var document = JsonDocument.Parse(original.StateBag.Serialize().GetRawText());
+        var restored = new TestSession(AgentSessionStateBag.Deserialize(document.RootElement));
+
+        var provider = new AIShop.Service.Agui.SqlChatHistoryProvider(
+            new AIShop.Service.Agui.SqlChatHistoryOptions { ConnectionString = _connectionString });
+        await InvokeStoreAsync(provider, restored,
+            [new ChatMessage(ChatRole.User, "继续聊")],
+            [new ChatMessage(ChatRole.Assistant, "好的")]);
+
+        Assert.Equal(new[] { threadId }, ReadConversationIds());
+    }
+
     // ---------- helpers ----------
 
     private async Task StoreSimpleRound(string question, string answer)
@@ -339,17 +410,27 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
             [new ChatMessage(ChatRole.Assistant, answer)]);
     }
 
-    private async Task<IReadOnlyList<ChatMessage>> InvokeProvideAsync(AgentSession session)
+    private Task<IReadOnlyList<ChatMessage>> InvokeProvideAsync(AgentSession session)
+        => InvokeProvideAsync(_provider, session);
+
+    private static async Task<IReadOnlyList<ChatMessage>> InvokeProvideAsync(AIShop.Service.Agui.SqlChatHistoryProvider provider, AgentSession session)
     {
         var context = new ChatHistoryProvider.InvokingContext(
             Substitute.For<AIAgent>(), session, [new ChatMessage(ChatRole.User, "你好")]);
 
-        var result = ProvideMethod.Invoke(_provider, [context, CancellationToken.None]);
+        var result = ProvideMethod.Invoke(provider, [context, CancellationToken.None]);
         var valueTask = (ValueTask<IEnumerable<ChatMessage>>)result!;
         return (await valueTask).ToList();
     }
 
-    private async Task InvokeStoreAsync(
+    private Task InvokeStoreAsync(
+        AgentSession session,
+        IList<ChatMessage> requestMessages,
+        IList<ChatMessage> responseMessages)
+        => InvokeStoreAsync(_provider, session, requestMessages, responseMessages);
+
+    private static async Task InvokeStoreAsync(
+        AIShop.Service.Agui.SqlChatHistoryProvider provider,
         AgentSession session,
         IList<ChatMessage> requestMessages,
         IList<ChatMessage> responseMessages)
@@ -357,7 +438,7 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
         var context = new ChatHistoryProvider.InvokedContext(
             Substitute.For<AIAgent>(), session, requestMessages, responseMessages);
 
-        var result = StoreMethod.Invoke(_provider, [context, CancellationToken.None]);
+        var result = StoreMethod.Invoke(provider, [context, CancellationToken.None]);
         await (ValueTask)result!;
     }
 
@@ -407,6 +488,29 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
             ("$at", createdAt.ToString("O")),
             ("$c", _conversationId),
             ("$r", roundId));
+
+    /// <summary>构造一个最小真实 <see cref="ChatClientAgent"/>（无工具 / 无压缩 provider），供
+    /// <see cref="SqliteAgentSessionStore.GetSessionAsync"/> 走真实 CreateSessionAsync / 序列化路径。</summary>
+    private static ChatClientAgent CreateBareAgent(string name)
+        => Assert.IsType<ChatClientAgent>(Substitute.For<IChatClient>().AsAIAgent(new ChatClientAgentOptions
+        {
+            Name = name,
+            ChatOptions = new ChatOptions { Instructions = "测试人设" }
+        }));
+
+    /// <summary>读临时库 chat_messages 里出现过的 conversation_id（去重）。</summary>
+    private List<string> ReadConversationIds()
+    {
+        using var connection = new SqliteConnection(_connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT DISTINCT conversation_id FROM chat_messages";
+        using var reader = command.ExecuteReader();
+        var ids = new List<string>();
+        while (reader.Read())
+            ids.Add(reader.GetString(0));
+        return ids;
+    }
 
     private void ExecuteSql(string sql, params (string Name, object Value)[] parameters)
     {

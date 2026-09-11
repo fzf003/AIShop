@@ -23,12 +23,16 @@ namespace AIShop.Service.Agui;
 /// <b>会话标识（conversation_id）怎么拿</b>：MAF <see cref="ChatHistoryProvider"/> 只拿到 <see cref="AgentSession"/>
 /// （<c>InvokingContext.Session</c> / <c>InvokedContext.Session</c>），拿不到 AG-UI wire 上的 <c>ThreadId</c>
 /// （AG-UI 宿主仅把 ThreadId 用作 <c>AgentSessionStore</c> 的 key，不写入会话 StateBag，见镜像
-/// <c>AGUIEndpointRouteBuilderExtensions.cs</c>）。因此照搬官方 <c>ValkeyChatHistoryProvider</c> 的机制：经
-/// <see cref="ProviderSessionState{TState}"/> 把会话标识存进 <see cref="AgentSession.StateBag"/>，随会话快照一起被
-/// <see cref="SqliteAgentSessionStore"/> 持久化——首次使用生成稳定 ID，后续同会话读回同一 ID（跨请求 / 重启稳定）。
-/// <see cref="ProviderSessionState{TState}"/> 是 MAF Abstractions 的 public API（镜像
-/// <c>ProviderSessionState{TState}.cs</c> / <c>ValkeyChatHistoryProvider.cs</c> L44/L67/L89），其构造要求调用方提供
-/// <c>stateInitializer</c>；本类默认生成 GUID（<see cref="DefaultStateInitializer"/>），并开放构造参数供宿主 / 测试注入确定性标识。
+/// <c>AGUIEndpointRouteBuilderExtensions.cs</c>）。故照搬官方 <c>ValkeyChatHistoryProvider</c> 的机制：经
+/// <see cref="ProviderSessionState{TState}"/> 把会话标识存进 <see cref="AgentSession.StateBag"/>，随会话快照被
+/// <see cref="SqliteAgentSessionStore"/> 持久化 → 跨请求 / 重启稳定（<see cref="ProviderSessionState{TState}"/> 是
+/// MAF Abstractions 的 public API，见镜像 <c>ProviderSessionState{TState}.cs</c> / <c>ValkeyChatHistoryProvider.cs</c> L44/L67/L89）。
+/// </para>
+/// <para>
+/// <b>标识 = ThreadId（design §2.2）</b>：ThreadId 由 <see cref="SqliteAgentSessionStore.GetSessionAsync"/> 取会话时写入
+/// StateBag 的 <see cref="AguiSessionStateKeys.ConversationId"/> 键；<see cref="DefaultStateInitializer"/> 优先读该键，
+/// 使 <c>conversation_id</c> 等于 AG-UI ThreadId（§1.3 / §10.3 的审计 / 召回按 ThreadId 可查）。未接线（纯单测直构
+/// provider、StateBag 无该键）时回退生成 GUID，保证不崩；构造参数仍可注入确定性标识供测试。
 /// </para>
 /// <para>
 /// <b>JSON 序列化</b>：<c>message_json</c> 必须无损往返多态内容（<see cref="FunctionCallContent"/> /
@@ -260,8 +264,21 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider
         return totalDeletedRounds;
     }
 
-    /// <summary>默认状态初始化器：为新会话生成稳定会话标识（存 StateBag，随会话快照持久化）。</summary>
-    private static readonly Func<AgentSession?, State> DefaultStateInitializer = _ => new(Guid.NewGuid().ToString("N"));
+    /// <summary>
+    /// 默认状态初始化器：优先采用宿主 <see cref="SqliteAgentSessionStore"/> 写入会话 StateBag 的 AG-UI <c>ThreadId</c>
+    /// （<see cref="AguiSessionStateKeys.ConversationId"/>）作为会话标识（design §2.2：<c>conversation_id</c> = ThreadId）；
+    /// 未接线（纯单测直构 provider / 会话 StateBag 无该键）时回退生成 GUID，保证不崩。
+    /// </summary>
+    private static State DefaultStateInitializer(AgentSession? session)
+    {
+        if (session?.StateBag.TryGetValue<string>(AguiSessionStateKeys.ConversationId, out var threadId) is true
+            && !string.IsNullOrWhiteSpace(threadId))
+        {
+            return new State(threadId);
+        }
+
+        return new State(Guid.NewGuid().ToString("N"));
+    }
 
     /// <summary>取（首次则初始化）当前会话的会话标识。</summary>
     private string GetConversationId(AgentSession? session)
