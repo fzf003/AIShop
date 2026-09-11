@@ -87,6 +87,10 @@ public static class AGUIShoppingAgent
     /// <param name="compactionStrategy">上下文压缩策略（S1，可选）；由 Program keyed factory 注入 DI 单例
     /// （<see cref="AguiCompaction.CreateStrategy"/> 构造，与 S4 的 store 侧压缩共用同一实例）。null 时回退
     /// <see cref="AguiCompaction.CreateStrategy"/>（保证阈值单一来源，直构调用点源码兼容）。</param>
+    /// <param name="chatHistoryProvider">聊天历史 provider（design-sql-chat-history-provider §7 迁移路径第 1 条，可选）。
+    /// 由宿主按配置 <c>Agui:ChatHistoryProvider == "Sql"</c> 经 <see cref="AguiChatHistoryDependencyInjection.AddAguiChatHistoryProvider"/>
+    /// 注册并注入；null（未配置 / 非 Sql）时不设置，<see cref="ChatClientAgent"/> 退回 MAF 默认
+    /// <c>InMemoryChatHistoryProvider</c>（既有行为零变化）。</param>
     /// <returns>装配完成的新购物 Agent（<see cref="ChatClientAgent"/> 经 <c>AgentTelemetry.Instrument</c> 包装，
     /// 运行时类型为 <c>OpenTelemetryAgent</c>；Level=None 时裸返回 <see cref="ChatClientAgent"/>，由 AG-UI AgentSessionStore 承载会话）。</returns>
     public static AIAgent Create(
@@ -96,7 +100,8 @@ public static class AGUIShoppingAgent
         string? instructionsOverride = null,
         IMemoryService? memoryService = null,
         ICurrentUserAccessor? currentUser = null,
-        CompactionStrategy? compactionStrategy = null)
+        CompactionStrategy? compactionStrategy = null,
+        ChatHistoryProvider? chatHistoryProvider = null)
     {
         var instructions = instructionsOverride ?? DefaultInstructions;
 
@@ -134,7 +139,10 @@ public static class AGUIShoppingAgent
                 Instructions = instructions,
                 Tools = cartTools.CreateTools()
             },
-            AIContextProviders = contextProviders
+            AIContextProviders = contextProviders,
+            // 聊天历史 provider（§7 迁移路径第 1 条）：非 null 时用宿主按配置选定的持久化 provider；
+            // null（未配置 / 非 Sql）时不设置 → ChatClientAgent 用 MAF 默认 InMemoryChatHistoryProvider（既有行为）。
+            ChatHistoryProvider = chatHistoryProvider
         };
 
         var agent = chatClient.AsAIAgent(options);

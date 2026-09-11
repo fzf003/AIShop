@@ -77,6 +77,14 @@ try
         builder.Configuration,
         builder.Configuration["Agui:SessionConnection"]);
 
+    // 聊天历史 provider（design-sql-chat-history-provider §7 迁移路径第 1 条）：按配置 Agui:ChatHistoryProvider
+    // 选择——"Sql" → 注册持久化 SqlChatHistoryProvider（独立库 agui.chat.db，行级 chat_messages 表）；
+    // 其他 / 未配置 → 不注册，AGUIShopping 沿用 MAF 默认 InMemoryChatHistoryProvider（既有行为零变化）。
+    // 连接串可选覆盖键 Agui:ChatConnection（仿 T16 会话库 seam），缺省回退扩展内常量。
+    builder.Services.AddAguiChatHistoryProvider(
+        builder.Configuration,
+        builder.Configuration["Agui:ChatConnection"]);
+
     // T7 keyed AIAgent 注册：AGUIShopping 以 keyed AIAgent（key = AgentName）注册进 DI（独立于 IsDevelopment 门，
     // AG-UI "/" 端点在所有环境都按名解析）。这是 DevUI /v1/entities 能发现该实体、且 AG-UI 端点不因 keyed 化丢失的前提
     // （实体枚举 = GetKeyedServices<AIAgent>(KeyedService.AnyKey)，见镜像 DevUI EntitiesApiExtensions）。
@@ -87,7 +95,8 @@ try
             sp.GetRequiredService<AgentTelemetryOptions>(),
             memoryService: ResolveMemoryService(sp),
             currentUser: sp.GetRequiredService<ICurrentUserAccessor>(),
-            compactionStrategy: sp.GetRequiredService<ContextWindowCompactionStrategy>())
+            compactionStrategy: sp.GetRequiredService<ContextWindowCompactionStrategy>(),
+            chatHistoryProvider: sp.GetService<ChatHistoryProvider>())
         );
 
      // 解析 Mem0 记忆服务（IMemoryService）。IMemoryService 单例构造会 new LocalBgeEmbeddingGenerator(modelDir)
