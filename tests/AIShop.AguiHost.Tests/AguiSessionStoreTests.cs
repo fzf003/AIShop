@@ -197,10 +197,14 @@ public sealed class AguiSessionStoreTests : IDisposable
         Assert.Equal("Data Source=agui.sessions.db", AguiServiceCollectionExtensions.DefaultSessionDbConnection);
         Assert.DoesNotContain("aishop", AguiServiceCollectionExtensions.DefaultSessionDbConnection);
 
-        // 2) 老库文件（aishop.db / aishop.rag.db，若存在于当前工作目录）在完整 store 生命周期前后逐字节不变。
-        var oldDbPaths = new[] { "aishop.db", "aishop.rag.db" }
-            .Select(Path.GetFullPath)
-            .ToArray();
+        // 2) 三个老库（Api 业务库 / Api RAG 库 / McpServer 业务库）在完整 store 生命周期前后逐字节不变。
+        //    S8 修复：老库路径相对【仓库根】定位（自测试输出目录上溯找 AIShop.sln），不依赖测试进程 CWD——
+        //    旧实现用相对 CWD 的路径解析，该目录无老库 → 前后快照两端都为 MISSING → 相等断言恒真（空转 /
+        //    false assurance）。此处「任一老库缺失即显式失败」，若路径再次解析错，用例必须失败而非静默通过。
+        var oldDbPaths = ResolveOldDatabasePaths();
+        foreach (var oldDbPath in oldDbPaths)
+            Assert.True(File.Exists(oldDbPath), $"期望存在的老库未找到，零接触断言无法生效（路径解析错误？）：{oldDbPath}");
+
         var before = SnapshotFiles(oldDbPaths);
 
         // 跑一遍会触发全部写/读/清理路径的 store 生命周期（仅作用于独立临时会话库）
@@ -221,10 +225,45 @@ public sealed class AguiSessionStoreTests : IDisposable
         Assert.Equal(before, SnapshotFiles(oldDbPaths));
     }
 
-    /// <summary>快照一组文件的存在性/大小/最后写入时间（供「老库零接触」前后逐项比对）。</summary>
+    /// <summary>
+    /// 定位仓库根（自测试程序集输出目录 <see cref="AppContext.BaseDirectory"/> 逐级上溯，找含 AIShop.sln 的目录），
+    /// 并据此解析三个老库（Api 业务库 / Api RAG 库 / McpServer 业务库）的绝对路径。
+    /// 老库路径相对【仓库根】而非测试进程 CWD——用相对 CWD 的解析在 xUnit 下会指向输出目录（无老库），
+    /// 使前后快照两端都为 MISSING、断言空转。定位不到仓库根时抛异常（用例显式失败，不退化通过）。
+    /// </summary>
+    private static string[] ResolveOldDatabasePaths()
+    {
+        var repoRoot = FindRepositoryRoot()
+            ?? throw new InvalidOperationException(
+                $"未找到仓库根：自测试输出目录 {AppContext.BaseDirectory} 逐级上溯均未见 AIShop.sln，无法定位老库做零接触断言");
+        return
+        [
+            Path.Combine(repoRoot, "src", "AIShop.Api", "aishop.db"),
+            Path.Combine(repoRoot, "src", "AIShop.Api", "aishop.rag.db"),
+            Path.Combine(repoRoot, "src", "AIShop.McpServer", "aishop.db"),
+        ];
+    }
+
+    /// <summary>自 <see cref="AppContext.BaseDirectory"/> 逐级上溯，返回首个含 AIShop.sln 的目录；找不到返回 null。</summary>
+    private static string? FindRepositoryRoot()
+    {
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "AIShop.sln")))
+                return dir.FullName;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 快照一组文件的存在性/大小/最后写入时间（供「老库零接触」前后逐项比对）。
+    /// 快照项带前缀区分：EXISTS 含 size 与 mtime，「文件不存在」以 MISSING 单独标记，
+    /// 使「不存在」这一退化情形无法与「存在且未变」混淆。
+    /// </summary>
     private static string[] SnapshotFiles(IEnumerable<string> paths)
         => [.. paths.Select(p => File.Exists(p)
-            ? $"EXISTS:{p}:{new FileInfo(p).Length}:{File.GetLastWriteTimeUtc(p).Ticks}"
+            ? $"EXISTS:{p}|{new FileInfo(p).Length}|{File.GetLastWriteTimeUtc(p).Ticks}"
             : $"MISSING:{p}")];
 
     /// <summary>直连会话库统计某 store_id 的会话行数。</summary>
