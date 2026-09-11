@@ -1,5 +1,4 @@
 #pragma warning disable MAAI001 // CompactionStrategy 为 MAF [Experimental]（上下文压缩 API，会话快照收敛）
-using AIShop.Infrastructure.Services;
 using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Compaction;
@@ -8,7 +7,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.AI;
 using Serilog;
 
-namespace AIShop.AguiHost;
+namespace AIShop.Service;
 
 /// <summary>
 /// SQLite 持久化 <see cref="AgentSessionStore"/>（agui-host T12：会话历史持久化）。
@@ -33,7 +32,7 @@ namespace AIShop.AguiHost;
 /// ThreadId 来自 wire，仅作续接标识，非授权令牌），MVP 以 ThreadId 区分会话即可（tasks T12 注记）。
 /// </para>
 /// </remarks>
-internal sealed class SqliteAgentSessionStore : AgentSessionStore
+public sealed class SqliteAgentSessionStore : AgentSessionStore
 {
     /// <summary>agent_sessions 建表 DDL（幂等；列名/表名均为内部受控常量，无用户输入拼接）。</summary>
     private const string CreateTableSql =
@@ -77,10 +76,10 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
     }
 
     /// <summary>会话库连接串（供测试断言指向独立库、非老 aishop.db）。</summary>
-    internal string ConnectionString => _connectionString;
+    public string ConnectionString => _connectionString;
 
     /// <summary>会话配置（S4/S5 消费 TTL / 清理周期 / 快照轮数上限；测试可断言绑定生效）。</summary>
-    internal AguiSessionOptions Options => _options;
+    public AguiSessionOptions Options => _options;
 
     /// <summary>
     /// 幂等建表 + 建索引（启动预热或首次访问兜底）。AguiHost 启动引导（<see cref="AguiServiceCollectionExtensions.InitializeAsync"/>）
@@ -237,7 +236,7 @@ internal sealed class SqliteAgentSessionStore : AgentSessionStore
     /// <param name="batchSize">单批删除上限（避免长锁），默认 500。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>累计删除的会话行数。</returns>
-    internal async ValueTask<int> CleanupExpiredAsync(
+    public async ValueTask<int> CleanupExpiredAsync(
         int ttlDays,
         int batchSize = 500,
         CancellationToken cancellationToken = default)

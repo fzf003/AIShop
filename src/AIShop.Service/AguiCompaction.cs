@@ -1,7 +1,7 @@
 #pragma warning disable MAAI001 // ContextWindowCompactionStrategy 为 MAF [Experimental]（上下文压缩 API）
 using Microsoft.Agents.AI.Compaction;
 
-namespace AIShop.Infrastructure.Services;
+namespace AIShop.Service;
 
 /// <summary>
 /// AguiHost 上下文压缩策略的<b>唯一阈值来源</b>（agui-session-prod S1）。

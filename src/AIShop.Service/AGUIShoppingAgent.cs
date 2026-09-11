@@ -1,7 +1,6 @@
 #pragma warning disable MAAI001 // 上下文压缩 API（CompactionProvider / ContextWindowCompactionStrategy）为 MAF [Experimental]
 using AIShop.AgentTelemetry;
 using AIShop.Core.Interfaces;
-using AIShop.Infrastructure.Services;
 using AIShop.Service.Providers;
 using AIShop.Service.Tools;
 using Mem0Sharp;

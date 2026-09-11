@@ -1,9 +1,8 @@
-using AIShop.Infrastructure.Services;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
-namespace AIShop.AguiHost;
+namespace AIShop.Service;
 
 /// <summary>
 /// 会话过期后台周期清理（agui-session-prod S6，design §5.3 / spec R5）。
@@ -32,7 +31,7 @@ namespace AIShop.AguiHost;
 /// 仅当宿主 <c>StartAsync</c> 时才开始后台循环。
 /// </para>
 /// </remarks>
-internal sealed class SessionCleanupService : BackgroundService
+public sealed class SessionCleanupService : BackgroundService
 {
     /// <summary>单批删除上限（对齐 store 方法默认）；小批量短事务，避免一次性删海量行长时间持 SQLite 锁阻塞会话写入。</summary>
     private const int CleanupBatchSize = 500;

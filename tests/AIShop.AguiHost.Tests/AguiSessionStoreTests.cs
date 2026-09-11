@@ -1,5 +1,4 @@
 using AIShop.AguiHost;
-using AIShop.Infrastructure.Services;
 using AIShop.Service;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Hosting;

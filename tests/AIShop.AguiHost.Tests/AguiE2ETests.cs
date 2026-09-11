@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using AIShop.AguiHost;
 using AIShop.AguiHost.Model;
 using AIShop.Infrastructure.MemoryService;
+using AIShop.Service;
 using Mem0Sharp;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;

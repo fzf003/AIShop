@@ -1,4 +1,4 @@
-namespace AIShop.Infrastructure.Services;
+namespace AIShop.Service;
 
 /// <summary>
 /// AguiHost 会话存储配置（agui-session-prod S3）。绑定 "Agui" 配置节

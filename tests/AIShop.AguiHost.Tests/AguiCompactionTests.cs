@@ -2,7 +2,6 @@
 using AIShop.AgentTelemetry;
 using AIShop.AguiHost;
 using AIShop.Core.Interfaces;
-using AIShop.Infrastructure.Services;
 using AIShop.Service;
 using AIShop.Service.Tools;
 using Microsoft.Agents.AI;

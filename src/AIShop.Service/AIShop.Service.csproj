@@ -15,6 +15,7 @@
 
     <PackageReference Include="Microsoft.Agents.AI" />
     <PackageReference Include="Microsoft.Agents.AI.Harness" />
+    <PackageReference Include="Microsoft.Agents.AI.Hosting" />
     <PackageReference Include="Microsoft.Agents.AI.OpenAI" />
 
     <!-- P2 步骤 2：移除 Infrastructure 引用后 Serilog 不再传递，需显式声明（版本与 Infrastructure 对齐 4.3.0） -->
