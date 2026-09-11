@@ -3,7 +3,7 @@ using Microsoft.Agents.AI.Compaction;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 
-namespace AIShop.AguiHost;
+namespace AIShop.Infrastructure.Services;
 
 /// <summary>
 /// 会话快照收敛的「轮归一」纯逻辑（agui-session-prod S2，design §4.3）。
@@ -33,13 +33,13 @@ namespace AIShop.AguiHost;
 /// <see cref="FunctionCallContent.CallId"/> 都能在同一快照内找到对应 <see cref="FunctionResultContent.CallId"/>。
 /// </para>
 /// </remarks>
-internal static class SnapshotCompactor
+public static class SnapshotCompactor
 {
     /// <summary>
     /// 强制保护的最近轮数（design §4.3 步骤 4、spec R3「至少最后 2 轮，含刚结束的末轮」）。
     /// 无论官方候选如何，最后 <see cref="ProtectedRounds"/> 轮一律整轮保留。
     /// </summary>
-    internal const int ProtectedRounds = 2;
+    public const int ProtectedRounds = 2;
 
     /// <summary>
     /// 对会话历史做轮归一收敛（design §4.3）。纯逻辑，不触库。
@@ -53,7 +53,7 @@ internal static class SnapshotCompactor
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>收敛后的消息列表（保原序）。快速路径返回<strong>原历史同一实例</strong>（消息引用逐一相等，短会话零回归）。</returns>
     /// <exception cref="ArgumentNullException"><paramref name="strategy"/> 或 <paramref name="history"/> 为 null。</exception>
-    internal static async Task<IReadOnlyList<ChatMessage>> CompactAsync(
+    public static async Task<IReadOnlyList<ChatMessage>> CompactAsync(
         CompactionStrategy strategy,
         IReadOnlyList<ChatMessage> history,
         int maxRounds,

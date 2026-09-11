@@ -1,4 +1,5 @@
 using AIShop.AguiHost;
+using AIShop.Infrastructure.Services;
 using Microsoft.Agents.AI;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.AI;

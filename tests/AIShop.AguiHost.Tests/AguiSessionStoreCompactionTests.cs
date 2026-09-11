@@ -1,5 +1,6 @@
 #pragma warning disable MAAI001 // CompactionStrategy / CompactionMessageIndex 为 MAF [Experimental]（上下文压缩 API）
 using AIShop.AguiHost;
+using AIShop.Infrastructure.Services;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Compaction;
 using Microsoft.Data.Sqlite;

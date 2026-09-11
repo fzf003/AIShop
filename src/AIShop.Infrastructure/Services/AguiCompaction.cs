@@ -1,7 +1,7 @@
 #pragma warning disable MAAI001 // ContextWindowCompactionStrategy 为 MAF [Experimental]（上下文压缩 API）
 using Microsoft.Agents.AI.Compaction;
 
-namespace AIShop.AguiHost;
+namespace AIShop.Infrastructure.Services;
 
 /// <summary>
 /// AguiHost 上下文压缩策略的<b>唯一阈值来源</b>（agui-session-prod S1）。
@@ -14,25 +14,25 @@ namespace AIShop.AguiHost;
 /// toolEvictionThreshold: 0.5 / truncationThreshold: 0.8）。
 /// <see cref="ContextWindowCompactionStrategy"/> 为 MAF <c>[Experimental]</c>（MAAI001），文件顶已禁用该诊断。
 /// </remarks>
-internal static class AguiCompaction
+public static class AguiCompaction
 {
     /// <summary>模型上下文窗口上限（token，对齐老 ShoppingAssistantAgent L140）。</summary>
-    internal const int MaxContextWindowTokens = 128000;
+    public const int MaxContextWindowTokens = 128000;
 
     /// <summary>预留给模型输出的 token 上限（对齐老 ShoppingAssistantAgent L140）。</summary>
-    internal const int MaxOutputTokens = 16384;
+    public const int MaxOutputTokens = 16384;
 
     /// <summary>工具结果驱逐阈值（占输入预算比例，对齐老 ShoppingAssistantAgent L140）。</summary>
-    internal const double ToolEvictionThreshold = 0.5;
+    public const double ToolEvictionThreshold = 0.5;
 
     /// <summary>截断阈值（占输入预算比例，对齐老 ShoppingAssistantAgent L140）。</summary>
-    internal const double TruncationThreshold = 0.8;
+    public const double TruncationThreshold = 0.8;
 
     /// <summary>
     /// 按本类常量构造一个全新的 <see cref="ContextWindowCompactionStrategy"/>。
     /// DI 单例与 Agent/store 的缺省回退都调用本方法，保证阈值单一来源。
     /// </summary>
-    internal static ContextWindowCompactionStrategy CreateStrategy() =>
+    public static ContextWindowCompactionStrategy CreateStrategy() =>
         new(
             maxContextWindowTokens: MaxContextWindowTokens,
             maxOutputTokens: MaxOutputTokens,

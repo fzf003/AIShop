@@ -1,4 +1,5 @@
 #pragma warning disable MAAI001 // CompactionStrategy 为 MAF [Experimental]（上下文压缩 API，会话快照收敛）
+using AIShop.Infrastructure.Services;
 using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Compaction;

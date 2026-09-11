@@ -3,6 +3,7 @@ using AIShop.AgentTelemetry;
 using AIShop.AguiHost;
 using AIShop.AguiHost.Agents;
 using AIShop.Core.Interfaces;
+using AIShop.Infrastructure.Services;
 using AIShop.Service.Tools;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Compaction;

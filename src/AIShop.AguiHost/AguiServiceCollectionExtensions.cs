@@ -8,6 +8,7 @@ using AIShop.Core.StaticData;
 using AIShop.Infrastructure;
 using AIShop.Infrastructure.Data;
 using AIShop.Infrastructure.MemoryService;
+using AIShop.Infrastructure.Services;
 using AIShop.Service.Tools;
 using Microsoft.Agents.AI.Compaction;
 using Microsoft.Agents.AI.Hosting;

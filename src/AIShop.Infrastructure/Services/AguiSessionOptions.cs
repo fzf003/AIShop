@@ -1,4 +1,4 @@
-namespace AIShop.AguiHost;
+namespace AIShop.Infrastructure.Services;
 
 /// <summary>
 /// AguiHost 会话存储配置（agui-session-prod S3）。绑定 "Agui" 配置节
@@ -11,16 +11,16 @@ namespace AIShop.AguiHost;
 /// <see cref="EffectiveCleanupInterval"/>（<c>SessionCleanupIntervalHours &lt;= 0</c> 时回退默认 12h，避免误设为 0 忙循环）。
 /// 属性名与配置键（去掉节前缀后）同名，供 ConfigurationBinder 按名绑定。
 /// </remarks>
-internal sealed class AguiSessionOptions
+public class AguiSessionOptions
 {
     /// <summary>会话闲置生存天数默认值（30 天）。</summary>
-    internal const int DefaultSessionTtlDays = 30;
+    public const int DefaultSessionTtlDays = 30;
 
     /// <summary>后台清理周期默认值（12 小时）。</summary>
-    internal const int DefaultSessionCleanupIntervalHours = 12;
+    public const int DefaultSessionCleanupIntervalHours = 12;
 
     /// <summary>收敛快照保留轮数默认硬上限（12 轮，口径对齐老 RoundBasedCompactionPolicy K=12）。</summary>
-    internal const int DefaultSessionMaxRounds = 12;
+    public const int DefaultSessionMaxRounds = 12;
 
     /// <summary>
     /// <c>updated_at</c> 闲置超过该天数即视为过期；<c>&lt;= 0</c> = <b>禁用 TTL</b>（不后台删除、不惰性过期）。
@@ -41,9 +41,9 @@ internal sealed class AguiSessionOptions
     public int SessionMaxRounds { get; set; } = DefaultSessionMaxRounds;
 
     /// <summary>TTL 是否启用（<see cref="SessionTtlDays"/> &gt; 0）。</summary>
-    internal bool IsTtlEnabled => SessionTtlDays > 0;
+    public bool IsTtlEnabled => SessionTtlDays > 0;
 
     /// <summary>生效的清理周期：<see cref="SessionCleanupIntervalHours"/> &lt;= 0 回退默认 12h。</summary>
-    internal TimeSpan EffectiveCleanupInterval => TimeSpan.FromHours(
+    public TimeSpan EffectiveCleanupInterval => TimeSpan.FromHours(
         SessionCleanupIntervalHours > 0 ? SessionCleanupIntervalHours : DefaultSessionCleanupIntervalHours);
 }
