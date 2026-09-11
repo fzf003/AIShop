@@ -1,5 +1,6 @@
 using System.Text;
 using AIShop.Core.Services;
+using AIShop.Service.Agui;
 using NSubstitute;
 using Meai = Microsoft.Extensions.AI;
 

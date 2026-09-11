@@ -5,6 +5,7 @@ using AIShop.AguiHost;
 using AIShop.AguiHost.Model;
 using AIShop.Core.Interfaces;
 using AIShop.Service;
+using AIShop.Service.Agui;
 using Microsoft.Agents.AI.Hosting;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;

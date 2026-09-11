@@ -1,5 +1,6 @@
 using AIShop.AguiHost;
 using AIShop.Service;
+using AIShop.Service.Agui;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 

@@ -1,6 +1,6 @@
 using Microsoft.Extensions.AI;
 
-namespace AIShop.AguiHost.Model;
+namespace AIShop.Service.Agui;
 
 /// <summary>
 /// 「模型 → 底层客户端」唯一来源（agui-model-switch C5）。AguiHost 自建，不引用老 Service <c>ModelRouter</c>。
@@ -20,7 +20,7 @@ namespace AIShop.AguiHost.Model;
 /// </list>
 /// 实现为 internal + InternalsVisibleTo 暴露给 AIShop.AguiHost.Tests（不对外、不进 Core/Service）。
 /// </remarks>
-internal interface IModelChatClientFactory
+public interface IModelChatClientFactory
 {
     /// <summary>缺省模型 id（＝ 配置节 <c>ActiveModel</c>；ActiveModel 缺失时为 Models 节首个键）。</summary>
     string DefaultModelId { get; }

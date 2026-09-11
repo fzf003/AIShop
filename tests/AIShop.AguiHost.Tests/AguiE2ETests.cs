@@ -5,6 +5,7 @@ using AIShop.AguiHost;
 using AIShop.AguiHost.Model;
 using AIShop.Infrastructure.MemoryService;
 using AIShop.Service;
+using AIShop.Service.Agui;
 using Mem0Sharp;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;

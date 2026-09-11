@@ -1,4 +1,4 @@
-namespace AIShop.AguiHost.Model;
+namespace AIShop.Service.Agui;
 
 /// <summary>
 /// <see cref="IActiveModelProvider"/> 的 AsyncLocal 单例实现（agui-model-switch C5 M2）。
@@ -6,7 +6,7 @@ namespace AIShop.AguiHost.Model;
 /// <see cref="SetActiveModel"/> 后，同一执行流的 async/await 链（agent 运行、工具调用）读到同一模型 id；当次 run
 /// 结束随 ExecutionContext 消失，不残留到下一请求（与既有 username 注入 <c>CurrentUserAccessor</c> 同机制）。
 /// </summary>
-internal sealed class ActiveModelProvider : IActiveModelProvider
+public sealed class ActiveModelProvider : IActiveModelProvider
 {
     private readonly AsyncLocal<string?> _activeModel = new();
 

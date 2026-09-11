@@ -1,7 +1,7 @@
 using Microsoft.Extensions.AI;
 using Serilog;
 
-namespace AIShop.AguiHost.Model;
+namespace AIShop.Service.Agui;
 
 /// <summary>
 /// 逐轮选模型的 delegating <see cref="IChatClient"/>（agui-model-switch C5 M2）。
@@ -21,7 +21,7 @@ namespace AIShop.AguiHost.Model;
 ///
 /// 本类型不感知 username/会话/清洗——只负责「把本轮对话交给哪个模型」。
 /// </remarks>
-internal sealed class RouterChatClient : IChatClient
+public sealed class RouterChatClient : IChatClient
 {
     private readonly IActiveModelProvider _activeModelProvider;
     private readonly IModelChatClientFactory _modelChatClientFactory;
@@ -84,6 +84,6 @@ internal sealed class RouterChatClient : IChatClient
     /// 未知 model（requested 非 null 但工厂 <see cref="IModelChatClientFactory.ContainsModel"/> 为 false）同样返回
     /// null——由调用方据此记录 Warning 后回退默认，不阻断。
     /// </summary>
-    internal static string? ResolveRequestedModel(string? requested, IModelChatClientFactory factory)
+    public static string? ResolveRequestedModel(string? requested, IModelChatClientFactory factory)
         => requested is not null && factory.ContainsModel(requested) ? requested : null;
 }

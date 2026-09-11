@@ -1,21 +1,21 @@
 #pragma warning disable MAAI001 // ContextWindowCompactionStrategy 为 MAF [Experimental]（上下文压缩 API）
 using AIShop.AgentTelemetry;
-using AIShop.AguiHost.Model;
 using AIShop.Core.Entities;
 using AIShop.Core.Interfaces;
 using AIShop.Core.StaticData;
 using AIShop.Infrastructure;
 using AIShop.Infrastructure.Data;
 using AIShop.Infrastructure.MemoryService;
-using AIShop.Service;
 using AIShop.Service.Tools;
 using Microsoft.Agents.AI.Compaction;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Serilog;
 
-namespace AIShop.AguiHost;
+namespace AIShop.Service.Agui;
 
 /// <summary>
 /// AguiHost 底座 DI 装配与启动引导（agui-host T3 + T13 + C5）。
@@ -25,19 +25,19 @@ namespace AIShop.AguiHost;
 /// <c>agui.rag.db</c>/<c>agui.memory.db</c>，数据隔离 spec 验收 5；老 aishop.db / aishop.rag.db 零接触）。
 /// internal + InternalsVisibleTo 暴露给 AIShop.AguiHost.Tests，供宿主级测试直接驱动装配/启动引导。
 /// </summary>
-internal static class AguiServiceCollectionExtensions
+public static class AguiServiceCollectionExtensions
 {
     /// <summary>AguiHost 独立业务库连接串（缺省回退点）。老 aishop.db 零接触。</summary>
-    internal const string DefaultDbConnection = "Data Source=agui.db";
+    public const string DefaultDbConnection = "Data Source=agui.db";
 
     /// <summary>AguiHost 独立 RAG 向量库连接串（缺省回退点）。老 aishop.rag.db 零接触。</summary>
-    internal const string DefaultRagConnection = "Data Source=agui.rag.db";
+    public const string DefaultRagConnection = "Data Source=agui.rag.db";
 
     /// <summary>AguiHost 独立会话库连接串（T12，缺省回退点）。老 aishop.db 零接触。</summary>
-    internal const string DefaultSessionDbConnection = SessionStoreDependencyInjection.DefaultSessionDbConnection;
+    public const string DefaultSessionDbConnection = SessionStoreDependencyInjection.DefaultSessionDbConnection;
 
     /// <summary>AguiHost 独立记忆库路径（T13，缺省回退点；SqliteMemoryStore 按路径建库）。老 aishop.db 零接触。</summary>
-    internal const string DefaultMemoryDatabasePath = "agui.memory.db";
+    public const string DefaultMemoryDatabasePath = "agui.memory.db";
 
     /// <summary>
     /// 注册 AguiHost 底座 DI：EF 仓储（独立业务库）+ RAG 语义检索（独立向量库）+ Mem0 记忆（独立记忆库）+
@@ -52,7 +52,7 @@ internal static class AguiServiceCollectionExtensions
     /// <param name="ragConnection">RAG 向量库连接串；null 时用 <see cref="DefaultRagConnection"/>。</param>
     /// <param name="memoryDatabasePath">Mem0 记忆库路径（<c>SqliteMemoryStore</c> 按路径建库）；null 时用
     /// <see cref="DefaultMemoryDatabasePath"/>。老 <c>AddMemoryService()</c> 无参默认 aishop.db 不受影响。</param>
-    internal static IServiceCollection AddAguiBaseServices(
+    public static IServiceCollection AddAguiBaseServices(
         this IServiceCollection services,
         IConfiguration config,
         string? dbConnection = null,
@@ -129,7 +129,7 @@ internal static class AguiServiceCollectionExtensions
     /// 语义对齐 AIShop.Api/Program.cs 的启动逻辑。
     /// </summary>
     /// <param name="sp">已装配 AddAguiBaseServices 的 ServiceProvider。</param>
-    internal static async Task InitializeAsync(IServiceProvider sp)
+    public static async Task InitializeAsync(IServiceProvider sp)
     {
         // EF.IsDesignTime 跳过：避免 dotnet ef 设计时执行启动 DB 逻辑（否则 HostAbortedException），同 Api
         if (EF.IsDesignTime)

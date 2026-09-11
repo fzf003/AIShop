@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using AIShop.AguiHost.Model;
+using AIShop.Service.Agui;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;

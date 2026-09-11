@@ -7,7 +7,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.AI;
 using Serilog;
 
-namespace AIShop.Service;
+namespace AIShop.Service.Agui;
 
 /// <summary>
 /// SQLite 持久化 <see cref="AgentSessionStore"/>（agui-host T12：会话历史持久化）。

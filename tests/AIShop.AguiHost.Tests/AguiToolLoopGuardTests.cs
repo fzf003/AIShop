@@ -1,6 +1,7 @@
 using AIShop.AgentTelemetry;
 using AIShop.Core.Interfaces;
 using AIShop.Service;
+using AIShop.Service.Agui;
 using AIShop.Service.Tools;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;

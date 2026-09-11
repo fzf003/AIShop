@@ -5,6 +5,7 @@ using AIShop.AguiHost;
 using AIShop.Core.Interfaces;
 using AIShop.Infrastructure.MemoryService;
 using AIShop.Service;
+using AIShop.Service.Agui;
 using AIShop.Service.Providers;
 using AIShop.Service.Tools;
 using Mem0Sharp;

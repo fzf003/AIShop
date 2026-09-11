@@ -2,7 +2,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
-namespace AIShop.Service;
+namespace AIShop.Service.Agui;
 
 /// <summary>
 /// 会话过期后台周期清理（agui-session-prod S6，design §5.3 / spec R5）。

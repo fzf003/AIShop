@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using AIShop.AguiHost.Model;
 using AIShop.Service;
+using AIShop.Service.Agui;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.DevUI;
 using Microsoft.AspNetCore.Hosting;

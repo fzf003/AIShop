@@ -3,7 +3,7 @@ using Microsoft.Agents.AI.Compaction;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 
-namespace AIShop.Service;
+namespace AIShop.Service.Agui;
 
 /// <summary>
 /// 会话快照收敛的「轮归一」纯逻辑（agui-session-prod S2，design §4.3）。

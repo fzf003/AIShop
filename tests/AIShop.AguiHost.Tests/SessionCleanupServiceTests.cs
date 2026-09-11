@@ -1,6 +1,7 @@
 using System.Reflection;
 using AIShop.AguiHost;
 using AIShop.Service;
+using AIShop.Service.Agui;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;

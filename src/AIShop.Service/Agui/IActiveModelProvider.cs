@@ -1,4 +1,4 @@
-namespace AIShop.AguiHost.Model;
+namespace AIShop.Service.Agui;
 
 /// <summary>
 /// 当前请求激活模型上下文（agui-model-switch C5 M2）。
@@ -11,7 +11,7 @@ namespace AIShop.AguiHost.Model;
 /// 不跨请求泄漏；<see cref="SetActiveModel"/>(null) 表示「未指定」＝走 ActiveModel 缺省（由
 /// <see cref="RouterChatClient"/> 读取侧解析，注入中间件不注入缺省模型值）。
 /// </remarks>
-internal interface IActiveModelProvider
+public interface IActiveModelProvider
 {
     /// <summary>每轮请求（AG-UI RunAgentInput）进入时注入该轮模型 id；null = 未指定（走 ActiveModel 缺省）。</summary>
     void SetActiveModel(string? modelId);

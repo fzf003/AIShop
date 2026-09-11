@@ -8,7 +8,7 @@ using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Compaction;
 using Microsoft.Extensions.AI;
 
-namespace AIShop.Service;
+namespace AIShop.Service.Agui;
 
 /// <summary>
 /// AGUIShoppingAgent 装配（agui-host T4 + T8）：从零设计的新购物 <see cref="ChatClientAgent"/>。

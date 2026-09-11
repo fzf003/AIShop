@@ -1,5 +1,6 @@
 using AIShop.AguiHost;
 using AIShop.AguiHost.Model;
+using AIShop.Service.Agui;
 using AIShop.Core.Interfaces;
 using AIShop.Service.Tools;
 using Microsoft.Extensions.AI;

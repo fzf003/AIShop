@@ -5,7 +5,7 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using OpenAI;
 
-namespace AIShop.AguiHost.Model;
+namespace AIShop.Service.Agui;
 
 /// <summary>
 /// 「模型 → 底层客户端」工厂实现（agui-model-switch C5 M1）。
@@ -23,7 +23,7 @@ namespace AIShop.AguiHost.Model;
 /// OTel 外包刻意移入工厂每客户端（而非留在全局 seam 注册处）：Router 可切任意模型，保证非默认模型同样有遥测；
 /// 全局 seam ＝ <see cref="GetDefaultClient"/> 也自然覆盖。
 /// </remarks>
-internal sealed class AguiModelClientFactory : IModelChatClientFactory
+public sealed class AguiModelClientFactory : IModelChatClientFactory
 {
     /// <summary>单模型配置（仿老 <c>ModelRouter.ModelConfig</c>）：Endpoint/Key/Model 取节值，Name 缺省取节键。</summary>
     private sealed record ModelConfig(string Endpoint, string Key, string Model, string Name);

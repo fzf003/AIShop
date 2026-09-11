@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using AIShop.AguiHost;
 using AIShop.AguiHost.Model;
 using AIShop.Service;
+using AIShop.Service.Agui;
 using Microsoft.Agents.AI.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;

@@ -1,6 +1,7 @@
 using System.Text;
 using AIShop.AgentTelemetry;
 using AIShop.AguiHost.Model;
+using AIShop.Service.Agui;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 

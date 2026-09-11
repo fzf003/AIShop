@@ -1,4 +1,5 @@
 using AIShop.AguiHost.Model;
+using AIShop.Service.Agui;
 using Meai = Microsoft.Extensions.AI;
 
 namespace AIShop.AguiHost.Tests;

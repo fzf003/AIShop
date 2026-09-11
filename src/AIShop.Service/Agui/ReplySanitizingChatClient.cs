@@ -2,7 +2,7 @@ using System.Runtime.CompilerServices;
 using AIShop.Core.Services;
 using Microsoft.Extensions.AI;
 
-namespace AIShop.AguiHost;
+namespace AIShop.Service.Agui;
 
 /// <summary>
 /// 服务端回复清洗中间件（T11，评审方案 A）：以 MEAI <see cref="DelegatingChatClient"/> 中间件形态包装

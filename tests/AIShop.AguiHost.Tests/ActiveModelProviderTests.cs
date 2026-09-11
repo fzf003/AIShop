@@ -1,4 +1,5 @@
 using AIShop.AguiHost.Model;
+using AIShop.Service.Agui;
 
 namespace AIShop.AguiHost.Tests;
 

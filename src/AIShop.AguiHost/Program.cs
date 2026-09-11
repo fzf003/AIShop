@@ -3,7 +3,7 @@ using AIShop.AgentTelemetry;
 using AIShop.AguiHost;
 using AIShop.Core.Interfaces;
 using AIShop.AguiHost.Model;
-using AIShop.Service;
+using AIShop.Service.Agui;
 using AIShop.Service.Tools;
 using AIShop.ServiceDefaults;
 using Mem0Sharp;

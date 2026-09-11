@@ -6,7 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 
-namespace AIShop.Service;
+namespace AIShop.Service.Agui;
 
 /// <summary>
 /// AG-UI 会话持久化 store 的 DI 装配（分层搬迁重构：自 AguiHost 迁入 AIShop.Service，与 <see cref="SqliteAgentSessionStore"/>
