@@ -272,8 +272,9 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
     public async Task Store_BatchConflictsWithExistingUniqueSequence_RollsBackWholeBatchAndThrows()
     {
         // 预置一条【软删除】行占用 sequence=2（不进 MAX 计算、读取不可见，但仍受 UNIQUE(conversation_id, sequence) 约束）。
-        // 随后写入 3 条：第 1 条 seq=1 成功，第 2 条 seq=2 触发 UNIQUE 冲突 → 整批回滚 + 乐观重试 3 次后抛异常。
-        // 断言：第 1 条也被回滚（非删除行 0 条），证明确有事务原子性（要么全写、要么全回滚）。
+        // 随后写入一批 3 条（当前轮次的 1 条 user + 2 条响应）：第 1 条 seq=1 成功，第 2 条 seq=2 触发 UNIQUE 冲突
+        // → 整批回滚 + 乐观重试 3 次后抛异常。断言：第 1 条也被回滚（非删除行 0 条），证明确有事务原子性。
+        // （当前轮次按位置取「最后一条 user 起」，故多条消息须由 user + 响应构成，不能是 3 条连续 user。）
         await _provider.InitializeAsync();
         ExecuteSql(
             "INSERT INTO chat_messages (conversation_id, sequence, role, message_json, round_id, is_deleted, deleted_at, created_at) " +
@@ -283,8 +284,8 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => InvokeStoreAsync(
             _session,
-            [new ChatMessage(ChatRole.User, "第一条"), new ChatMessage(ChatRole.User, "第二条"), new ChatMessage(ChatRole.User, "第三条")],
-            []));
+            [new ChatMessage(ChatRole.User, "第一条")],
+            [new ChatMessage(ChatRole.Assistant, "第二条"), new ChatMessage(ChatRole.Assistant, "第三条")]));
 
         var nonDeleted = ReadRows().Count(r => !r.IsDeleted);
         Assert.Equal(0, nonDeleted); // 第 1 条 seq=1 已随整批回滚，未被部分写入
@@ -400,33 +401,34 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
         Assert.Equal(new[] { threadId }, ReadConversationIds());
     }
 
-    // ---------- 只处理「当前轮次」：客户端重发整段前文不重复入库 / 不重复进上下文 ----------
+    // ---------- 只处理「当前轮次」（纯位置判定）：客户端重发整段前文不重复入库 / 不重复进上下文 ----------
 
     [Fact]
     public async Task Store_ClientResendsFullHistory_DoesNotGrowRows()
     {
-        // 缺陷回归：AG-UI 客户端每次把整段前文一起发来。第 2 次请求（新会话，模拟跨请求）重发第 1 轮 + 新消息，
-        // 落库必须只新增第 2 轮 → 共 4 行（而非把重发的第 1 轮再存一遍 = 6 行）。
+        // 缺陷回归（真实链路）：客户端重发前文时，assistant 那条带的是【客户端自己的 id】（服务端返回的是
+        // chatcmpl-…，客户端可能重发为自造 id），两者对不上——故不能依赖 message id 判「已拥有」，必须纯按位置
+        // 划「当前轮次 = 最后一条 user 起」。本测试刻意让重发的 id 与库中 id 全不相同，复现 id 比对落空的真实失败。
         const string conversationId = "conv-full-resend";
 
         var provider1 = NewProvider(conversationId);
         await InvokeStoreAsync(provider1, new TestSession(),
-            [Msg(ChatRole.User, "第一轮问题", "m-u1")],
-            [Msg(ChatRole.Assistant, "第一轮回复", "m-a1")]);
+            [Msg(ChatRole.User, "第一轮问题", "server-u1")],
+            [Msg(ChatRole.Assistant, "第一轮回复", "chatcmpl-a1")]);
         Assert.Equal(2, CountAllChatRows());
 
-        // 第 2 次请求：新 provider + 新会话（缓存空 → 从库加载既有历史），客户端重发完整前文 + 新消息
+        // 第 2 次请求：新 provider + 新会话，客户端重发第 1 轮（id 全不同）+ 本轮新消息
         var provider2 = NewProvider(conversationId);
         var session2 = new TestSession();
         var clientPayload = new List<ChatMessage>
         {
-            Msg(ChatRole.User, "第一轮问题", "m-u1"),
-            Msg(ChatRole.Assistant, "第一轮回复", "m-a1"),
-            Msg(ChatRole.User, "第二轮问题", "m-u2"),
+            Msg(ChatRole.User, "第一轮问题", "client-u1"),       // ≠ 库中 server-u1
+            Msg(ChatRole.Assistant, "第一轮回复", "client-a1"),  // ≠ 库中 chatcmpl-a1
+            Msg(ChatRole.User, "第二轮问题", "client-u2"),
         };
 
         await InvokeProvideAsync(provider2, session2, clientPayload);   // 真实链路里 Provide 先于 Store
-        await InvokeStoreAsync(provider2, session2, clientPayload, [Msg(ChatRole.Assistant, "第二轮回复", "m-a2")]);
+        await InvokeStoreAsync(provider2, session2, clientPayload, [Msg(ChatRole.Assistant, "第二轮回复", "chatcmpl-a2")]);
 
         Assert.Equal(4, CountAllChatRows());
         Assert.Equal(
@@ -435,32 +437,24 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
-    public async Task Provide_WhenClientResendsHistory_DoesNotReturnClientSuppliedMessages()
+    public async Task Provide_WhenClientResendsHistory_ReturnsEmpty()
     {
-        // 模型上下文不重复：客户端已带的前文，provider 不再返回（否则模型看到两遍）。
+        // 模型上下文不重复：客户端自带历史（最后一条 user 之前还有消息）→ provider 返回空。
         const string conversationId = "conv-no-dup-context";
 
         await InvokeStoreAsync(NewProvider(conversationId), new TestSession(),
-            [Msg(ChatRole.User, "问题一", "mu1")],
-            [Msg(ChatRole.Assistant, "回复一", "ma1")]);
+            [Msg(ChatRole.User, "问题一", "server-u1")],
+            [Msg(ChatRole.Assistant, "回复一", "chatcmpl-a1")]);
 
-        // 完整重发 → provider 返回为空（客户端已带全部历史）
-        var fullPayload = new List<ChatMessage>
+        var payload = new List<ChatMessage>
         {
-            Msg(ChatRole.User, "问题一", "mu1"),
-            Msg(ChatRole.Assistant, "回复一", "ma1"),
-            Msg(ChatRole.User, "问题二", "mu2"),
+            Msg(ChatRole.User, "问题一", "client-u1"),
+            Msg(ChatRole.Assistant, "回复一", "client-a1"),
+            Msg(ChatRole.User, "问题二", "client-u2"),
         };
-        var fullResult = await InvokeProvideAsync(NewProvider(conversationId), new TestSession(), fullPayload);
-        var payloadIds = fullPayload.Select(m => m.MessageId).OfType<string>().ToHashSet(StringComparer.Ordinal);
-        Assert.DoesNotContain(fullResult, m => m.MessageId is not null && payloadIds.Contains(m.MessageId));
-        Assert.Empty(fullResult);
+        var provided = await InvokeProvideAsync(NewProvider(conversationId), new TestSession(), payload);
 
-        // 部分重发（只带 user）→ 只返回客户端未带的后续历史，且不含已带的 mu1
-        var partialResult = await InvokeProvideAsync(
-            NewProvider(conversationId), new TestSession(),
-            new List<ChatMessage> { Msg(ChatRole.User, "问题一", "mu1") });
-        Assert.Equal(new[] { "ma1" }, partialResult.Select(m => m.MessageId));
+        Assert.Empty(provided);
     }
 
     [Fact]
@@ -470,19 +464,19 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
         const string conversationId = "conv-curl-style";
 
         await InvokeStoreAsync(NewProvider(conversationId), new TestSession(),
-            [Msg(ChatRole.User, "问题一", "mu1")],
-            [Msg(ChatRole.Assistant, "回复一", "ma1")]);
+            [Msg(ChatRole.User, "问题一", "server-u1")],
+            [Msg(ChatRole.Assistant, "回复一", "chatcmpl-a1")]);
 
         var provider2 = NewProvider(conversationId);
         var session2 = new TestSession();
-        var currentTurn = new List<ChatMessage> { Msg(ChatRole.User, "问题二", "mu2") };
+        var currentTurn = new List<ChatMessage> { Msg(ChatRole.User, "问题二", "client-u2") };
 
         var provided = await InvokeProvideAsync(provider2, session2, currentTurn);
 
-        // 客户端只发本轮 → provider 补回上一轮（mu1、ma1）
-        Assert.Equal(new[] { "mu1", "ma1" }, provided.Select(m => m.MessageId));
+        // 客户端只发本轮 → provider 补回上一轮
+        Assert.Equal(new[] { "问题一", "回复一" }, provided.Select(m => m.Text));
 
-        await InvokeStoreAsync(provider2, session2, currentTurn, [Msg(ChatRole.Assistant, "回复二", "ma2")]);
+        await InvokeStoreAsync(provider2, session2, currentTurn, [Msg(ChatRole.Assistant, "回复二", "chatcmpl-a2")]);
 
         Assert.Equal(4, CountAllChatRows());
         Assert.Equal(
@@ -493,29 +487,28 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
     [Fact]
     public async Task Store_ClientResendsHistoryBeyondCacheWindow_StillDeduplicates()
     {
-        // 客户端重发的历史超过 MaxRoundsToLoad 缓存窗口（默认 2 轮）时，仍只落库当前轮新增：
-        // 已拥有历史按「最后一条已拥有消息之后」定位，故窗口外的旧轮也不会被重复入库。
+        // 客户端重发的历史超过 MaxRoundsToLoad 缓存窗口（默认 2 轮）、且 id 与库中全不同时，
+        // 仍只落库当前轮新增（位置判定与缓存窗口无关）。
         const string conversationId = "conv-beyond-window";
 
         var provider = NewProvider(conversationId);
         var session = new TestSession();
-        await InvokeStoreAsync(provider, session, [Msg(ChatRole.User, "q1", "u1")], [Msg(ChatRole.Assistant, "a1", "a1")]);
-        await InvokeStoreAsync(provider, session, [Msg(ChatRole.User, "q2", "u2")], [Msg(ChatRole.Assistant, "a2", "a2")]);
-        await InvokeStoreAsync(provider, session, [Msg(ChatRole.User, "q3", "u3")], [Msg(ChatRole.Assistant, "a3", "a3")]);
+        await InvokeStoreAsync(provider, session, [Msg(ChatRole.User, "q1", "s-u1")], [Msg(ChatRole.Assistant, "a1", "s-a1")]);
+        await InvokeStoreAsync(provider, session, [Msg(ChatRole.User, "q2", "s-u2")], [Msg(ChatRole.Assistant, "a2", "s-a2")]);
+        await InvokeStoreAsync(provider, session, [Msg(ChatRole.User, "q3", "s-u3")], [Msg(ChatRole.Assistant, "a3", "s-a3")]);
         Assert.Equal(6, CountAllChatRows());
 
-        // 新会话（缓存空，Provide 只从库加载最近 2 轮）+ 客户端重发全部 3 轮前文 + 第 4 轮
         var provider2 = NewProvider(conversationId);
         var session2 = new TestSession();
         var payload = new List<ChatMessage>
         {
-            Msg(ChatRole.User, "q1", "u1"), Msg(ChatRole.Assistant, "a1", "a1"),
-            Msg(ChatRole.User, "q2", "u2"), Msg(ChatRole.Assistant, "a2", "a2"),
-            Msg(ChatRole.User, "q3", "u3"), Msg(ChatRole.Assistant, "a3", "a3"),
-            Msg(ChatRole.User, "q4", "u4"),
+            Msg(ChatRole.User, "q1", "c-u1"), Msg(ChatRole.Assistant, "a1", "c-a1"),
+            Msg(ChatRole.User, "q2", "c-u2"), Msg(ChatRole.Assistant, "a2", "c-a2"),
+            Msg(ChatRole.User, "q3", "c-u3"), Msg(ChatRole.Assistant, "a3", "c-a3"),
+            Msg(ChatRole.User, "q4", "c-u4"),
         };
         await InvokeProvideAsync(provider2, session2, payload);
-        await InvokeStoreAsync(provider2, session2, payload, [Msg(ChatRole.Assistant, "a4", "a4")]);
+        await InvokeStoreAsync(provider2, session2, payload, [Msg(ChatRole.Assistant, "a4", "s-a4")]);
 
         Assert.Equal(8, CountAllChatRows()); // 6 + 当前轮 2 行（而非 6 + 8）
     }

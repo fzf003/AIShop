@@ -35,10 +35,12 @@ namespace AIShop.Service.Agui;
 /// provider、StateBag 无该键）时回退生成 GUID，保证不崩；构造参数仍可注入确定性标识供测试。
 /// </para>
 /// <para>
-/// <b>读写语义 = 只处理「当前轮次」</b>：AG-UI 客户端每次会把<b>整段前文</b>随请求发来，故
-/// <see cref="ProvideChatHistoryAsync"/> 只返回「provider 拥有的历史」中<b>客户端未带</b>的部分（按
-/// <see cref="ChatMessage.MessageId"/> 比对），<see cref="StoreChatHistoryAsync"/> 只落库<b>当前轮次新增</b>
-/// （请求消息中不属于已拥有历史的部分 + 全部响应消息）——避免历史被反复返回给模型 / 反复写入库。
+/// <b>读写语义 = 只处理「当前轮次」，纯按位置判定（不依赖 message id）</b>：AG-UI 客户端每次会把<b>整段前文</b>
+/// 随请求发来，其 payload 结构恒为 <c>[历史前缀…, 当前轮次]</c>，最后一条 user 消息即本轮起点。故
+/// <see cref="StoreChatHistoryAsync"/> 只落库当前轮次 + 全部响应消息（重发的前缀一律不落库）；
+/// <see cref="ProvideChatHistoryAsync"/> 只在客户端没带历史（curl 式只发本轮）时从库补历史，否则返回空——
+/// 避免历史被反复写入库 / 反复返回给模型。**不按 <see cref="ChatMessage.MessageId"/> 比对**：客户端重发的
+/// assistant 消息带的是客户端自己的 id，与库中服务端返回 id（如 <c>chatcmpl-…</c>）永远对不上。
 /// 详见两个方法的 remarks。
 /// </para>
 /// <para>
@@ -167,19 +169,18 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
     /// <inheritdoc />
     /// <remarks>
     /// <para>
-    /// <b>语义：只返回「provider 拥有的历史」中当前轮次之外的部分。</b>AG-UI 客户端（DevUI / 官方客户端）会把
-    /// <b>整段前文</b>随请求一起发来（<c>context.RequestMessages</c>）；若 provider 再把这些历史整段返回，
-    /// 模型就会看到两遍（既费 token 又干扰模型）。故本方法：
+    /// <b>语义：只在客户端「没带历史」时补历史。</b>AG-UI 客户端（DevUI / 官方客户端）每次把
+    /// <b>整段前文</b>随请求发来（<c>context.RequestMessages</c>）；若 provider 再把这些历史返回，模型就会看到两遍
+    /// （既费 token 又干扰模型）。故：
     /// </para>
-    /// <list type="number">
-    /// <item><description>按 <see cref="SqlChatHistoryOptions.MaxRoundsToLoad"/> 取最近 N 个非删除轮（整轮，保 FCC↔FRC 配对）；</description></item>
-    /// <item><description>剔除客户端已在 <c>context.RequestMessages</c> 里带过来的消息（按 <see cref="ChatMessage.MessageId"/> 比对）；</description></item>
-    /// <item><description>经会话内缓存（<see cref="State.Messages"/>）免重复查库：缓存覆盖的轮集合与当前活跃轮集合一致时直接复用，否则查库回填并 <c>SaveState</c>。</description></item>
+    /// <list type="bullet">
+    /// <item><description>请求里<b>存在当前轮次之前的对话消息</b>（见 <see cref="FindCurrentTurnStart"/>）→ 说明客户端已自带历史 → <b>返回 <c>[]</c></b>；</description></item>
+    /// <item><description>客户端只发了当前轮次（curl 式）→ 按 <see cref="SqlChatHistoryOptions.MaxRoundsToLoad"/> 从库返回最近 N 个非删除轮（整轮，保 FCC↔FRC 配对），使只发新消息的客户端仍能续聊。</description></item>
     /// </list>
     /// <para>
-    /// 用「活跃轮集合」而非无条件缓存命中做失效判定：外部 TTL 软删除 / 新轮写入都会改变活跃轮集合，据此可避免
-    /// 陈旧缓存把已软删除轮带回（design §1.3「软删除记录不参与加载」）。返回消息由基类 <c>InvokingCoreAsync</c>
-    /// 拼在调用方消息之前并打上 ChatHistory 来源标记（故不会被 <see cref="StoreChatHistoryAsync"/> 重复落库）。
+    /// 会话内缓存（<see cref="State.Messages"/>）用于免重复查库：缓存覆盖的轮集合与当前活跃轮集合一致时复用，
+    /// 否则查库回填并 <c>SaveState</c>。用活跃轮集合而非无条件命中做失效判定，可避免陈旧缓存把已软删除轮带回
+    /// （design §1.3「软删除记录不参与加载」）。返回消息由基类 <c>InvokingCoreAsync</c> 拼在调用方消息之前。
     /// </para>
     /// </remarks>
     protected override async ValueTask<IEnumerable<ChatMessage>> ProvideChatHistoryAsync(
@@ -189,6 +190,11 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
         await EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
 
         var conversationId = GetConversationId(context.Session);
+
+        // 客户端已自带历史（当前轮次起点之前存在对话类消息）→ provider 返回空，避免模型看到两遍。
+        if (FindCurrentTurnStart(context.RequestMessages.ToList()) > 0)
+            return [];
+
         // design §9：MaxRoundsToLoad < 1 时按 1 处理（配置校验，避免无历史注入）。
         var maxRounds = _options.MaxRoundsToLoad < 1 ? 1 : _options.MaxRoundsToLoad;
         var state = _sessionState.GetOrInitializeState(context.Session);
@@ -207,31 +213,32 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
 
         // 缓存命中：缓存覆盖的轮集合 == 当前活跃轮集合（无外部变更）→ 免查库。
         if (state.Messages.Count > 0 && CacheRounds(state.Messages).SequenceEqual(activeRounds))
-            return ExcludeClientSupplied(state.Messages, context.RequestMessages);
+            return state.Messages.Select(cached => cached.Message).ToList();
 
         // 未命中：查库回填最近 N 轮（整轮）并同步缓存。
         var loaded = await GetMessagesByRoundsAsync(conversationId, activeRounds, cancellationToken).ConfigureAwait(false);
         state.Messages = loaded;
         _sessionState.SaveState(context.Session, state);
-        return ExcludeClientSupplied(loaded, context.RequestMessages);
+        return loaded.Select(cached => cached.Message).ToList();
     }
 
     /// <inheritdoc />
     /// <remarks>
     /// <para>
-    /// <b>语义：只落库「当前轮次新增」。</b>基类默认请求过滤器已剔除 provider 自己在
+    /// <b>语义：只落库「当前轮次」。</b>基类默认请求过滤器已剔除 provider 自己在
     /// <see cref="ProvideChatHistoryAsync"/> 里返回的历史（来源标记 <see cref="AgentRequestMessageSourceType.ChatHistory"/>），
     /// 但 AG-UI 客户端还会把<b>整段前文</b>当调用方消息重发——若整包落库，历史就被反复写入（本缺陷根因）。
     /// </para>
     /// <para>
-    /// 判定「客户端重发的是 provider 已拥有的历史」按 <see cref="ChatMessage.MessageId"/> 比对：找到请求消息中
-    /// <b>最后一条</b>已拥有消息，只取它之后的部分（客户端重发的是既有历史前缀，新消息必然在其后），再按 id
-    /// 兜底剔除尾部残留的已拥有消息；请求里完全没有已拥有 id（curl 式只发本轮）时整包视为本轮新增。
-    /// 本轮新增 = 上述请求消息 + <b>全部</b> <c>ResponseMessages</c>；<c>round_id</c> 递增、前导 system 归 round 1、
-    /// 乐观重试等正确行为由 <see cref="InsertMessagesWithRetryAsync"/> 保持。
+    /// <b>当前轮次纯按位置划分</b>（见 <see cref="FindCurrentTurnStart"/>）：客户端 payload 结构恒为
+    /// <c>[历史前缀…, 当前轮次]</c>，最后一条 <see cref="ChatRole.User"/> 消息即本轮起点，其之前的前缀一律不落库。
+    /// <b>不依赖 <see cref="ChatMessage.MessageId"/></b>——客户端重发的 assistant 消息带的是客户端自己的 id，
+    /// 与库中服务端返回的 id（如 <c>chatcmpl-…</c>）永远对不上，按 id 判「已拥有」在真实链路必然落空。
+    /// 落库 = 当前轮次消息 + <b>全部</b> <c>ResponseMessages</c>；<c>round_id</c> 递增、前导 system 归 round 1、
+    /// 事务原子、乐观重试等由 <see cref="InsertMessagesWithRetryAsync"/> 保持。
     /// </para>
     /// <para>
-    /// 落库成功后把新增消息追加进会话内缓存（<see cref="State.Messages"/>），并按
+    /// 落库成功后把新增消息追加进会话内缓存（<see cref="State.Messages"/>），按
     /// <see cref="SqlChatHistoryOptions.MaxRoundsToLoad"/> 截到最近 N 轮，使下次 <see cref="ProvideChatHistoryAsync"/> 命中缓存。
     /// </para>
     /// </remarks>
@@ -244,14 +251,8 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
         var conversationId = GetConversationId(context.Session);
         var state = _sessionState.GetOrInitializeState(context.Session);
 
-        // provider 已拥有历史的 message id 集合（来自会话内缓存；null/空 id 无法比对，不计入）。
-        var ownedIds = state.Messages
-            .Select(cached => cached.Message.MessageId)
-            .OfType<string>()
-            .Where(id => id.Length > 0)
-            .ToHashSet(StringComparer.Ordinal);
-
-        var currentTurn = ExtractCurrentTurn(context.RequestMessages.ToList(), ownedIds);
+        var requestMessages = context.RequestMessages.ToList();
+        var currentTurn = requestMessages.Skip(FindCurrentTurnStart(requestMessages));
         var newMessages = currentTurn.Concat(context.ResponseMessages ?? []).ToList();
         if (newMessages.Count == 0)
             return;
@@ -264,48 +265,41 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
         _sessionState.SaveState(context.Session, state);
     }
 
-    /// <summary>剔除客户端已在请求里带过来的消息（按 <see cref="ChatMessage.MessageId"/> 比对），避免模型看到重复历史。</summary>
-    private static List<ChatMessage> ExcludeClientSupplied(
-        IReadOnlyList<CachedMessage> cached, IEnumerable<ChatMessage> requestMessages)
-    {
-        var clientIds = ToMessageIdSet(requestMessages);
-        // 无 id 的消息无法证明与客户端重复，保守返回（不丢上下文）。
-        return cached
-            .Where(cachedMessage => cachedMessage.Message.MessageId is not { Length: > 0 } id || !clientIds.Contains(id))
-            .Select(cachedMessage => cachedMessage.Message)
-            .ToList();
-    }
-
     /// <summary>
-    /// 取请求消息里的「当前轮次新增」部分：跳过客户端重发的、provider 已拥有的历史前缀，只保留其后的新消息。
+    /// 按<b>位置</b>找出「当前轮次」的起点下标：客户端 payload 结构恒为 <c>[历史前缀…, 当前轮次]</c>，
+    /// 最后一条 <see cref="ChatRole.User"/> 消息即本轮起点（无 User 消息时整包为本轮）。
     /// </summary>
-    private static List<ChatMessage> ExtractCurrentTurn(IReadOnlyList<ChatMessage> requestMessages, HashSet<string> ownedIds)
+    /// <remarks>
+    /// <para>
+    /// 起点之前若存在<b>对话类消息</b>（<see cref="ChatRole.User"/> / <see cref="ChatRole.Assistant"/> / <see cref="ChatRole.Tool"/>）
+    /// → 视为客户端已自带的既有历史，起点 = 该最后一条 User；否则（前面只有 <see cref="ChatRole.System"/> 等提示消息，
+    /// 不是历史）起点 = 0，使前导 system 仍属本轮（design §2.3：前导非 User 归 round 1）。
+    /// </para>
+    /// <para>
+    /// 返回 <c>&gt; 0</c> 即表示「客户端已带历史」——<see cref="ProvideChatHistoryAsync"/> 据此返回空、不再补历史。
+    /// </para>
+    /// </remarks>
+    private static int FindCurrentTurnStart(IReadOnlyList<ChatMessage> requestMessages)
     {
-        if (ownedIds.Count == 0)
-            return requestMessages.ToList();
-
-        // 客户端重发的既有历史是前缀，新消息必然在【最后一条已拥有消息】之后 → 从该位置之后取。
-        var lastOwnedIndex = requestMessages
+        var lastUserIndex = requestMessages
             .Select((message, index) => (message, index))
-            .Where(x => x.message.MessageId is { Length: > 0 } id && ownedIds.Contains(id))
+            .Where(x => x.message.Role == ChatRole.User)
             .Select(x => x.index)
             .DefaultIfEmpty(-1)
             .Max();
 
-        // 兜底：尾部若仍混入已拥有消息（乱序重发）再按 id 剔除。
-        return requestMessages
-            .Skip(lastOwnedIndex + 1)
-            .Where(message => message.MessageId is not { Length: > 0 } id || !ownedIds.Contains(id))
-            .ToList();
+        if (lastUserIndex <= 0)
+            return 0;
+
+        // 最后一条 user 之前存在对话类消息 → 客户端带了历史，当前轮次从该 user 起；否则整包为本轮。
+        return requestMessages.Take(lastUserIndex).Any(message => IsConversationalRole(message.Role))
+            ? lastUserIndex
+            : 0;
     }
 
-    /// <summary>取一批消息的非空 <see cref="ChatMessage.MessageId"/> 集合（序号序，id 大小写敏感）。</summary>
-    private static HashSet<string> ToMessageIdSet(IEnumerable<ChatMessage> messages)
-        => messages
-            .Select(message => message.MessageId)
-            .OfType<string>()
-            .Where(id => id.Length > 0)
-            .ToHashSet(StringComparer.Ordinal);
+    /// <summary>是否对话类角色（user / assistant / tool）——system / developer 属提示消息，不算历史。</summary>
+    private static bool IsConversationalRole(ChatRole role)
+        => role == ChatRole.User || role == ChatRole.Assistant || role == ChatRole.Tool;
 
     /// <summary>缓存覆盖的轮 id（按消息顺序首次出现，轮 id 升序）。</summary>
     private static List<int> CacheRounds(IReadOnlyList<CachedMessage> messages)
