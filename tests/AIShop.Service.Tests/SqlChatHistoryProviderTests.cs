@@ -400,6 +400,126 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
         Assert.Equal(new[] { threadId }, ReadConversationIds());
     }
 
+    // ---------- 只处理「当前轮次」：客户端重发整段前文不重复入库 / 不重复进上下文 ----------
+
+    [Fact]
+    public async Task Store_ClientResendsFullHistory_DoesNotGrowRows()
+    {
+        // 缺陷回归：AG-UI 客户端每次把整段前文一起发来。第 2 次请求（新会话，模拟跨请求）重发第 1 轮 + 新消息，
+        // 落库必须只新增第 2 轮 → 共 4 行（而非把重发的第 1 轮再存一遍 = 6 行）。
+        const string conversationId = "conv-full-resend";
+
+        var provider1 = NewProvider(conversationId);
+        await InvokeStoreAsync(provider1, new TestSession(),
+            [Msg(ChatRole.User, "第一轮问题", "m-u1")],
+            [Msg(ChatRole.Assistant, "第一轮回复", "m-a1")]);
+        Assert.Equal(2, CountAllChatRows());
+
+        // 第 2 次请求：新 provider + 新会话（缓存空 → 从库加载既有历史），客户端重发完整前文 + 新消息
+        var provider2 = NewProvider(conversationId);
+        var session2 = new TestSession();
+        var clientPayload = new List<ChatMessage>
+        {
+            Msg(ChatRole.User, "第一轮问题", "m-u1"),
+            Msg(ChatRole.Assistant, "第一轮回复", "m-a1"),
+            Msg(ChatRole.User, "第二轮问题", "m-u2"),
+        };
+
+        await InvokeProvideAsync(provider2, session2, clientPayload);   // 真实链路里 Provide 先于 Store
+        await InvokeStoreAsync(provider2, session2, clientPayload, [Msg(ChatRole.Assistant, "第二轮回复", "m-a2")]);
+
+        Assert.Equal(4, CountAllChatRows());
+        Assert.Equal(
+            new[] { "第一轮问题", "第一轮回复", "第二轮问题", "第二轮回复" },
+            ReadRows(conversationId).Select(r => r.Text));
+    }
+
+    [Fact]
+    public async Task Provide_WhenClientResendsHistory_DoesNotReturnClientSuppliedMessages()
+    {
+        // 模型上下文不重复：客户端已带的前文，provider 不再返回（否则模型看到两遍）。
+        const string conversationId = "conv-no-dup-context";
+
+        await InvokeStoreAsync(NewProvider(conversationId), new TestSession(),
+            [Msg(ChatRole.User, "问题一", "mu1")],
+            [Msg(ChatRole.Assistant, "回复一", "ma1")]);
+
+        // 完整重发 → provider 返回为空（客户端已带全部历史）
+        var fullPayload = new List<ChatMessage>
+        {
+            Msg(ChatRole.User, "问题一", "mu1"),
+            Msg(ChatRole.Assistant, "回复一", "ma1"),
+            Msg(ChatRole.User, "问题二", "mu2"),
+        };
+        var fullResult = await InvokeProvideAsync(NewProvider(conversationId), new TestSession(), fullPayload);
+        var payloadIds = fullPayload.Select(m => m.MessageId).OfType<string>().ToHashSet(StringComparer.Ordinal);
+        Assert.DoesNotContain(fullResult, m => m.MessageId is not null && payloadIds.Contains(m.MessageId));
+        Assert.Empty(fullResult);
+
+        // 部分重发（只带 user）→ 只返回客户端未带的后续历史，且不含已带的 mu1
+        var partialResult = await InvokeProvideAsync(
+            NewProvider(conversationId), new TestSession(),
+            new List<ChatMessage> { Msg(ChatRole.User, "问题一", "mu1") });
+        Assert.Equal(new[] { "ma1" }, partialResult.Select(m => m.MessageId));
+    }
+
+    [Fact]
+    public async Task Provide_WhenClientSendsOnlyCurrentTurn_PrependsStoredHistory()
+    {
+        // 老行为不能丢：curl 式客户端只发本轮 → provider 从库里补回上一轮，模型能拿到上文。
+        const string conversationId = "conv-curl-style";
+
+        await InvokeStoreAsync(NewProvider(conversationId), new TestSession(),
+            [Msg(ChatRole.User, "问题一", "mu1")],
+            [Msg(ChatRole.Assistant, "回复一", "ma1")]);
+
+        var provider2 = NewProvider(conversationId);
+        var session2 = new TestSession();
+        var currentTurn = new List<ChatMessage> { Msg(ChatRole.User, "问题二", "mu2") };
+
+        var provided = await InvokeProvideAsync(provider2, session2, currentTurn);
+
+        // 客户端只发本轮 → provider 补回上一轮（mu1、ma1）
+        Assert.Equal(new[] { "mu1", "ma1" }, provided.Select(m => m.MessageId));
+
+        await InvokeStoreAsync(provider2, session2, currentTurn, [Msg(ChatRole.Assistant, "回复二", "ma2")]);
+
+        Assert.Equal(4, CountAllChatRows());
+        Assert.Equal(
+            new[] { "问题一", "回复一", "问题二", "回复二" },
+            ReadRows(conversationId).Select(r => r.Text));
+    }
+
+    [Fact]
+    public async Task Store_ClientResendsHistoryBeyondCacheWindow_StillDeduplicates()
+    {
+        // 客户端重发的历史超过 MaxRoundsToLoad 缓存窗口（默认 2 轮）时，仍只落库当前轮新增：
+        // 已拥有历史按「最后一条已拥有消息之后」定位，故窗口外的旧轮也不会被重复入库。
+        const string conversationId = "conv-beyond-window";
+
+        var provider = NewProvider(conversationId);
+        var session = new TestSession();
+        await InvokeStoreAsync(provider, session, [Msg(ChatRole.User, "q1", "u1")], [Msg(ChatRole.Assistant, "a1", "a1")]);
+        await InvokeStoreAsync(provider, session, [Msg(ChatRole.User, "q2", "u2")], [Msg(ChatRole.Assistant, "a2", "a2")]);
+        await InvokeStoreAsync(provider, session, [Msg(ChatRole.User, "q3", "u3")], [Msg(ChatRole.Assistant, "a3", "a3")]);
+        Assert.Equal(6, CountAllChatRows());
+
+        // 新会话（缓存空，Provide 只从库加载最近 2 轮）+ 客户端重发全部 3 轮前文 + 第 4 轮
+        var provider2 = NewProvider(conversationId);
+        var session2 = new TestSession();
+        var payload = new List<ChatMessage>
+        {
+            Msg(ChatRole.User, "q1", "u1"), Msg(ChatRole.Assistant, "a1", "a1"),
+            Msg(ChatRole.User, "q2", "u2"), Msg(ChatRole.Assistant, "a2", "a2"),
+            Msg(ChatRole.User, "q3", "u3"), Msg(ChatRole.Assistant, "a3", "a3"),
+            Msg(ChatRole.User, "q4", "u4"),
+        };
+        await InvokeProvideAsync(provider2, session2, payload);
+        await InvokeStoreAsync(provider2, session2, payload, [Msg(ChatRole.Assistant, "a4", "a4")]);
+
+        Assert.Equal(8, CountAllChatRows()); // 6 + 当前轮 2 行（而非 6 + 8）
+    }
+
     // ---------- helpers ----------
 
     private async Task StoreSimpleRound(string question, string answer)
@@ -413,10 +533,14 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
     private Task<IReadOnlyList<ChatMessage>> InvokeProvideAsync(AgentSession session)
         => InvokeProvideAsync(_provider, session);
 
-    private static async Task<IReadOnlyList<ChatMessage>> InvokeProvideAsync(AIShop.Service.Agui.SqlChatHistoryProvider provider, AgentSession session)
+    private static Task<IReadOnlyList<ChatMessage>> InvokeProvideAsync(AIShop.Service.Agui.SqlChatHistoryProvider provider, AgentSession session)
+        => InvokeProvideAsync(provider, session, [new ChatMessage(ChatRole.User, "你好")]);
+
+    private static async Task<IReadOnlyList<ChatMessage>> InvokeProvideAsync(
+        AIShop.Service.Agui.SqlChatHistoryProvider provider, AgentSession session, IList<ChatMessage> requestMessages)
     {
         var context = new ChatHistoryProvider.InvokingContext(
-            Substitute.For<AIAgent>(), session, [new ChatMessage(ChatRole.User, "你好")]);
+            Substitute.For<AIAgent>(), session, requestMessages);
 
         var result = ProvideMethod.Invoke(provider, [context, CancellationToken.None]);
         var valueTask = (ValueTask<IEnumerable<ChatMessage>>)result!;
@@ -443,6 +567,9 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
     }
 
     private List<(int Sequence, string Role, int RoundId, bool IsDeleted, string? DeletedAt, string Text)> ReadRows()
+        => ReadRows(_conversationId);
+
+    private List<(int Sequence, string Role, int RoundId, bool IsDeleted, string? DeletedAt, string Text)> ReadRows(string conversationId)
     {
         using var connection = new SqliteConnection(_connectionString);
         connection.Open();
@@ -454,7 +581,7 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
             WHERE conversation_id = $c
             ORDER BY sequence
             """;
-        command.Parameters.AddWithValue("$c", _conversationId);
+        command.Parameters.AddWithValue("$c", conversationId);
 
         var rows = new List<(int, string, int, bool, string?, string)>();
         using var reader = command.ExecuteReader();
@@ -510,6 +637,26 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
         while (reader.Read())
             ids.Add(reader.GetString(0));
         return ids;
+    }
+
+    /// <summary>构造一个 provider，会话标识固定为 <paramref name="conversationId"/>（模拟同一 AG-UI ThreadId 的多次请求 / 重启）。</summary>
+    private AIShop.Service.Agui.SqlChatHistoryProvider NewProvider(string conversationId)
+        => new(
+            new AIShop.Service.Agui.SqlChatHistoryOptions { ConnectionString = _connectionString },
+            _ => new AIShop.Service.Agui.SqlChatHistoryProvider.State(conversationId));
+
+    /// <summary>构造带 MessageId 的消息（客户端重发历史时按 id 与 provider 已拥有历史比对）。</summary>
+    private static ChatMessage Msg(ChatRole role, string text, string messageId)
+        => new(role, text) { MessageId = messageId };
+
+    /// <summary>读临时库 chat_messages 总行数（全部会话）。</summary>
+    private long CountAllChatRows()
+    {
+        using var connection = new SqliteConnection(_connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM chat_messages";
+        return (long)(command.ExecuteScalar() ?? 0L);
     }
 
     private void ExecuteSql(string sql, params (string Name, object Value)[] parameters)
