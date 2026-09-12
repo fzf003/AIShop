@@ -1,5 +1,6 @@
 #pragma warning disable MAAI001 // CompactionStrategy 为 MAF [Experimental]（上下文压缩 API，会话快照收敛）
 using System.Text.Json;
+using AIShop.Core.Interfaces;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Compaction;
 using Microsoft.Agents.AI.Hosting;
@@ -11,8 +12,8 @@ namespace AIShop.Service.Agui;
 
 /// <summary>
 /// SQLite 持久化 <see cref="AgentSessionStore"/>（agui-host T12：会话历史持久化）。
-/// AG-UI 会话（ThreadId）经 <see cref="MapAGUIServer"/> 在流结束后 <c>SaveSessionAsync</c> 落库、同 ThreadId
-/// 下次 <c>GetSessionAsync</c> 还原——重启不丢上下文（spec「AG-UI 会话历史持久化（重启不丢上下文）（T12）」）。
+/// AG-UI 会话经 <see cref="MapAGUIServer"/> 在流结束后 <c>SaveSessionAsync</c> 落库、同<b>用户名</b>下次
+/// <c>GetSessionAsync</c> 还原——重启不丢上下文（spec「AG-UI 会话历史持久化（重启不丢上下文）（T12）」）。
 /// </summary>
 /// <remarks>
 /// <para>
@@ -26,10 +27,23 @@ namespace AIShop.Service.Agui;
 /// InMemoryChatHistoryProvider 写入的消息历史随 StateBag 落库 → 还原即上下文不丢）。
 /// </para>
 /// <para>
-/// <strong>Key 命名空间</strong>：<see cref="AgentSessionStore"/> 契约无 principal 维度；本 store 为 keyed 注册
-/// （按 agent 名 = "AGUIShopping" 一个实例），store_id 以 <c>agent.Name</c> 前缀 + sessionStoreId（ThreadId）防
-/// 多 agent 共享同一库文件时撞 key。多用户隔离（把 username/principal 编进 key）属后续路线（镜像信任模型：
-/// ThreadId 来自 wire，仅作续接标识，非授权令牌），MVP 以 ThreadId 区分会话即可（tasks T12 注记）。
+/// <strong>Key 命名空间（按用户名归属）</strong>：<see cref="AgentSessionStore"/> 契约无 principal 维度；本 store 为 keyed
+/// 注册（按 agent 名 = "AGUIShopping" 一个实例），store_id = <c>{agent.Name}:{当前用户名}</c>——用户名取自
+/// <see cref="ICurrentUserAccessor"/>，由宿主的用户中间件（AguiUsernameForwarder）在 agent 运行前写入；
+/// <c>agent.Name</c> 前缀仍用于防多 agent 共享同一库文件时撞 key。
+/// </para>
+/// <para>
+/// <strong>为何绑定用户名而非 ThreadId</strong>：AG-UI 的 .NET 客户端 SDK（AGUI.Client）<b>每轮请求铸一个新的 threadId</b>
+/// （<c>AGUIChatClient</c> 兜底 <c>AGUIIdGenerator.NewThreadId()</c>，且主动把服务端回传的 ConversationId 置空）。若 store_id
+/// 跟随 threadId，则每轮都是全新会话——<c>ON CONFLICT(store_id) DO UPDATE</c> 永不触发、惰性 TTL 永不触发、会话归属标记
+/// 永不生效，<c>agent_sessions</c> 只增不改、「重启续聊」彻底失效。改按用户名归属后，同一用户的多轮 thread 合并到
+/// 同一行，upsert / TTL / 续聊恢复正常。
+/// </para>
+/// <para>
+/// <strong>取舍</strong>：① 语义 = <b>一个用户一段常驻对话</b>，同一用户名下的多段 thread 会合并（有意接受；如需按端隔离
+/// 应把设备维度编入标识）；② 用户名缺失（<see cref="ICurrentUserAccessor"/> 未注册或未设置，正常运行中间件恒写入，仅直构
+/// 测试会走到）时<b>回退到 <c>{agent.Name}:{ThreadId}</c></b> 保持旧行为，并记一条 <c>Serilog.Log.Error</c> 告警；
+/// ③ 与旧行为（ThreadId 绑定）的区别是同一用户跨 thread 共享会话，代价是失去按 thread 的会话隔离。
 /// </para>
 /// </remarks>
 public sealed class SqliteAgentSessionStore : AgentSessionStore
@@ -53,6 +67,7 @@ public sealed class SqliteAgentSessionStore : AgentSessionStore
     private readonly string _connectionString;
     private readonly AguiSessionOptions _options;
     private readonly CompactionStrategy _compactionStrategy;
+    private readonly ICurrentUserAccessor? _currentUserAccessor;
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private bool _initialized;
 
@@ -62,17 +77,22 @@ public sealed class SqliteAgentSessionStore : AgentSessionStore
     /// 保持既有 <c>new SqliteAgentSessionStore(conn)</c> 调用点源码兼容（S3）。</param>
     /// <param name="compactionStrategy">落库前快照收敛所用压缩策略；null 时回退 <see cref="AguiCompaction.CreateStrategy"/>（S4）。
     /// 生产经 DI 注入与 <c>AGUIShoppingAgent</c> 侧同一单例，保证策略/阈值单一来源（spec R1「复用装配同一实例」）。</param>
+    /// <param name="currentUserAccessor">当前用户访问器，用于把会话按用户名归属（store_id = <c>{agent.Name}:{username}</c>）。
+    /// null 或用户名为空时回退到 threadId 归属（保持既有直构测试行为）并记 <c>Serilog.Log.Error</c> 告警。
+    /// 保持<b>可选参</b>：既有 <c>new SqliteAgentSessionStore(conn)</c> 调用点源码兼容。</param>
     /// <exception cref="ArgumentNullException"><paramref name="connectionString"/> 为 null。</exception>
     public SqliteAgentSessionStore(
         string connectionString,
         AguiSessionOptions? options = null,
-        CompactionStrategy? compactionStrategy = null)
+        CompactionStrategy? compactionStrategy = null,
+        ICurrentUserAccessor? currentUserAccessor = null)
     {
         _connectionString = connectionString ?? throw new ArgumentNullException(nameof(connectionString));
         _options = options ?? new AguiSessionOptions();
         // null → AguiCompaction.CreateStrategy()：与 AGUIShoppingAgent.Create 同一缺省语义（阈值/策略唯一来源），
         // 保证既有直构调用点源码兼容且未注入时不产生第二套阈值（S4）。
         _compactionStrategy = compactionStrategy ?? AguiCompaction.CreateStrategy();
+        _currentUserAccessor = currentUserAccessor;
     }
 
     /// <summary>会话库连接串（供测试断言指向独立库、非老 aishop.db）。</summary>
@@ -143,7 +163,7 @@ public sealed class SqliteAgentSessionStore : AgentSessionStore
 
         // 序列化会话（含 StateBag / InMemoryChatHistoryProvider 消息历史）为 JSON，随后整行落库
         JsonElement json = await agent.SerializeSessionAsync(session, cancellationToken: cancellationToken).ConfigureAwait(false);
-        var storeId = GetStoreId(agent.Name, sessionStoreId);
+        var storeId = ResolveStoreId(agent.Name, sessionStoreId);
         var updatedAt = DateTimeOffset.Now.ToString("O");
 
         await using var connection = new SqliteConnection(_connectionString);
@@ -182,7 +202,7 @@ public sealed class SqliteAgentSessionStore : AgentSessionStore
         ArgumentNullException.ThrowIfNull(agent);
         await EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
 
-        var storeId = GetStoreId(agent.Name, sessionStoreId);
+        var storeId = ResolveStoreId(agent.Name, sessionStoreId);
         var row = await ReadSessionRowAsync(storeId, cancellationToken).ConfigureAwait(false);
 
         // 无行 → 新会话（修正旧 ReadSessionJsonAsync 无行返回 "{}" 的行为，spec R4）。
@@ -218,7 +238,7 @@ public sealed class SqliteAgentSessionStore : AgentSessionStore
         ArgumentNullException.ThrowIfNull(agent);
         await EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
 
-        var storeId = GetStoreId(agent.Name, sessionStoreId);
+        var storeId = ResolveStoreId(agent.Name, sessionStoreId);
         await DeleteRowAsync(storeId, cancellationToken).ConfigureAwait(false);
     }
 
@@ -277,9 +297,28 @@ public sealed class SqliteAgentSessionStore : AgentSessionStore
         return totalDeleted;
     }
 
-    /// <summary>store_id = "{agentName}:{sessionStoreId}"。用 agent.Name（稳定，重启不变）而非 agent.Id（随机 GUID，每实例不同），
-    /// 保证持久化 key 跨宿主重启稳定；多 agent 共享同一库文件时按名称天然隔离。</summary>
-    private static string GetStoreId(string? agentName, string sessionStoreId) => $"{agentName}:{sessionStoreId}";
+    /// <summary>解析 store_id —— 按<b>用户名</b>归属：<c>"{agentName}:{当前用户名}"</c>。
+    /// 用 agent.Name（稳定，重启不变）而非 agent.Id（随机 GUID，每实例不同），保证持久化 key 跨宿主重启稳定；
+    /// 多 agent 共享同一库文件时按名称天然隔离。</summary>
+    /// <remarks>
+    /// 用户名取自 <see cref="ICurrentUserAccessor"/>（宿主中间件在 agent 运行前写入）。用户名缺失（accessor 未注册或
+    /// 未设值）时回退 <c>"{agentName}:{sessionStoreId}"</c>（ThreadId）保持旧行为——正常运行中间件恒写入，此回退实际
+    /// 只在直构测试中走到；此时记一条 <c>Serilog.Log.Error</c>，说明「用户上下文缺失，会话归属回退到 threadId，将导致
+    /// 每轮新会话」。
+    /// </remarks>
+    private string ResolveStoreId(string? agentName, string sessionStoreId)
+    {
+        var username = _currentUserAccessor?.CurrentUser;
+        if (!string.IsNullOrWhiteSpace(username))
+            return $"{agentName}:{username}";
+
+        Log.Error(
+            "用户上下文缺失（ICurrentUserAccessor 未注册或未设置），会话归属回退到 threadId（{ThreadId}）；"
+            + "AG-UI 客户端每轮铸新 threadId，回退将导致每轮新会话（agent_sessions 只增不改、重启续聊失效）。"
+            + "请确认宿主已注册 ICurrentUserAccessor 且用户中间件在 agent 运行前写入当前用户名。",
+            sessionStoreId);
+        return $"{agentName}:{sessionStoreId}";
+    }
 
     /// <summary>
     /// <c>CreateSessionAsync</c> 后打上会话标识（新会话 / 过期重开两条路径共用）。

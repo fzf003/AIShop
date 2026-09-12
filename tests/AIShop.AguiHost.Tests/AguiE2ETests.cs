@@ -145,8 +145,15 @@ public sealed class AguiE2ETests : IDisposable
             Assert.Contains("E2E-ROUND1", await round1.Content.ReadAsStringAsync());
         }
 
-        // 等待第一轮会话真正落库（SaveSessionAfterStreamingAsync 在 SSE 流结束后执行，轮询避免跨请求时序竞态）
-        await WaitForSessionRowAsync(factory, threadId);
+        // 等待第一轮会话真正落库（SaveSessionAfterStreamingAsync 在 SSE 流结束后执行，轮询避免跨请求时序竞态）。
+        // 会话按用户名归属（ResolveStoreId），本轮 username=fzf003 → 落库键 AGUIShopping:fzf003。
+        await WaitForSessionRowAsync(factory, username: "fzf003");
+
+        // 显式锁定新语义：threadId 键的行【不存在】（按用户名归属，不再按 threadId）。该用例的会话库为独立临时库
+        //（StartFactory 每次建临时目录），无跨用例共享，故此处无时序风险；将来谁改回 threadId 绑定，此断言变红。
+        var sessionStore = factory.Services.GetService<SqliteAgentSessionStore>();
+        Assert.NotNull(sessionStore);
+        Assert.Equal(0, await CountSessionRowsAsync(sessionStore.ConnectionString, $"AGUIShopping:{threadId}"));
 
         // 第二轮：同 Thread 续聊「把第一个加购物车」→ mock 产 add_to_cart → 真实工具以 fzf003 落库
         using (var round2 = await client.PostAsync(
@@ -249,12 +256,14 @@ public sealed class AguiE2ETests : IDisposable
         _envRestore.Clear();
     }
 
-    /// <summary>轮询等待会话行落库（store_id = "AGUIShopping:{threadId}"，key 带 agent.Name 前缀）。</summary>
-    private static async Task WaitForSessionRowAsync(WebApplicationFactory<Program> factory, string threadId, int timeoutMs = 10_000)
+    /// <summary>轮询等待会话行落库（store_id = "AGUIShopping:{username}"，key 带 agent.Name 前缀 + <b>用户名</b>）。
+    /// 会话归属已从 AG-UI threadId 改为当前用户名（见 <c>SqliteAgentSessionStore.ResolveStoreId</c>）——本用例走真实 DI
+    /// store（含 ICurrentUserAccessor），故落库键按用户名；其它直构 store 的用例走 threadId 回退分支。</summary>
+    private static async Task WaitForSessionRowAsync(WebApplicationFactory<Program> factory, string username, int timeoutMs = 10_000)
     {
         var store = factory.Services.GetService<SqliteAgentSessionStore>();
         Assert.NotNull(store);
-        var storeId = $"AGUIShopping:{threadId}";
+        var storeId = $"AGUIShopping:{username}";
         var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
         while (DateTime.UtcNow < deadline)
         {

@@ -1,4 +1,5 @@
 #pragma warning disable MAAI001 // ContextWindowCompactionStrategy 为 MAF [Experimental]（上下文压缩 API）
+using AIShop.Core.Interfaces;
 using Microsoft.Agents.AI.Compaction;
 using Microsoft.Agents.AI.Hosting;
 using Microsoft.Extensions.Configuration;
@@ -59,10 +60,13 @@ public static class SessionStoreDependencyInjection
         // S3：store 注册为工厂 lambda，经 IOptions 取绑定后的 AguiSessionOptions 注入构造
         // （null 配置 → 类默认；选项绑定发生在容器构建后，工厂解析期读取正是绑定完成时点）。
         // S4：第三参注入共享压缩策略单例，供 SaveSessionAsync 落库前收敛快照使用。
+        // 会话归属：第四参注入 ICurrentUserAccessor（store_id = "{agent.Name}:{用户名}"）。用 GetService（非
+        // GetRequiredService）——裸容器/纯底座测试未注册它时解析为 null，store 回退 threadId 归属而非炸容器。
         services.AddSingleton(sp => new SqliteAgentSessionStore(
             sessionDbConnection,
             sp.GetRequiredService<IOptions<AguiSessionOptions>>().Value,
-            sp.GetRequiredService<ContextWindowCompactionStrategy>()));
+            sp.GetRequiredService<ContextWindowCompactionStrategy>(),
+            sp.GetService<ICurrentUserAccessor>()));
         // keyed AgentSessionStore 解析具体单例：MapAGUIServer 按 agent.Name 解析命中（keyed 注册是命中前提）
         services.AddKeyedSingleton<AgentSessionStore>(AGUIShoppingAgent.AgentName,
             static (sp, _) => sp.GetRequiredService<SqliteAgentSessionStore>());
