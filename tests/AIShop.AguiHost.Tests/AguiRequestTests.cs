@@ -151,9 +151,10 @@ public sealed class AguiRequestTests
     {
         // C5 请求级（spec Req9 跨模型共享会话上下文 + Req6 逐轮独立选模型，尽力而为）：同一 ThreadId 两轮——
         // 第一轮 forwardedProps.model="deepseek" → 该宿主 stub 收到 GetClient("deepseek")（Router 入链 + 按轮委托证明）；
-        // 第二轮无 model 在第二个宿主（模拟重启，同会话库文件）续聊 → 其 stub 收到 GetDefaultClient（缺省 ActiveModel），
-        // 且第二轮底层收到的输入含第一轮 assistant 回复标记（换模型续聊带上文——会话由 SqliteAgentSessionStore 按
-        // ThreadId 持久化、模型无关，spec Req9）。
+        // 第二轮无 model 在第二个宿主（模拟重启，同会话库文件）续聊 → 其 stub 收到 GetDefaultClient（缺省 ActiveModel）。
+        // 续聊上下文：服务端不再补历史（ProvideChatHistoryAsync 已停用，只存不取），改由【客户端重发全量历史】承载
+        // （真实 AG-UI 客户端每轮重发整段前文）——第二轮请求带上第一轮 user + assistant 回复 + 本轮新 user，
+        // 断言第二轮底层收到的输入含第一轮 assistant 回复标记（换模型续聊带上文，spec Req9）。
         // 实施期降级说明（对齐 tasks「尽力而为」）：同一 TestServer 宿主内两轮连续驱动时，preview AG-UI 请求管线会跨
         // 请求复用 ExecutionContext（首轮 AsyncLocal 模型值残留，测试宿主进程内串行请求的伪影；真实 Kestrel 每请求独立
         // ExecutionContext），使第二轮 Router 读到首轮模型而非缺省。故改用双宿主同会话库驱动（同 AguiSessionResumeTests
@@ -162,6 +163,8 @@ public sealed class AguiRequestTests
         try
         {
             const string threadId = "switch-resume-thread";
+            const string firstUserMessage = "你好，帮我推荐一双跑步鞋";
+            const string secondUserMessage = "那再帮我看看其他推荐";
             var sessionConnection = $"Data Source={sessionPath}";
 
             // 第一宿主：model=deepseek 一轮 → 该轮委托 deepseek 底层
@@ -171,7 +174,9 @@ public sealed class AguiRequestTests
                 using var client1 = factory1.CreateClient();
                 using var first = await client1.PostAsync(
                     "/",
-                    new StringContent(RunAgentBody(threadId, username: null, model: "deepseek"), Encoding.UTF8, "application/json"));
+                    new StringContent(
+                        RunAgentBody(threadId, username: null, model: "deepseek", userMessage: firstUserMessage),
+                        Encoding.UTF8, "application/json"));
                 Assert.Equal(HttpStatusCode.OK, first.StatusCode);
                 Assert.Contains("T5-MARKER", await first.Content.ReadAsStringAsync());
                 Assert.Contains("deepseek", firstStub.RequestedModelIds);
@@ -181,7 +186,7 @@ public sealed class AguiRequestTests
             // 等待第一轮会话真正落库（SaveSessionAfterStreamingAsync 在 SSE 流结束后执行，轮询避免跨宿主时序竞态）
             await WaitForSessionRowAsync(sessionConnection, threadId);
 
-            // 第二宿主（模拟重启）：同 ThreadId 无 model 续聊 → 缺省 ActiveModel 底层（无首轮模型泄漏）
+            // 第二宿主（模拟重启）：同 ThreadId 无 model 续聊，客户端重发第一轮全量历史 → 缺省 ActiveModel 底层
             var secondCaptured = new List<Meai.ChatMessage>();
             var secondStub = new StubModelChatClientFactory(CreateMockChatClient(SimulatedText, capture: secondCaptured));
             using (var factory2 = CreateFactory(accessorOverride: null, factoryStub: secondStub, sessionConnection: sessionConnection))
@@ -189,14 +194,25 @@ public sealed class AguiRequestTests
                 using var client2 = factory2.CreateClient();
                 using var second = await client2.PostAsync(
                     "/",
-                    new StringContent(RunAgentBody(threadId, username: null, model: null), Encoding.UTF8, "application/json"));
+                    new StringContent(
+                        RunAgentBodyWithHistory(
+                            threadId,
+                            model: null,
+                            [
+                                ("user", firstUserMessage),
+                                ("assistant", SimulatedText),
+                                ("user", secondUserMessage),
+                            ]),
+                        Encoding.UTF8,
+                        "application/json"));
                 Assert.Equal(HttpStatusCode.OK, second.StatusCode);
                 Assert.Contains("T5-MARKER", await second.Content.ReadAsStringAsync());
                 Assert.Empty(secondStub.RequestedModelIds);
                 Assert.True(secondStub.GetDefaultClientCalls >= 1);
             }
 
-            // 续聊带上下文：第二轮底层收到的输入含第一轮 assistant 回复标记（跨模型续聊不丢上下文，spec Req9）
+            // 续聊带上下文（回归护栏）：第二轮底层收到的输入含第一轮 assistant 回复标记
+            // （跨模型续聊不丢上下文，spec Req9；历史来源由服务端补历史改为客户端重发，断言本身不变）
             var secondInput = string.Join(" | ", secondCaptured.Select(TextOf));
             Assert.Contains("T5-MARKER", secondInput);
         }
@@ -353,6 +369,36 @@ public sealed class AguiRequestTests
                 forwardedProps["model"] = model;
             root["forwardedProps"] = forwardedProps;
         }
+
+        return root.ToJsonString();
+    }
+
+    /// <summary>构造带多轮消息（模拟客户端重发全量历史）的 AG-UI RunAgentInput 请求体 JSON；无 username，
+    /// <paramref name="model"/> 非 null 时带 forwardedProps.model；每条消息 id 取唯一 GUID。</summary>
+    private static string RunAgentBodyWithHistory(
+        string threadId,
+        string? model,
+        IReadOnlyList<(string Role, string Content)> messages)
+    {
+        var array = new JsonArray();
+        foreach (var (role, content) in messages)
+        {
+            array.Add(new JsonObject
+            {
+                ["id"] = $"m-{Guid.NewGuid():N}",
+                ["role"] = role,
+                ["content"] = content,
+            });
+        }
+
+        var root = new JsonObject
+        {
+            ["threadId"] = threadId,
+            ["messages"] = array,
+        };
+
+        if (model is not null)
+            root["forwardedProps"] = new JsonObject { ["model"] = model };
 
         return root.ToJsonString();
     }

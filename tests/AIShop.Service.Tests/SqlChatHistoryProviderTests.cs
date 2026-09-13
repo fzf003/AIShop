@@ -12,13 +12,17 @@ namespace AIShop.Service.Tests;
 /// <summary>
 /// <see cref="AIShop.Service.Agui.SqlChatHistoryProvider"/>（design-sql-chat-history-provider §1–§6 / §8）测试。
 /// 用临时 SQLite 文件（provider 每次操作独立开连接，故不能用 <c>:memory:</c>）+ 反射调用 protected 的
-/// <c>ProvideChatHistoryAsync</c> / <c>StoreChatHistoryAsync</c>（对齐既有 SqliteChatHistoryProviderTests 模式）。
+/// <c>StoreChatHistoryAsync</c>（对齐既有 SqliteChatHistoryProviderTests 模式）。
 /// </summary>
+/// <remarks>
+/// <b>新语义（有意变更，非缺陷）</b>：provider 只负责「存」（把当前轮次落 <c>chat_messages</c>），不再负责「提供」——
+/// <c>ProvideChatHistoryAsync</c> 已停用（恒返回空），模型上下文由客户端每轮重发全量历史承载（真实 AG-UI 客户端行为）。
+/// 因此本测试的「读回」断言一律改为<b>直接查库反序列化 <c>message_json</c></b>（<see cref="ReadStoredMessages()"/>），
+/// 不经 <c>Provide</c>——否则断言「Provide 返回空」会变成恒真的空转断言、丧失验证力。
+/// </remarks>
 public sealed class SqlChatHistoryProviderTests : IDisposable
 {
     private static readonly Type ProviderType = typeof(AIShop.Service.Agui.SqlChatHistoryProvider);
-    private static readonly MethodInfo ProvideMethod = ProviderType.GetMethod(
-        "ProvideChatHistoryAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
     private static readonly MethodInfo StoreMethod = ProviderType.GetMethod(
         "StoreChatHistoryAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
 
@@ -99,7 +103,7 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
     // ---------- FCC / FRC 序列化往返保真（工具配对前提） ----------
 
     [Fact]
-    public async Task StoreAndProvide_RoundTripsFunctionCallAndResultContent_WithCallIdPairing()
+    public async Task Store_RoundTripsFunctionCallAndResultContent_WithCallIdPairing()
     {
         var assistant = new ChatMessage(ChatRole.Assistant, "正在查询");
         assistant.Contents.Add(new FunctionCallContent(
@@ -113,10 +117,11 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
             [new ChatMessage(ChatRole.User, "找手机")],
             [assistant, tool]);
 
-        var result = await InvokeProvideAsync(_session);
+        // 直接读库 message_json 并反序列化（Provide 已停用，验证存储层的多态内容无损往返）
+        var stored = ReadStoredMessages();
 
         // assistant 的 FunctionCallContent 读回：CallId / Name 不变，参数仍可读
-        var assistantOut = Assert.Single(result, m => m.Role == ChatRole.Assistant);
+        var assistantOut = Assert.Single(stored, m => m.Role == ChatRole.Assistant);
         var fcc = Assert.Single(assistantOut.Contents.OfType<FunctionCallContent>());
         Assert.Equal("call_1", fcc.CallId);
         Assert.Equal("search_product", fcc.Name);
@@ -125,7 +130,7 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
         Assert.Equal("手机", ToPlainString(fcc.Arguments["q"]));
 
         // tool 的 FunctionResultContent 读回：与 assistant FCC 的 CallId 配对完整、结果可读
-        var toolOut = Assert.Single(result, m => m.Role == ChatRole.Tool);
+        var toolOut = Assert.Single(stored, m => m.Role == ChatRole.Tool);
         var frc = Assert.Single(toolOut.Contents.OfType<FunctionResultContent>());
         Assert.Equal("call_1", frc.CallId);
         Assert.Equal("查询结果：手机 ¥1999", ToPlainString(frc.Result));
@@ -133,7 +138,7 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
         // 整轮顺序保持：user → assistant(FCC) → tool(FRC)
         Assert.Equal(
             new[] { ChatRole.User, ChatRole.Assistant, ChatRole.Tool },
-            result.Select(m => m.Role));
+            stored.Select(m => m.Role));
     }
 
     [Fact]
@@ -146,8 +151,9 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
 
         await InvokeStoreAsync(_session, [new ChatMessage(ChatRole.User, "查一下")], [assistant]);
 
-        var result = await InvokeProvideAsync(_session);
-        var assistantOut = Assert.Single(result, m => m.Role == ChatRole.Assistant);
+        // 直接读库反序列化（Provide 已停用）
+        var stored = ReadStoredMessages();
+        var assistantOut = Assert.Single(stored, m => m.Role == ChatRole.Assistant);
 
         Assert.Single(assistantOut.Contents.OfType<TextContent>());
         var fccs = assistantOut.Contents.OfType<FunctionCallContent>().ToList();
@@ -157,51 +163,23 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
         Assert.Equal("MSFT", ToPlainString(fccs[1].Arguments!["symbol"]));
     }
 
-    // ---------- 读取：MaxRoundsToLoad / 软删除不可见 ----------
-
-    [Fact]
-    public async Task Provide_MaxRoundsToLoad_ReturnsOnlyMostRecentNonDeletedRounds()
-    {
-        // 4 轮（每轮 user + assistant），第 3 轮软删除 → MaxRoundsToLoad=2 只返回最近 2 个非删除轮（round 2 与 round 4）。
-        await StoreSimpleRound("问题1", "回答1");
-        await StoreSimpleRound("问题2", "回答2");
-        await StoreSimpleRound("问题3", "回答3");
-        await StoreSimpleRound("问题4", "回答4");
-
-        SoftDeleteRound(3);
-
-        var result = await InvokeProvideAsync(_session);
-
-        Assert.Equal(4, result.Count);
-        Assert.Equal(new[] { "问题2", "回答2", "问题4", "回答4" }, result.Select(m => m.Text));
-        Assert.DoesNotContain(result, m => m.Text == "问题1"); // round 1 非「最近 2 个非删除轮」之一
-        Assert.DoesNotContain(result, m => m.Text == "问题3"); // round 3 已软删除
-    }
-
-    [Fact]
-    public async Task Provide_AllRoundsSoftDeleted_ReturnsEmpty()
-    {
-        await StoreSimpleRound("问题1", "回答1");
-        SoftDeleteRound(1);
-
-        var result = await InvokeProvideAsync(_session);
-
-        Assert.Empty(result);
-    }
-
-    [Fact]
-    public async Task Provide_EmptyConversation_ReturnsEmpty()
-    {
-        var result = await InvokeProvideAsync(_session);
-        Assert.Empty(result);
-    }
-
     // ---------- TTL 整轮软删除 ----------
 
     [Fact]
     public async Task CleanupExpiredRounds_SoftDeletesWholeRound_WithoutSplitting()
     {
-        await StoreSimpleRound("旧问题", "旧回答");
+        // round 1 为含工具调用的整轮（user + assistant(FCC) + tool(FRC) + assistant 文本）：验证 TTL 整轮软删除
+        // 原子、且不拆断 FCC↔FRC 配对（本用例仍是有意保留的活功能，直接查库断言 is_deleted / deleted_at）。
+        var assistantWithCall = new ChatMessage(ChatRole.Assistant, "正在查询");
+        assistantWithCall.Contents.Add(new FunctionCallContent(
+            "call_1", "search_product", new Dictionary<string, object?> { ["q"] = "手机" }));
+        var tool = new ChatMessage { Role = ChatRole.Tool };
+        tool.Contents.Add(new FunctionResultContent("call_1", "查询结果：手机 ¥1999"));
+
+        await InvokeStoreAsync(
+            _session,
+            [new ChatMessage(ChatRole.User, "旧问题")],
+            [assistantWithCall, tool, new ChatMessage(ChatRole.Assistant, "旧回答")]);
         await StoreSimpleRound("新问题", "新回答");
 
         BackdateRound(1, DateTimeOffset.Now.AddDays(-100));
@@ -210,23 +188,37 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
 
         Assert.Equal(1, deletedRounds);
 
-        // round 1 整轮两行一并软删除（不拆断），deleted_at 已写；round 2 原样保留
+        // round 1 整轮四行一并软删除（不拆断），deleted_at 已写；round 2 原样保留
         var rows = ReadRows();
         var round1 = rows.Where(r => r.RoundId == 1).ToList();
-        Assert.Equal(2, round1.Count);
+        Assert.Equal(4, round1.Count);
         Assert.All(round1, r =>
         {
             Assert.True(r.IsDeleted);
             Assert.False(string.IsNullOrEmpty(r.DeletedAt));
         });
 
+        // 不拆断 FCC↔FRC：承载工具调用的 assistant 行与配对 tool 行均属 round 1 且一并软删除
+        // （rows 与 ReadStoredMessages 同按 sequence 排序，下标一一对应）。
+        var storedRound1 = ReadStoredMessages();
+        var fccIndex = storedRound1.FindIndex(
+            m => m.Contents.OfType<FunctionCallContent>().Any(c => c.CallId == "call_1"));
+        var frcIndex = storedRound1.FindIndex(
+            m => m.Contents.OfType<FunctionResultContent>().Any(c => c.CallId == "call_1"));
+        Assert.True(fccIndex >= 0 && frcIndex >= 0, "工具调用的 FCC / FRC 均须落库");
+        Assert.Equal(1, rows[fccIndex].RoundId);
+        Assert.Equal(1, rows[frcIndex].RoundId);
+        Assert.True(rows[fccIndex].IsDeleted);
+        Assert.True(rows[frcIndex].IsDeleted);
+
         var round2 = rows.Where(r => r.RoundId == 2).ToList();
         Assert.Equal(2, round2.Count);
         Assert.All(round2, r => Assert.False(r.IsDeleted));
 
-        // 软删除轮读取不可见：Provide 只剩 round 2
-        var result = await InvokeProvideAsync(_session);
-        Assert.Equal(new[] { "新问题", "新回答" }, result.Select(m => m.Text));
+        // 软删除轮直接查库不可见（is_deleted=0 过滤后只剩 round 2）——整轮原子、未留半轮
+        var visible = rows.Where(r => !r.IsDeleted).ToList();
+        Assert.Equal(new[] { "新问题", "新回答" }, visible.Select(r => r.Text));
+        Assert.All(visible, r => Assert.Equal(2, r.RoundId));
     }
 
     [Fact]
@@ -316,19 +308,33 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
     // ---------- 会话标识机制：经 StateBag 往返后仍定位同一会话 ----------
 
     [Fact]
-    public async Task Provide_AfterStateBagRoundTrip_LoadsSameConversation()
+    public async Task Store_AfterStateBagRoundTrip_UsesSameConversationId()
     {
         // 会话标识存 AgentSession.StateBag（随会话快照被 SqliteAgentSessionStore 持久化）。
-        // 这里对 StateBag 做序列化 → 反序列化 → 新会话实例，模拟「跨请求 / 重启还原」，仍应命中同一会话历史。
-        await StoreSimpleRound("问题1", "回答1");
+        // 这里对 StateBag 做序列化 → 反序列化 → 新会话实例，模拟「跨请求 / 重启还原」，
+        // 两轮落库的 conversation_id 必须相同（标识跨往返稳定）。
+        // 用【默认】初始化器（按会话 StateBag 记忆标识）：若往返丢失状态，第二轮会生成新 GUID → 出现两个会话 id。
+        var provider = new AIShop.Service.Agui.SqlChatHistoryProvider(
+            new AIShop.Service.Agui.SqlChatHistoryOptions { ConnectionString = _connectionString });
+
+        await InvokeStoreAsync(provider, _session,
+            [new ChatMessage(ChatRole.User, "问题1")],
+            [new ChatMessage(ChatRole.Assistant, "回答1")]);
 
         using var document = JsonDocument.Parse(_session.StateBag.Serialize().GetRawText());
         var restoredBag = AgentSessionStateBag.Deserialize(document.RootElement);
         var restoredSession = new TestSession(restoredBag);
 
-        var result = await InvokeProvideAsync(restoredSession);
+        await InvokeStoreAsync(provider, restoredSession,
+            [new ChatMessage(ChatRole.User, "问题2")],
+            [new ChatMessage(ChatRole.Assistant, "回答2")]);
 
-        Assert.Equal(new[] { "问题1", "回答1" }, result.Select(m => m.Text));
+        // 两轮落库共用一个 conversation_id（单一），且四行齐全、顺序正确
+        var id = Assert.Single(ReadConversationIds());
+        Assert.False(string.IsNullOrWhiteSpace(id));
+        Assert.Equal(
+            new[] { "问题1", "回答1", "问题2", "回答2" },
+            ReadRows(id).Select(r => r.Text));
     }
 
     // ---------- conversation_id == ThreadId（SqliteAgentSessionStore 写、provider 读） ----------
@@ -401,7 +407,7 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
         Assert.Equal(new[] { threadId }, ReadConversationIds());
     }
 
-    // ---------- 只处理「当前轮次」（纯位置判定）：客户端重发整段前文不重复入库 / 不重复进上下文 ----------
+    // ---------- 只处理「当前轮次」（纯位置判定）：客户端重发整段前文不重复入库 ----------
 
     [Fact]
     public async Task Store_ClientResendsFullHistory_DoesNotGrowRows()
@@ -427,60 +433,11 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
             Msg(ChatRole.User, "第二轮问题", "client-u2"),
         };
 
-        await InvokeProvideAsync(provider2, session2, clientPayload);   // 真实链路里 Provide 先于 Store
         await InvokeStoreAsync(provider2, session2, clientPayload, [Msg(ChatRole.Assistant, "第二轮回复", "chatcmpl-a2")]);
 
         Assert.Equal(4, CountAllChatRows());
         Assert.Equal(
             new[] { "第一轮问题", "第一轮回复", "第二轮问题", "第二轮回复" },
-            ReadRows(conversationId).Select(r => r.Text));
-    }
-
-    [Fact]
-    public async Task Provide_WhenClientResendsHistory_ReturnsEmpty()
-    {
-        // 模型上下文不重复：客户端自带历史（最后一条 user 之前还有消息）→ provider 返回空。
-        const string conversationId = "conv-no-dup-context";
-
-        await InvokeStoreAsync(NewProvider(conversationId), new TestSession(),
-            [Msg(ChatRole.User, "问题一", "server-u1")],
-            [Msg(ChatRole.Assistant, "回复一", "chatcmpl-a1")]);
-
-        var payload = new List<ChatMessage>
-        {
-            Msg(ChatRole.User, "问题一", "client-u1"),
-            Msg(ChatRole.Assistant, "回复一", "client-a1"),
-            Msg(ChatRole.User, "问题二", "client-u2"),
-        };
-        var provided = await InvokeProvideAsync(NewProvider(conversationId), new TestSession(), payload);
-
-        Assert.Empty(provided);
-    }
-
-    [Fact]
-    public async Task Provide_WhenClientSendsOnlyCurrentTurn_PrependsStoredHistory()
-    {
-        // 老行为不能丢：curl 式客户端只发本轮 → provider 从库里补回上一轮，模型能拿到上文。
-        const string conversationId = "conv-curl-style";
-
-        await InvokeStoreAsync(NewProvider(conversationId), new TestSession(),
-            [Msg(ChatRole.User, "问题一", "server-u1")],
-            [Msg(ChatRole.Assistant, "回复一", "chatcmpl-a1")]);
-
-        var provider2 = NewProvider(conversationId);
-        var session2 = new TestSession();
-        var currentTurn = new List<ChatMessage> { Msg(ChatRole.User, "问题二", "client-u2") };
-
-        var provided = await InvokeProvideAsync(provider2, session2, currentTurn);
-
-        // 客户端只发本轮 → provider 补回上一轮
-        Assert.Equal(new[] { "问题一", "回复一" }, provided.Select(m => m.Text));
-
-        await InvokeStoreAsync(provider2, session2, currentTurn, [Msg(ChatRole.Assistant, "回复二", "chatcmpl-a2")]);
-
-        Assert.Equal(4, CountAllChatRows());
-        Assert.Equal(
-            new[] { "问题一", "回复一", "问题二", "回复二" },
             ReadRows(conversationId).Select(r => r.Text));
     }
 
@@ -507,7 +464,6 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
             Msg(ChatRole.User, "q3", "c-u3"), Msg(ChatRole.Assistant, "a3", "c-a3"),
             Msg(ChatRole.User, "q4", "c-u4"),
         };
-        await InvokeProvideAsync(provider2, session2, payload);
         await InvokeStoreAsync(provider2, session2, payload, [Msg(ChatRole.Assistant, "a4", "s-a4")]);
 
         Assert.Equal(8, CountAllChatRows()); // 6 + 当前轮 2 行（而非 6 + 8）
@@ -521,23 +477,6 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
             _session,
             [new ChatMessage(ChatRole.User, question)],
             [new ChatMessage(ChatRole.Assistant, answer)]);
-    }
-
-    private Task<IReadOnlyList<ChatMessage>> InvokeProvideAsync(AgentSession session)
-        => InvokeProvideAsync(_provider, session);
-
-    private static Task<IReadOnlyList<ChatMessage>> InvokeProvideAsync(AIShop.Service.Agui.SqlChatHistoryProvider provider, AgentSession session)
-        => InvokeProvideAsync(provider, session, [new ChatMessage(ChatRole.User, "你好")]);
-
-    private static async Task<IReadOnlyList<ChatMessage>> InvokeProvideAsync(
-        AIShop.Service.Agui.SqlChatHistoryProvider provider, AgentSession session, IList<ChatMessage> requestMessages)
-    {
-        var context = new ChatHistoryProvider.InvokingContext(
-            Substitute.For<AIAgent>(), session, requestMessages);
-
-        var result = ProvideMethod.Invoke(provider, [context, CancellationToken.None]);
-        var valueTask = (ValueTask<IEnumerable<ChatMessage>>)result!;
-        return (await valueTask).ToList();
     }
 
     private Task InvokeStoreAsync(
@@ -595,12 +534,36 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
         return rows;
     }
 
-    private void SoftDeleteRound(int roundId)
-        => ExecuteSql(
-            "UPDATE chat_messages SET is_deleted = 1, deleted_at = $now WHERE conversation_id = $c AND round_id = $r",
-            ("$now", DateTimeOffset.Now.ToString("O")),
-            ("$c", _conversationId),
-            ("$r", roundId));
+    /// <summary>按 sequence 升序读回临时库 <c>message_json</c> 并反序列化（Provide 已停用，读回不经 Provide；
+    /// 用 provider 同一个 JSON 选项以无损还原多态 <see cref="AIContent"/>）。</summary>
+    private List<ChatMessage> ReadStoredMessages() => ReadStoredMessages(_conversationId);
+
+    private List<ChatMessage> ReadStoredMessages(string conversationId)
+    {
+        using var connection = new SqliteConnection(_connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT message_json
+            FROM chat_messages
+            WHERE conversation_id = $c
+            ORDER BY sequence
+            """;
+        command.Parameters.AddWithValue("$c", conversationId);
+
+        var messages = new List<ChatMessage>();
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            var message = JsonSerializer.Deserialize<ChatMessage>(
+                reader.GetString(0), AgentAbstractionsJsonUtilities.DefaultOptions);
+            if (message is not null)
+                messages.Add(message);
+        }
+
+        return messages;
+    }
 
     private void BackdateRound(int roundId, DateTimeOffset createdAt)
         => ExecuteSql(

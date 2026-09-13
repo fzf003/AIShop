@@ -23,9 +23,10 @@ namespace AIShop.AguiHost.Tests;
 public sealed class AguiSessionResumeTestsCollection;
 
 /// <summary>
-/// T12 重启续聊验收（WAF 级）：AG-UI 会话（ThreadId）经持久化 <see cref="SqliteAgentSessionStore"/> 落独立会话库，
-/// 宿主重启（新 WAF 工厂 = 新 host + 新 store 实例，同库文件）后同一 ThreadId 续聊——第二次 chatClient 收到的
-/// 输入应含第一轮 assistant 回复（上下文已从库还原）。对应 spec「AG-UI 会话历史持久化（重启不丢上下文）（T12）」。
+/// 重启续聊验收（WAF 级）：服务端不再补历史（<c>SqlChatHistoryProvider.ProvideChatHistoryAsync</c> 已停用，只存不取），
+/// 上下文由客户端重发全量历史承载（真实 AG-UI 客户端每轮重发整段前文）。本用例：宿主重启（新 WAF 工厂 = 新 host +
+/// 新 store 实例，同会话库文件）后同一 ThreadId 续聊——第二轮请求带上第一轮全量消息，第二次 chatClient 收到的输入
+/// 应含第一轮 assistant 回复（「第二轮看到第一轮上下文」回归护栏；历史来源改为客户端而非服务端补历史）。
 /// 离线驱动：每个工厂的 IChatClient 替换为脚本化文本回复的 NSubstitute（第一次固定首轮回复文本，第二次捕获输入消息
 /// 并返回次轮回复文本），不触发真实 LLM。
 /// </summary>
@@ -55,16 +56,17 @@ public sealed class AguiSessionResumeTests : IDisposable
     public async Task RestartHost_SameThreadId_SecondRunSeesFirstRoundContext()
     {
         const string threadId = "resume-thread-1";
+        const string firstUserMessage = "你好，帮我推荐一双跑步鞋";
+        const string secondUserMessage = "那再帮我看看其他推荐";
         var sessionConnection = $"Data Source={_sessionDbPath}";
 
-        // 第一个宿主：POST 一轮对话（「推荐跑步鞋」）→ ChatClientAgent 把本轮消息写入 Session.StateBag →
-        // MapAGUIServer 流结束后 SaveSessionAsync 落会话库
+        // 第一个宿主：POST 一轮对话（「推荐跑步鞋」）→ 服务端只负责落库本轮（SqlChatHistoryProvider 只存不取）
         using (var factory1 = CreateFactory(sessionConnection, CreateMockChatClient(FirstReply, capture: null)))
         {
             using var client1 = factory1.CreateClient();
             using var first = await client1.PostAsync(
                 "/",
-                new StringContent(RunAgentBody(threadId, "你好，帮我推荐一双跑步鞋"), Encoding.UTF8, "application/json"));
+                new StringContent(RunAgentBody(threadId, firstUserMessage), Encoding.UTF8, "application/json"));
             Assert.Equal(HttpStatusCode.OK, first.StatusCode);
             Assert.Contains("RESUME-MARKER", await first.Content.ReadAsStringAsync());
         }
@@ -73,21 +75,31 @@ public sealed class AguiSessionResumeTests : IDisposable
         // 等待第一轮会话真正落库（SaveSessionAfterStreamingAsync 在 SSE 流结束后执行，轮询避免时序竞态）
         await WaitForSessionRowAsync(sessionConnection, threadId);
 
-        // 第二个宿主（模拟重启：新工厂 = 新 host + 新 store 实例，同会话库文件）：同 ThreadId 续聊 →
-        // store.GetSessionAsync 从库还原会话（StateBag 含第一轮消息历史）→ AGUIShopping 续聊带上文
+        // 第二个宿主（模拟重启：新工厂 = 新 host + 新 store 实例，同会话库文件）：同 ThreadId 续聊。
+        // 服务端不再从库补历史（ProvideChatHistoryAsync 已停用），上下文改由【客户端重发全量历史】承载
+        // ——模仿真实 AG-UI 客户端每轮重发整段前文（第一轮 user + assistant 回复 + 本轮新 user）。
         var secondCaptured = new List<Meai.ChatMessage>();
         using (var factory2 = CreateFactory(sessionConnection, CreateMockChatClient(SecondReply, capture: secondCaptured)))
         {
             using var client2 = factory2.CreateClient();
             using var second = await client2.PostAsync(
                 "/",
-                new StringContent(RunAgentBody(threadId, "那再帮我看看其他推荐"), Encoding.UTF8, "application/json"));
+                new StringContent(
+                    RunAgentBody(
+                        threadId,
+                        [
+                            ("user", firstUserMessage),
+                            ("assistant", FirstReply),
+                            ("user", secondUserMessage),
+                        ]),
+                    Encoding.UTF8,
+                    "application/json"));
             Assert.Equal(HttpStatusCode.OK, second.StatusCode);
             Assert.Contains("第二轮回复", await second.Content.ReadAsStringAsync());
         }
 
-        // 关键断言：第二次 chatClient 收到的输入消息含第一轮 assistant 回复（RESUME-MARKER）——
-        // 若 store 未持久化/未还原，第二次输入只有本轮用户消息，断言即失败
+        // 关键断言（回归护栏）：第二次 chatClient 收到的输入消息含第一轮 assistant 回复（RESUME-MARKER）——
+        // 即「第二轮看到第一轮上下文」。历史来源由服务端补历史改为客户端重发，断言本身不变。
         var allSecondInputText = string.Join(" | ", secondCaptured.Select(TextOf));
         Assert.Contains("RESUME-MARKER", allSecondInputText);
     }
@@ -147,19 +159,28 @@ public sealed class AguiSessionResumeTests : IDisposable
     private static string TextOf(Meai.ChatMessage message)
         => string.Concat(message.Contents.OfType<Meai.TextContent>().Select(c => c.Text));
 
-    /// <summary>构造 AG-UI RunAgentInput 形状的请求体 JSON（username 由 username 中间件缺省 steve，会话仅按 ThreadId 续接）。</summary>
+    /// <summary>构造 AG-UI RunAgentInput 形状的单轮请求体 JSON（username 由 username 中间件缺省 steve，会话仅按 ThreadId 续接）。</summary>
     private static string RunAgentBody(string threadId, string userMessage)
+        => RunAgentBody(threadId, [("user", userMessage)]);
+
+    /// <summary>构造带多轮消息（模拟客户端重发全量历史）的 AG-UI RunAgentInput 请求体 JSON；每条消息 id 取唯一 GUID。</summary>
+    private static string RunAgentBody(string threadId, IReadOnlyList<(string Role, string Content)> messages)
     {
+        var array = new JsonArray();
+        foreach (var (role, content) in messages)
+        {
+            array.Add(new JsonObject
+            {
+                ["id"] = $"m-{Guid.NewGuid():N}",
+                ["role"] = role,
+                ["content"] = content,
+            });
+        }
+
         var root = new JsonObject
         {
             ["threadId"] = threadId,
-            ["messages"] = new JsonArray(
-                new JsonObject
-                {
-                    ["id"] = $"m-{Guid.NewGuid():N}",
-                    ["role"] = "user",
-                    ["content"] = userMessage,
-                }),
+            ["messages"] = array,
         };
         return root.ToJsonString();
     }
