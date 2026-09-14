@@ -169,58 +169,35 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
     /// <inheritdoc />
     /// <remarks>
     /// <para>
-    /// <b>语义：只在客户端「没带历史」时补历史。</b>AG-UI 客户端（DevUI / 官方客户端）每次把
-    /// <b>整段前文</b>随请求发来（<c>context.RequestMessages</c>）；若 provider 再把这些历史返回，模型就会看到两遍
-    /// （既费 token 又干扰模型）。故：
+    /// <b>语义：恒返回空，且不查库、不注入任何历史（「只存不取」定型）。</b>
     /// </para>
-    /// <list type="bullet">
-    /// <item><description>请求里<b>存在当前轮次之前的对话消息</b>（见 <see cref="FindCurrentTurnStart"/>）→ 说明客户端已自带历史 → <b>返回 <c>[]</c></b>；</description></item>
-    /// <item><description>客户端只发了当前轮次（curl 式）→ 按 <see cref="SqlChatHistoryOptions.MaxRoundsToLoad"/> 从库返回最近 N 个非删除轮（整轮，保 FCC↔FRC 配对），使只发新消息的客户端仍能续聊。</description></item>
-    /// </list>
     /// <para>
-    /// 会话内缓存（<see cref="State.Messages"/>）用于免重复查库：缓存覆盖的轮集合与当前活跃轮集合一致时复用，
-    /// 否则查库回填并 <c>SaveState</c>。用活跃轮集合而非无条件命中做失效判定，可避免陈旧缓存把已软删除轮带回
-    /// （design §1.3「软删除记录不参与加载」）。返回消息由基类 <c>InvokingCoreAsync</c> 拼在调用方消息之前。
+    /// <b>① 为什么恒空</b>：会话上下文由<b>客户端每轮重发的全量历史</b>承载（真实 AG-UI 客户端的 wire 行为，
+    /// 见 <see cref="StoreChatHistoryAsync"/> 的当前轮次切分）。若服务端在此再返回一遍历史，模型就会看到两遍
+    /// （既费 token 又干扰模型），故恒空是「客户端重发是唯一上下文来源」这一前提的落点。
+    /// </para>
+    /// <para>
+    /// <b>② 为什么原来的两个分支现在都返回空</b>：原实现按「客户端是否自带历史」分两支——
+    /// ①客户端已带历史（<see cref="FindCurrentTurnStart"/> 返回 <c>&gt; 0</c>）→ 返回空避免重复；
+    /// ②curl 式只发本轮 → 原应回填最近 N 个非删除轮（整轮，保 FCC↔FRC 配对）。第 ② 支的加载能力随
+    /// 「只存不取」决策<b>整体停止并已删除</b>，故两支语义归并为同一个恒空实现；本方法不再打开任何连接。
+    /// </para>
+    /// <para>
+    /// <b>③ 后果（有意为之，不是缺陷）</b>：curl 式只发当前轮次、不自带历史前缀的调用方将<b>完全失忆</b>——
+    /// 不再有任何服务端补历史。这是「只存不取」的既定代价，请勿当作 bug「修复」。
+    /// </para>
+    /// <para>
+    /// <b>④ 为什么显式 override 返回空、而不删掉 override 靠基类默认实现</b>：基类默认实现当前虽也返回 <c>[]</c>，
+    /// 但那是 MAF 的实现细节；一旦上游把默认实现改成返回已存历史，服务端就会<b>静默开始重复注入</b>。
+    /// 显式 override + 本注释把「有意空」固化进代码，是防回归护栏。配合「继续继承 <see cref="ChatHistoryProvider"/>
+    /// 并占据 <c>ChatClientAgentOptions.ChatHistoryProvider</c> 槽位」构成三者缺一不可的不变量：槽位空出会让 MAF
+    /// 退回会注入历史的 <c>InMemoryChatHistoryProvider</c>，模型同样看到两遍（design §4）。
     /// </para>
     /// </remarks>
-    protected override async ValueTask<IEnumerable<ChatMessage>> ProvideChatHistoryAsync(
+    protected override ValueTask<IEnumerable<ChatMessage>> ProvideChatHistoryAsync(
         ChatHistoryProvider.InvokingContext context,
         CancellationToken cancellationToken = default)
-    {
-        await EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
-
-        var conversationId = GetConversationId(context.Session);
-
-        // 客户端已自带历史（当前轮次起点之前存在对话类消息）→ provider 返回空，避免模型看到两遍。
-        if (FindCurrentTurnStart(context.RequestMessages.ToList()) > 0)
-            return [];
-
-        // design §9：MaxRoundsToLoad < 1 时按 1 处理（配置校验，避免无历史注入）。
-        var maxRounds = _options.MaxRoundsToLoad < 1 ? 1 : _options.MaxRoundsToLoad;
-        var state = _sessionState.GetOrInitializeState(context.Session);
-
-        var activeRounds = await GetRecentRoundIdsAsync(conversationId, maxRounds, cancellationToken).ConfigureAwait(false);
-        if (activeRounds.Count == 0)
-        {
-            if (state.Messages.Count > 0)
-            {
-                state.Messages.Clear();
-                _sessionState.SaveState(context.Session, state);
-            }
-
-            return [];
-        }
-
-        // 缓存命中：缓存覆盖的轮集合 == 当前活跃轮集合（无外部变更）→ 免查库。
-        if (state.Messages.Count > 0 && CacheRounds(state.Messages).SequenceEqual(activeRounds))
-            return state.Messages.Select(cached => cached.Message).ToList();
-
-        // 未命中：查库回填最近 N 轮（整轮）并同步缓存。
-        var loaded = await GetMessagesByRoundsAsync(conversationId, activeRounds, cancellationToken).ConfigureAwait(false);
-        state.Messages = loaded;
-        _sessionState.SaveState(context.Session, state);
-        return loaded.Select(cached => cached.Message).ToList();
-    }
+        => ValueTask.FromResult<IEnumerable<ChatMessage>>([]);
 
     /// <inheritdoc />
     /// <remarks>
@@ -433,70 +410,6 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
             return (reader.GetInt32(0), reader.GetInt32(1));
 
         return (0, 0);
-    }
-
-    /// <summary>取最近 <paramref name="maxRounds"/> 个非删除轮的 <c>round_id</c>（时间顺序返回，design §4.2）。</summary>
-    private async Task<List<int>> GetRecentRoundIdsAsync(
-        string conversationId, int maxRounds, CancellationToken cancellationToken)
-    {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText =
-            """
-            SELECT DISTINCT round_id FROM chat_messages
-            WHERE conversation_id = $conversationId AND is_deleted = 0 AND round_id IS NOT NULL
-            ORDER BY round_id DESC
-            LIMIT $limit
-            """;
-        command.Parameters.AddWithValue("$conversationId", conversationId);
-        command.Parameters.AddWithValue("$limit", maxRounds);
-
-        var roundIds = new List<int>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            roundIds.Add(reader.GetInt32(0));
-
-        roundIds.Reverse(); // 恢复时间（升序）顺序
-        return roundIds;
-    }
-
-    /// <summary>按给定轮次加载全部消息（含所属轮 id，<c>sequence</c> 升序，design §4.3）。</summary>
-    private async Task<List<CachedMessage>> GetMessagesByRoundsAsync(
-        string conversationId, List<int> roundIds, CancellationToken cancellationToken)
-    {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-
-        var placeholders = string.Join(",", roundIds.Select((_, i) => $"$r{i}"));
-        await using var command = connection.CreateCommand();
-        // S2077 误报：这里插入 SQL 的只是【参数名占位符】（$r0、$r1…，由 roundIds.Count 生成），
-        // 真正取值全部走下方 AddWithValue 参数绑定，无用户输入拼接。
-#pragma warning disable S2077
-        command.CommandText =
-            $"""
-            SELECT round_id, message_json FROM chat_messages
-            WHERE conversation_id = $conversationId
-              AND round_id IN ({placeholders})
-              AND is_deleted = 0
-            ORDER BY sequence ASC
-            """;
-#pragma warning restore S2077
-        command.Parameters.AddWithValue("$conversationId", conversationId);
-        for (var i = 0; i < roundIds.Count; i++)
-            command.Parameters.AddWithValue($"$r{i}", roundIds[i]);
-
-        var messages = new List<CachedMessage>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            var roundId = reader.GetInt32(0);
-            var message = JsonSerializer.Deserialize<ChatMessage>(reader.GetString(1), _jsonOptions);
-            if (message is not null)
-                messages.Add(new CachedMessage(roundId, message));
-        }
-
-        return messages;
     }
 
     /// <summary>取一批过期轮（每轮第一条消息 <c>created_at</c> 早于 <paramref name="cutoff"/>，最旧优先，design §5.2）。</summary>

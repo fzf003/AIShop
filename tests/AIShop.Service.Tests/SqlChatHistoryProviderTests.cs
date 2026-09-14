@@ -1,10 +1,15 @@
 #pragma warning disable MAAI001 // ChatHistoryProvider.InvokingContext / InvokedContext 构造属 MAF [Experimental]
 using System.Reflection;
 using System.Text.Json;
+using AIShop.AgentTelemetry;
+using AIShop.Core.Interfaces;
 using AIShop.Service.Agui;
+using AIShop.Service.Tools;
 using Microsoft.Agents.AI;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using NSubstitute;
 
 namespace AIShop.Service.Tests;
@@ -12,19 +17,22 @@ namespace AIShop.Service.Tests;
 /// <summary>
 /// <see cref="AIShop.Service.Agui.SqlChatHistoryProvider"/>（design-sql-chat-history-provider §1–§6 / §8）测试。
 /// 用临时 SQLite 文件（provider 每次操作独立开连接，故不能用 <c>:memory:</c>）+ 反射调用 protected 的
-/// <c>StoreChatHistoryAsync</c>（对齐既有 SqliteChatHistoryProviderTests 模式）。
+/// <c>StoreChatHistoryAsync</c> / <c>ProvideChatHistoryAsync</c>（对齐既有 SqliteChatHistoryProviderTests 模式）。
 /// </summary>
 /// <remarks>
 /// <b>新语义（有意变更，非缺陷）</b>：provider 只负责「存」（把当前轮次落 <c>chat_messages</c>），不再负责「提供」——
-/// <c>ProvideChatHistoryAsync</c> 已停用（恒返回空），模型上下文由客户端每轮重发全量历史承载（真实 AG-UI 客户端行为）。
-/// 因此本测试的「读回」断言一律改为<b>直接查库反序列化 <c>message_json</c></b>（<see cref="ReadStoredMessages()"/>），
-/// 不经 <c>Provide</c>——否则断言「Provide 返回空」会变成恒真的空转断言、丧失验证力。
+/// <c>ProvideChatHistoryAsync</c> 已定型为恒返回空，模型上下文由客户端每轮重发全量历史承载（真实 AG-UI 客户端行为）。
+/// 因此「读回已落库消息」的断言一律<b>直接查库反序列化 <c>message_json</c></b>（<see cref="ReadStoredMessages()"/>），
+/// 不经 <c>Provide</c>。仅当断言带<b>可证伪前提</b>时才直调 <c>Provide</c>（如连接串不可打开 / 库中确已有历史行）——
+/// 那样的断言有验证力；无前提地只断「Provide 返回空」才是恒真空转断言。
 /// </remarks>
 public sealed class SqlChatHistoryProviderTests : IDisposable
 {
     private static readonly Type ProviderType = typeof(AIShop.Service.Agui.SqlChatHistoryProvider);
     private static readonly MethodInfo StoreMethod = ProviderType.GetMethod(
         "StoreChatHistoryAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+    private static readonly MethodInfo ProvideMethod = ProviderType.GetMethod(
+        "ProvideChatHistoryAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
 
     private readonly string _dbPath;
     private readonly string _connectionString;
@@ -469,6 +477,78 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
         Assert.Equal(8, CountAllChatRows()); // 6 + 当前轮 2 行（而非 6 + 8）
     }
 
+    // ---------- Provide 恒空且不查库（只存不取定型）+ 槽位被 Sql provider 占住 ----------
+
+    [Fact]
+    public async Task Provide_WithUnopenableConnectionString_ReturnsEmptyWithoutTouchingDatabase()
+    {
+        // ADDED-1 场景 1（实质性断言）：Provide 恒空且【不查库】。
+        // 连接串指向「不存在的目录」下的 db 文件——任何一次 OpenAsync 都会失败（SQLite 不会创建缺失目录）。
+        // 故「调用不抛异常且返回空」本身即证明本次未对 chat_messages 发起任何读取。
+        var badConnection =
+            $"Data Source={Path.Combine(Path.GetTempPath(), $"no_such_dir_{Guid.NewGuid():N}", "chat.db")}";
+
+        // 前提校验（防断言空转）：该连接串确实打不开——直接用 SqliteConnection 打开必抛。
+        Assert.ThrowsAny<Exception>(() =>
+        {
+            using var probe = new SqliteConnection(badConnection);
+            probe.Open();
+        });
+
+        var provider = new AIShop.Service.Agui.SqlChatHistoryProvider(
+            new AIShop.Service.Agui.SqlChatHistoryOptions { ConnectionString = badConnection },
+            _ => new AIShop.Service.Agui.SqlChatHistoryProvider.State(_conversationId));
+
+        var result = await InvokeProvideAsync(provider, new TestSession(), [new ChatMessage(ChatRole.User, "你好")]);
+
+        Assert.Empty(result); // 恒空；若仍查库会因连接串不可打开而抛异常
+    }
+
+    [Fact]
+    public async Task Provide_WithStoredHistoryAndCurrentTurnOnlyRequest_StillReturnsEmpty()
+    {
+        // ADDED-1 场景 2 + MODIFIED-1：curl 式只发本轮、不自带历史前缀的调用方不再获得任何服务端补历史。
+        // 先真实落库一轮（证明库里确有待加载的历史），再以【只含当前轮】的请求触发 Provide。
+        await StoreSimpleRound("历史问题", "历史回答");
+        Assert.Equal(2L, CountAllChatRows()); // 可证伪前提：库中确有 2 行历史可供回填
+
+        var result = await InvokeProvideAsync(
+            _provider, new TestSession(), [new ChatMessage(ChatRole.User, "只发本轮的新问题")]);
+
+        Assert.Empty(result); // 库里虽有历史行，仍不回填（Provide 不读 chat_messages）
+    }
+
+    [Fact]
+    public void Slot_ResolvedChatHistoryProvider_IsSql_AndMountedOnAgent()
+    {
+        // ADDED-2 场景：配置 Agui:ChatHistoryProvider=Sql 后，容器解析出的 ChatHistoryProvider 必须是
+        // SqlChatHistoryProvider 实例（而非 MAF 默认 InMemoryChatHistoryProvider），且该实例经
+        // AGUIShoppingAgent.Create 占据 agent 的 ChatHistoryProvider 槽位（槽位空出会退回会注入历史的 InMemory）。
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [AguiChatHistoryDependencyInjection.ProviderConfigKey] = AguiChatHistoryDependencyInjection.SqlProviderValue
+            })
+            .Build();
+
+        var services = new ServiceCollection();
+        services.AddAguiChatHistoryProvider(config, _connectionString);
+        using var sp = services.BuildServiceProvider();
+
+        var resolved = sp.GetRequiredService<ChatHistoryProvider>();
+        Assert.IsType<AIShop.Service.Agui.SqlChatHistoryProvider>(resolved);
+        Assert.IsNotType<InMemoryChatHistoryProvider>(resolved);
+
+        var agent = Assert.IsType<ChatClientAgent>(AGUIShoppingAgent.Create(
+            Substitute.For<IChatClient>(),
+            new CartToolProvider(Substitute.For<IServiceScopeFactory>(), Substitute.For<ICurrentUserAccessor>()),
+            new AgentTelemetryOptions { Level = AgentTelemetryLevel.None },
+            chatHistoryProvider: resolved));
+
+        Assert.Same(resolved, agent.ChatHistoryProvider);
+        Assert.IsNotType<InMemoryChatHistoryProvider>(agent.ChatHistoryProvider);
+    }
+
     // ---------- helpers ----------
 
     private async Task StoreSimpleRound(string question, string answer)
@@ -496,6 +576,22 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
 
         var result = StoreMethod.Invoke(provider, [context, CancellationToken.None]);
         await (ValueTask)result!;
+    }
+
+    /// <summary>反射调用 protected 的 <c>ProvideChatHistoryAsync</c>（构造 <see cref="ChatHistoryProvider.InvokingContext"/>）。
+    /// 直调该 protected 方法（而非公开的 <c>InvokingAsync</c>）以隔离「provider 自身是否返回空」——后者会把
+    /// 请求消息一并拼回，无法单独观测 provider 的提供行为。</summary>
+    private static async Task<IReadOnlyList<ChatMessage>> InvokeProvideAsync(
+        AIShop.Service.Agui.SqlChatHistoryProvider provider,
+        AgentSession session,
+        IEnumerable<ChatMessage> requestMessages)
+    {
+        var context = new ChatHistoryProvider.InvokingContext(
+            Substitute.For<AIAgent>(), session, requestMessages);
+
+        var result = (ValueTask<IEnumerable<ChatMessage>>)ProvideMethod.Invoke(
+            provider, [context, CancellationToken.None])!;
+        return (await result).ToList();
     }
 
     private List<(int Sequence, string Role, int RoundId, bool IsDeleted, string? DeletedAt, string Text)> ReadRows()
