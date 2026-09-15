@@ -46,7 +46,7 @@ public static class SessionStoreDependencyInjection
         string? sessionDbConnection = null)
     {
         // S3（agui-session-prod）：绑定 "Agui" 节的会话配置（SessionTtlDays / SessionCleanupIntervalHours /
-        // SessionMaxRounds）。config 为 null（纯底座测试 / 未接线宿主）时跳过绑定，IOptions 仍解析为类默认 30/12/12。
+        // SessionMaxRounds）。config 为 null（纯底座测试 / 未接线宿主）时跳过绑定，IOptions 仍解析为类默认 30/12/5。
         if (config is not null)
             services.Configure<AguiSessionOptions>(config.GetSection("Agui"));
         else

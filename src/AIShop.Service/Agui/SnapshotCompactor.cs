@@ -47,7 +47,7 @@ public static class SnapshotCompactor
     /// <param name="strategy">装配共享的压缩策略实例（生产 = DI 单例 <c>ContextWindowCompactionStrategy</c>），
     /// 仅用作「保留哪些轮」的候选信号来源。</param>
     /// <param name="history">原始消息历史（保序）。</param>
-    /// <param name="maxRounds">保留轮数硬上限（<c>Agui:SessionMaxRounds</c>，默认 12）；小于
+    /// <param name="maxRounds">保留轮数硬上限（<c>Agui:SessionMaxRounds</c>，默认 5）；小于
     /// <see cref="ProtectedRounds"/> 时按 <see cref="ProtectedRounds"/> 兜底（受保护轮不可被上限裁剪）。</param>
     /// <param name="logger">可选日志（透传给官方 <see cref="CompactionProvider.CompactAsync"/>）。</param>
     /// <param name="cancellationToken">取消标记。</param>

@@ -58,7 +58,7 @@ public sealed class AguiSessionOptionsTests
     [Fact]
     public void NoConfiguration_StoreOptionsFallBackToClassDefaults()
     {
-        // 无配置（config 为 null）→ 30/12/12 缺省回退（spec R7 缺省回退）。
+        // 无配置（config 为 null）→ 30/12/5 缺省回退（spec R7 缺省回退）。
         var options = ResolveBoundOptions(config: null);
 
         Assert.Equal(AguiSessionOptions.DefaultSessionTtlDays, options.SessionTtlDays);
@@ -66,7 +66,7 @@ public sealed class AguiSessionOptionsTests
         Assert.Equal(AguiSessionOptions.DefaultSessionMaxRounds, options.SessionMaxRounds);
         Assert.Equal(30, options.SessionTtlDays);
         Assert.Equal(12, options.SessionCleanupIntervalHours);
-        Assert.Equal(12, options.SessionMaxRounds);
+        Assert.Equal(5, options.SessionMaxRounds);
     }
 
     [Theory]

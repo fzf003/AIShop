@@ -109,11 +109,12 @@ public static class AGUIShoppingAgent
         // ShoppingAssistantAgent 挂了 CompactionProvider + ContextWindowCompactionStrategy。阈值上提至
         // AguiCompaction 单一来源（对齐老 Agent 128000/16384/0.5/0.8，消除配置漂移）：注入者用注入实例
         // （DI 单例，S4 的 store 侧压缩复用同一实例），未注入（直构调用点）回退 AguiCompaction.CreateStrategy()。
-        // stateKey 显式给 "AGUIShopping-Compaction"：CompactionProvider 状态存 AgentSession.StateBag，缺省按策略
-        // 类型名（ContextWindowCompactionStrategy）作 key，多个 agent 同 session 会话会互相覆盖，显式 key 隔离。
+        // stateKey 显式给 AguiSessionStateKeys.Compaction（"AGUIShopping-Compaction"）：CompactionProvider 状态存
+        // AgentSession.StateBag，缺省按策略类型名（ContextWindowCompactionStrategy）作 key，多个 agent 同 session
+        // 会话会互相覆盖，显式 key 隔离。抽成共享常量是因为 store 侧要在落库前【剔除】该键（见该常量 remarks）。
         var compactionProvider = new CompactionProvider(
             compactionStrategy ?? AguiCompaction.CreateStrategy(),
-            stateKey: "AGUIShopping-Compaction");
+            stateKey: AguiSessionStateKeys.Compaction);
 
         // AIContextProviders：压缩 provider 恒挂；记忆 provider 条件挂载（记忆服务 + 当前用户访问器均可用时）。
         var contextProviders = new List<AIContextProvider> { compactionProvider };

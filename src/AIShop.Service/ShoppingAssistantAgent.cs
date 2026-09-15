@@ -127,13 +127,14 @@ public sealed class ShoppingAssistantAgent : IShoppingAssistantAgent
             {
                 StateKey = "ShoppingAssistant",
                 // Provide：历史输出给 LLM 前过滤——排除 system 消息（系统指令走 Instructions，不入历史上下文）
-                ProvideOutputMessageFilter = msgs => msgs.Where(m => m.Role != ChatRole.System),
+               /* ProvideOutputMessageFilter = msgs => msgs.Where(m => m.Role != ChatRole.System),
                 // Store：请求消息入库前过滤——排除框架回传的历史（避免重复存储）+ system
                 StoreInputRequestMessageFilter = msgs => msgs.Where(m =>
                     m.GetAgentRequestMessageSourceType() != AgentRequestMessageSourceType.ChatHistory
                     && m.Role != ChatRole.System),
                 // Store：响应消息入库前过滤——排除 system
                 StoreInputResponseMessageFilter = msgs => msgs.Where(m => m.Role != ChatRole.System),
+               */
             });
 
         // 基于模型上下文窗口自动计算阈值

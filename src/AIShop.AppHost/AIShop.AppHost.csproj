@@ -12,6 +12,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Aspire.Hosting.AgentFramework.DevUI" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\AIShop.Api\AIShop.Api.csproj" />
     <ProjectReference Include="..\AIShop.McpServer\AIShop.McpServer.csproj" />
     <!-- AGUI 独立购物宿主（agui-host T6）：AppHost 编排 agui 资源，供官方 AGUIClient / DevUI 消费者连接 -->

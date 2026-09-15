@@ -212,9 +212,11 @@ public sealed class AguiRequestTests
             }
 
             // 续聊带上下文（回归护栏）：第二轮底层收到的输入含第一轮 assistant 回复标记
-            // （跨模型续聊不丢上下文，spec Req9；历史来源由服务端补历史改为客户端重发，断言本身不变）
-            var secondInput = string.Join(" | ", secondCaptured.Select(TextOf));
-            Assert.Contains("T5-MARKER", secondInput);
+            // （跨模型续聊不丢上下文，spec Req9；历史来源由服务端补历史改为客户端重发）。
+            // ⚠️ 断言强度：不能用 Assert.Contains —— 本轮请求里的 T5-MARKER 是【客户端自己重发】过来的，
+            // Contains 恒真、零断言力。改为断言该标记在底层输入中【恰出现一次】：≥1 证客户端消息被如实透传，
+            // =1 证服务端没有再重复注入（若将来 ProvideChatHistoryAsync 被重新启用，同一标记会出现两次 → 变红）。
+            Assert.Equal(1, secondCaptured.Count(message => TextOf(message).Contains("T5-MARKER")));
         }
         finally
         {

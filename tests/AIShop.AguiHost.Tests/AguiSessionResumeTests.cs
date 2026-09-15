@@ -98,10 +98,12 @@ public sealed class AguiSessionResumeTests : IDisposable
             Assert.Contains("第二轮回复", await second.Content.ReadAsStringAsync());
         }
 
-        // 关键断言（回归护栏）：第二次 chatClient 收到的输入消息含第一轮 assistant 回复（RESUME-MARKER）——
-        // 即「第二轮看到第一轮上下文」。历史来源由服务端补历史改为客户端重发，断言本身不变。
-        var allSecondInputText = string.Join(" | ", secondCaptured.Select(TextOf));
-        Assert.Contains("RESUME-MARKER", allSecondInputText);
+        // 关键断言（回归护栏）：第二次 chatClient 收到的输入含第一轮 assistant 回复（RESUME-MARKER）——
+        // 即「第二轮看到第一轮上下文」。历史来源由服务端补历史改为客户端重发。
+        // ⚠️ 断言强度：不能用 Assert.Contains —— 该标记是【客户端自己重发】过来的，Contains 恒真、零断言力。
+        // 改为断言它【恰出现一次】：≥1 证客户端消息被如实透传，=1 证服务端没有再重复注入
+        // （若将来 ProvideChatHistoryAsync 被重新启用，同一标记会出现两次 → 变红）。
+        Assert.Equal(1, secondCaptured.Count(message => TextOf(message).Contains("RESUME-MARKER")));
     }
 
     /// <summary>

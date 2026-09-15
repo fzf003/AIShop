@@ -19,8 +19,9 @@ public class AguiSessionOptions
     /// <summary>后台清理周期默认值（12 小时）。</summary>
     public const int DefaultSessionCleanupIntervalHours = 12;
 
-    /// <summary>收敛快照保留轮数默认硬上限（12 轮，口径对齐老 RoundBasedCompactionPolicy K=12）。</summary>
-    public const int DefaultSessionMaxRounds = 12;
+    /// <summary>收敛快照保留轮数默认硬上限（5 轮；原为 12 轮、口径对齐老 RoundBasedCompactionPolicy K=12，2026-09-12 下调——
+    /// 快照体积随轮数线性增长，5 轮足够覆盖「最近上下文」而显著压低 session_json）。</summary>
+    public const int DefaultSessionMaxRounds = 5;
 
     /// <summary>
     /// <c>updated_at</c> 闲置超过该天数即视为过期；<c>&lt;= 0</c> = <b>禁用 TTL</b>（不后台删除、不惰性过期）。

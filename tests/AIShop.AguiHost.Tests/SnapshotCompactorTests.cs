@@ -17,8 +17,8 @@ namespace AIShop.AguiHost.Tests;
 /// </remarks>
 public sealed class SnapshotCompactorTests
 {
-    /// <summary>默认保留轮数上限（Agui:SessionMaxRounds 默认 12），仅用于表达测试意图。</summary>
-    private const int DefaultMaxRounds = 12;
+    /// <summary>默认保留轮数上限（与 Agui:SessionMaxRounds 默认值保持一致，当前 5），仅用于表达测试意图。</summary>
+    private const int DefaultMaxRounds = 5;
 
     [Fact]
     public async Task ShouldReturnSameInstanceAndReferences_WhenRoundsWithinProtectedRounds()

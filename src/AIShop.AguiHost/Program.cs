@@ -96,7 +96,7 @@ try
             memoryService: ResolveMemoryService(sp),
             currentUser: sp.GetRequiredService<ICurrentUserAccessor>(),
             compactionStrategy: sp.GetRequiredService<ContextWindowCompactionStrategy>(),
-            chatHistoryProvider: sp.GetService<ChatHistoryProvider>())
+            chatHistoryProvider: sp.GetService<SqlChatHistoryProvider>())
         );
 
      // 解析 Mem0 记忆服务（IMemoryService）。IMemoryService 单例构造会 new LocalBgeEmbeddingGenerator(modelDir)

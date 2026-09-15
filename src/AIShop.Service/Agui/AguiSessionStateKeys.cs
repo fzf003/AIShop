@@ -18,4 +18,27 @@ public static class AguiSessionStateKeys
     /// 作为 <c>chat_messages.conversation_id</c>——使 §1.3 / §10.3 的审计 / 召回可按 <c>conversation_id = ThreadId</c> 查询。
     /// </summary>
     public const string ConversationId = "AguiConversationId";
+
+    /// <summary>
+    /// 上下文压缩器（MAF <c>CompactionProvider</c>）的状态键 —— 与 <c>AGUIShoppingAgent.Create</c> 里传给
+    /// <c>CompactionProvider(stateKey: …)</c> 的值<b>必须一致</b>。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 该键承载压缩器的<b>消息组索引</b>：组只增不减（压缩策略只把旧组标记 <c>IsExcluded</c>，不删除），
+    /// 且<b>不受任何裁剪</b>——S4 的收敛只处理 <c>InMemoryChatHistoryProvider</c> 的消息列表，看不见这个索引。
+    /// 故 <see cref="SqliteAgentSessionStore.SaveSessionAsync"/> 在序列化前<b>剔除该键</b>，使落库快照真正有界。
+    /// </para>
+    /// <para>
+    /// 剔除是安全的：压缩器下次运行发现状态为空 → 用当轮消息<b>从零重建索引</b>
+    /// （<c>CompactionProvider.InvokingCoreAsync</c> 的 <c>state.MessageGroups.Count == 0</c> 分支；
+    /// 新会话第一轮本来就走这条路，是常态路径）。失去的只有「哪些组曾被排除」的跨轮记忆——而压缩在
+    /// 本项目的消息规模下从未真正触发（prompt 远低于阈值），该记忆恒为空集。
+    /// </para>
+    /// <para>
+    /// 抽成共享常量的理由同 <see cref="ConversationId"/>：该 key 由 agent 装配侧传入、由 store 侧剔除，
+    /// 两处各写一遍字面量必然漂移。
+    /// </para>
+    /// </remarks>
+    public const string Compaction = "AGUIShopping-Compaction";
 }
