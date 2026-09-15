@@ -39,10 +39,24 @@ public static class AguiChatHistoryDependencyInjection
         if (!string.Equals(config?[ProviderConfigKey], SqlProviderValue, StringComparison.OrdinalIgnoreCase))
             return services;
 
-        services.AddSingleton(new SqlChatHistoryOptions
+        var options = new SqlChatHistoryOptions
         {
             ConnectionString = chatDbConnection ?? SqlChatHistoryOptions.DefaultConnectionString
-        });
+        };
+
+        // 清理参数从 "Agui" 节按属性名绑定（见 SqlChatHistoryOptions 类注释「属性名 = 配置键」）：
+        // Agui:TtlDays / Agui:CleanupBatchSize。未配置时保持类默认，行为零变化。
+        // 此前只设了连接串，这两个值恒为类默认 30/10 且无从更改——而数据量最大的 chat_messages 正归它管，
+        // 运维改 Agui:SessionTtlDays 时聊天历史不会跟着变（两库两源），故补上绑定。
+        // 连接串不走节绑定：其覆盖 seam 是显式参数（Agui:ChatConnection），保持单一来源。
+        if (config is not null)
+        {
+            var section = config.GetSection("Agui");
+            options.TtlDays = section.GetValue(nameof(SqlChatHistoryOptions.TtlDays), options.TtlDays);
+            options.CleanupBatchSize = section.GetValue(nameof(SqlChatHistoryOptions.CleanupBatchSize), options.CleanupBatchSize);
+        }
+
+        services.AddSingleton(options);
         services.AddSingleton<SqlChatHistoryProvider>();
         // 对外以抽象 ChatHistoryProvider 暴露，供 host 经 GetService<ChatHistoryProvider>() 注入 AGUIShoppingAgent.Create。
         services.AddSingleton<ChatHistoryProvider>(sp => sp.GetRequiredService<SqlChatHistoryProvider>());

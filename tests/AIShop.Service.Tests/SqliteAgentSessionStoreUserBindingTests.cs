@@ -166,6 +166,25 @@ public sealed class SqliteAgentSessionStoreUserBindingTests : IDisposable
         Assert.Equal(0, await CountSessionRowsAsync(_connectionString, "AGUIShopping:thread-device-b"));
     }
 
+    [Fact]
+    public async Task SaveSessionAsync_WhenStoreUnavailable_DoesNotPropagate()
+    {
+        // 保存失败（连接串指向不存在的目录 → 库打不开）不得上抛。调用点在 AG-UI 端点内、位于 SSE 流
+        // 【所有事件之后】且无兜底——上抛会让「响应已完整吐出」的流异常断开：RUN_FINISHED 不发出、
+        // 客户端表现为连接中断。兜底后只记 Error 日志、请求正常收尾。
+        var brokenDbPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "nope.db");
+        var store = new SqliteAgentSessionStore($"Data Source={brokenDbPath}");
+
+        var agent = CreateBareAgent("AGUIShopping");
+        var session = await agent.CreateSessionAsync();
+        AddHistory(agent, session, "用户消息", "回复");
+
+        var exception = await Record.ExceptionAsync(
+            () => store.SaveSessionAsync(agent, "thread-guard", session).AsTask());
+
+        Assert.Null(exception); // 断言：保存失败被兜底，异常未上抛
+    }
+
     // ---------- helpers ----------
 
     /// <summary>构造最小 ChatClientAgent（无工具/无压缩 provider，只验证 store 依赖的 StateBag 消息历史机制）。</summary>

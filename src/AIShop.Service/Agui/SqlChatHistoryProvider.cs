@@ -29,19 +29,26 @@ namespace AIShop.Service.Agui;
 /// MAF Abstractions 的 public API，见镜像 <c>ProviderSessionState{TState}.cs</c> / <c>ValkeyChatHistoryProvider.cs</c> L44/L67/L89）。
 /// </para>
 /// <para>
-/// <b>标识 = ThreadId（design §2.2）</b>：ThreadId 由 <see cref="SqliteAgentSessionStore.GetSessionAsync"/> 取会话时写入
-/// StateBag 的 <see cref="AguiSessionStateKeys.ConversationId"/> 键；<see cref="DefaultStateInitializer"/> 优先读该键，
-/// 使 <c>conversation_id</c> 等于 AG-UI ThreadId（§1.3 / §10.3 的审计 / 召回按 ThreadId 可查）。未接线（纯单测直构
-/// provider、StateBag 无该键）时回退生成 GUID，保证不崩；构造参数仍可注入确定性标识供测试。
+/// <b>标识取自会话 StateBag 的共享键</b>：<see cref="AguiSessionStateKeys.ConversationId"/> 由
+/// <see cref="SqliteAgentSessionStore"/> 取 / 建会话时写入（当前实现 = 当前用户名，无用户名时回退会话标识串）；
+/// <see cref="DefaultStateInitializer"/> 优先读该键作为 <c>conversation_id</c>，故审计 / 召回可按会话查询。
+/// 未接线（纯单测直构 provider、StateBag 无该键）时回退生成 GUID，保证不崩；构造参数仍可注入确定性标识供测试。
 /// </para>
 /// <para>
-/// <b>读写语义 = 只处理「当前轮次」，纯按位置判定（不依赖 message id）</b>：AG-UI 客户端每次会把<b>整段前文</b>
-/// 随请求发来，其 payload 结构恒为 <c>[历史前缀…, 当前轮次]</c>，最后一条 user 消息即本轮起点。故
-/// <see cref="StoreChatHistoryAsync"/> 只落库当前轮次 + 全部响应消息（重发的前缀一律不落库）；
-/// <see cref="ProvideChatHistoryAsync"/> 只在客户端没带历史（curl 式只发本轮）时从库补历史，否则返回空——
-/// 避免历史被反复写入库 / 反复返回给模型。**不按 <see cref="ChatMessage.MessageId"/> 比对**：客户端重发的
-/// assistant 消息带的是客户端自己的 id，与库中服务端返回 id（如 <c>chatcmpl-…</c>）永远对不上。
-/// 详见两个方法的 remarks。
+/// <b>只存不取</b>：<see cref="StoreChatHistoryAsync"/> 只落库<b>当前轮次</b> + 全部响应消息；
+/// <see cref="ProvideChatHistoryAsync"/> <b>恒空且不查库</b>——模型上下文由客户端每轮重发的全量历史承载，
+/// 服务端不再注入任何历史（两边各自的 remarks 有详述）。
+/// </para>
+/// <para>
+/// <b>当前轮次纯按位置判定（不依赖 message id）</b>：AG-UI 客户端每次把<b>整段前文</b>随请求发来，其 payload
+/// 结构恒为 <c>[历史前缀…, 当前轮次]</c>，最后一条 user 消息即本轮起点（见 <see cref="FindCurrentTurnStart"/>）。
+/// **不按 <see cref="ChatMessage.MessageId"/> 比对**：客户端重发的 assistant 消息带的是客户端自己的 id，
+/// 与库中服务端返回 id（如 <c>chatcmpl-…</c>）永远对不上。
+/// </para>
+/// <para>
+/// <b>轮次抽象（<c>round_id</c> + 整轮软删）为何保留</b>：与「只存不取」无关，它只服务两件事——
+/// ①TTL 清理按<b>整轮</b>软删，不留半轮残留（不拆断 <see cref="FunctionCallContent"/>↔<see cref="FunctionResultContent"/> 配对）；
+/// ②审计 / 召回可按轮查询落库历史。会话上下文压缩<b>不</b>依赖它。
 /// </para>
 /// <para>
 /// <b>JSON 序列化</b>：<c>message_json</c> 必须无损往返多态内容（<see cref="FunctionCallContent"/> /
@@ -100,7 +107,7 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
     private IReadOnlyList<string>? _stateKeys;
 
     /// <summary>初始化 <see cref="SqlChatHistoryProvider"/>。</summary>
-    /// <param name="options">配置；null 时回退 <see cref="SqlChatHistoryOptions"/> 类默认（agui.chat.db / 2 轮 / 30 天 / 10 / 12）。</param>
+    /// <param name="options">配置；null 时回退 <see cref="SqlChatHistoryOptions"/> 类默认（agui.chat.db / TTL 30 天 / 清理批 10 轮）。</param>
     /// <param name="stateInitializer">会话状态初始化器（首次为某会话建状态时调用）；null 时回退
     /// <see cref="DefaultStateInitializer"/>（生成稳定 GUID）。供宿主 / 测试注入确定性会话标识。</param>
     /// <exception cref="ArgumentException"><see cref="SqlChatHistoryOptions.ConnectionString"/> 为空。</exception>
@@ -197,7 +204,57 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
     protected override ValueTask<IEnumerable<ChatMessage>> ProvideChatHistoryAsync(
         ChatHistoryProvider.InvokingContext context,
         CancellationToken cancellationToken = default)
-        => ValueTask.FromResult<IEnumerable<ChatMessage>>([]);
+    {
+#pragma warning disable S125 // Sections of code should not be commented out（保留调试用参考实现）
+       /* var state = _sessionState.GetOrInitializeState(context.Session);
+
+        Console.WriteLine(state);
+        var requestMessages = context.RequestMessages.ToList();
+        Console.WriteLine(requestMessages.Count);*/
+#pragma warning restore S125
+        return ValueTask.FromResult<IEnumerable<ChatMessage>>([]);
+    }
+
+    /// <summary>
+    /// 覆盖 provider 通知入口，为<b>落库失败兜底</b>：<see cref="StoreChatHistoryAsync"/> 抛出的非取消异常
+    /// 只记日志、不再上抛。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>为什么需要这层</b>：MAF 的默认实现（<c>ChatHistoryProvider.InvokedCoreAsync</c>）不做兜底，异常直接上抛；
+    /// 而调用点位于 <c>ChatClientAgent</c> 流式路径的<b>所有 yield 之后</b>（镜像 <c>ChatClientAgent.cs:402</c>，
+    /// yield 循环在 <c>:360-389</c>）。故落库一失败，客户端看到的是「答复已完整吐出、连接却异常断开」——
+    /// 内容可见但 <c>RUN_FINISHED</c> 永不发出；且 AG-UI 端点的 <c>SaveSessionAsync</c>（镜像
+    /// <c>AGUIEndpointRouteBuilderExtensions.cs:197</c>，同样无兜底）也随之不执行。
+    /// </para>
+    /// <para>
+    /// <b>这是采纳框架开放的扩展点，不是绕过框架</b>：基类注释写明「for scenarios that require more control over
+    /// error handling or message filtering, overriding this method allows you to directly control the messages
+    /// that are stored for the invocation」——「落库失败要不要炸掉整个请求」本就由 provider 作者决定。
+    /// </para>
+    /// <para>
+    /// <b>代价（有意接受）</b>：异常被吞 → 该轮消息静默不入库，仅留 Error 日志。取舍依据：聊天助手不该因一次
+    /// 落库抖动让用户丢掉已生成的回复；且落库是审计 / 召回用途，缺一轮不影响模型上下文
+    /// （<see cref="ProvideChatHistoryAsync"/> 恒空，上下文由客户端重发承载）。与
+    /// <see cref="SessionCleanupService"/> 的「清理失败记日志、不中断」保持同一容错口径。
+    /// </para>
+    /// <para>
+    /// <b>不吞 <see cref="OperationCanceledException"/></b>：请求取消属正常控制流，须继续上抛以正确终止管线。
+    /// </para>
+    /// </remarks>
+    protected override async ValueTask InvokedCoreAsync(
+        ChatHistoryProvider.InvokedContext context,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await base.InvokedCoreAsync(context, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log.Error(ex, "聊天历史落库失败，本轮不入库但请求继续（Agent {AgentName}）", context.Agent.Name);
+        }
+    }
 
     /// <inheritdoc />
     /// <remarks>
@@ -215,8 +272,9 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
     /// 事务原子、乐观重试等由 <see cref="InsertMessagesWithRetryAsync"/> 保持。
     /// </para>
     /// <para>
-    /// 落库成功后把新增消息追加进会话内缓存（<see cref="State.Messages"/>），按
-    /// <see cref="SqlChatHistoryOptions.MaxRoundsToLoad"/> 截到最近 N 轮，使下次 <see cref="ProvideChatHistoryAsync"/> 命中缓存。
+    /// 只落库当前轮次；落库后<b>不写回 <see cref="AgentSession.StateBag"/> 任何消息副本</b>。
+    /// 会话标识仍由 <see cref="GetConversationId"/> 经 <c>GetOrInitializeState</c> 在首次访问时写入（跨请求 / 重启稳定），
+    /// 故会话状态中不再需要额外的消息副本。
     /// </para>
     /// </remarks>
     protected override async ValueTask StoreChatHistoryAsync(
@@ -224,9 +282,10 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
         CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
+        var state = _sessionState.GetOrInitializeState(context.Session);
 
         var conversationId = GetConversationId(context.Session);
-        var state = _sessionState.GetOrInitializeState(context.Session);
+     
 
         var requestMessages = context.RequestMessages.ToList();
         var currentTurn = requestMessages.Skip(FindCurrentTurnStart(requestMessages));
@@ -234,11 +293,11 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
         if (newMessages.Count == 0)
             return;
 
-        var stored = await InsertMessagesWithRetryAsync(conversationId, newMessages, cancellationToken).ConfigureAwait(false);
+        var storemessages= await InsertMessagesWithRetryAsync(conversationId, newMessages, cancellationToken).ConfigureAwait(false);
 
-        // 同步会话缓存：追加本轮新增 + 截到最近 N 轮（与 Provide 的活跃轮窗口口径一致）。
-        state.Messages.AddRange(stored);
-        TrimToRounds(state.Messages, _options.MaxRoundsToLoad < 1 ? 1 : _options.MaxRoundsToLoad);
+        state.Messages.AddRange(storemessages);
+        var maxRounds = _options.MaxRoundsToLoad < 1 ? 1 : _options.MaxRoundsToLoad;
+        TrimToRounds(state.Messages, maxRounds);
         _sessionState.SaveState(context.Session, state);
     }
 
@@ -253,7 +312,8 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
     /// 不是历史）起点 = 0，使前导 system 仍属本轮（design §2.3：前导非 User 归 round 1）。
     /// </para>
     /// <para>
-    /// 返回 <c>&gt; 0</c> 即表示「客户端已带历史」——<see cref="ProvideChatHistoryAsync"/> 据此返回空、不再补历史。
+    /// 返回 <c>&gt; 0</c> 即表示「客户端已自带历史」，起点之前的前缀一律不落库。仅供
+    /// <see cref="StoreChatHistoryAsync"/> 做纯位置切分使用。
     /// </para>
     /// </remarks>
     private static int FindCurrentTurnStart(IReadOnlyList<ChatMessage> requestMessages)
@@ -277,21 +337,6 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
     /// <summary>是否对话类角色（user / assistant / tool）——system / developer 属提示消息，不算历史。</summary>
     private static bool IsConversationalRole(ChatRole role)
         => role == ChatRole.User || role == ChatRole.Assistant || role == ChatRole.Tool;
-
-    /// <summary>缓存覆盖的轮 id（按消息顺序首次出现，轮 id 升序）。</summary>
-    private static List<int> CacheRounds(IReadOnlyList<CachedMessage> messages)
-        => messages.Select(message => message.RoundId).Distinct().ToList();
-
-    /// <summary>把缓存截到最近 <paramref name="maxRounds"/> 个轮（整轮保留，轮 id 升序）。</summary>
-    private static void TrimToRounds(List<CachedMessage> messages, int maxRounds)
-    {
-        var rounds = CacheRounds(messages);
-        if (rounds.Count <= maxRounds)
-            return;
-
-        var keepFrom = rounds[^maxRounds];
-        messages.RemoveAll(m => m.RoundId < keepFrom);
-    }
 
     /// <summary>
     /// 分批整轮软删除过期轮（design §5）：按轮第一条消息的 <c>created_at</c> 与 cutoff 比较，
@@ -368,8 +413,8 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
         => CleanupExpiredRoundsAsync(_options.TtlDays, _options.CleanupBatchSize, cancellationToken);
 
     /// <summary>
-    /// 默认状态初始化器：优先采用宿主 <see cref="SqliteAgentSessionStore"/> 写入会话 StateBag 的 AG-UI <c>ThreadId</c>
-    /// （<see cref="AguiSessionStateKeys.ConversationId"/>）作为会话标识（design §2.2：<c>conversation_id</c> = ThreadId）；
+    /// 默认状态初始化器：优先采用宿主 <see cref="SqliteAgentSessionStore"/> 写入会话 StateBag 的共享键值
+    /// （<see cref="AguiSessionStateKeys.ConversationId"/>，当前实现 = 当前用户名）作为 <c>conversation_id</c>；
     /// 未接线（纯单测直构 provider / 会话 StateBag 无该键）时回退生成 GUID，保证不崩。
     /// </summary>
     private static State DefaultStateInitializer(AgentSession? session)
@@ -390,7 +435,21 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
     private async Task EnsureInitializedAsync(CancellationToken cancellationToken)
         => await InitializeAsync(cancellationToken).ConfigureAwait(false);
 
-    /// <summary>读当前会话已落库的 <c>MAX(sequence)</c> 与 <c>MAX(round_id)</c>（均只看非删除行，design §3.2）。</summary>
+    /// <summary>
+    /// 读当前会话的 <c>MAX(sequence)</c> 与 <c>MAX(round_id)</c>，<b>含已软删行</b>——供续号 / 续轮使用。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>此处必须统计全部行，不得加 <c>is_deleted = 0</c> 过滤</b>：<c>UNIQUE(conversation_id, sequence)</c>
+    /// 不含该列，软删行<b>仍占用序号</b>。若只统计未删行，整会话被 TTL 软删后会从 <c>sequence = 1</c> 重新起号
+    /// 去撞那些占位的软删行，且重试时重复读到同一个 <c>MAX</c> → 3 次全撞 → 永久写入失败
+    /// （软删行不会被物理清理，故该状态不会自愈）。<c>round_id</c> 同理：跨软删继续递增，避免新轮与旧轮重号。
+    /// </para>
+    /// <para>
+    /// 「软删行不可见」是<b>读取</b>侧的语义（<see cref="FindExpiredRoundsAsync"/> 等按 <c>is_deleted = 0</c> 过滤），
+    /// 不能外推到<b>序号空间</b>——序号空间的占用者包含软删行。两处口径必须与 UNIQUE 约束保持一致。
+    /// </para>
+    /// </remarks>
     private async Task<(int MaxSequence, int CurrentRound)> GetMaxSequenceAndRoundAsync(
         string conversationId, CancellationToken cancellationToken)
     {
@@ -401,7 +460,7 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
             """
             SELECT COALESCE(MAX(sequence), 0), COALESCE(MAX(round_id), 0)
             FROM chat_messages
-            WHERE conversation_id = $conversationId AND is_deleted = 0
+            WHERE conversation_id = $conversationId
             """;
         command.Parameters.AddWithValue("$conversationId", conversationId);
 
@@ -451,7 +510,7 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
     /// <c>round_id</c> 口径以 design §2.3 示例表为准：从 1 起，仅遇到 <see cref="ChatRole.User"/> 时递增；
     /// 新会话（<c>currentRound=0</c>）的前导非 User 消息（如 <c>system</c>）归第 1 轮，故插入时对 <c>round==0</c>
     /// 归一为 1（修正 design §3.1 代码会产出 <c>round_id=0</c> 与 §2.3 示例表矛盾之处）。
-    /// 返回实际落库的（轮 id, 消息）列表，供 <see cref="StoreChatHistoryAsync"/> 同步会话缓存。
+    /// 落库条数已无消费者（「只存不取」后不再需要回填），故本方法无返回值。
     /// </remarks>
     private async Task<List<CachedMessage>> InsertMessagesWithRetryAsync(
         string conversationId, IReadOnlyList<ChatMessage> messages, CancellationToken cancellationToken)
@@ -492,7 +551,6 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
                     command.Parameters.AddWithValue("$roundId", effectiveRound);
                     command.Parameters.AddWithValue("$createdAt", createdAt);
                     await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-
                     stored.Add(new CachedMessage(effectiveRound, message));
                 }
 
@@ -512,10 +570,23 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
             $"会话 {conversationId} 的聊天历史写入在 {maxRetries} 次重试后仍因 sequence 冲突失败。");
     }
 
+    /// <summary>缓存中涉及的轮 id 列表（升序、去重）。</summary>
+    private static List<int> CacheRounds(IReadOnlyList<CachedMessage> messages)
+        => messages.Select(m => m.RoundId).Distinct().ToList();
+
+    private static void TrimToRounds(List<CachedMessage> messages, int maxRounds)
+    {
+        var rounds = CacheRounds(messages);
+        if (rounds.Count <= maxRounds) return;
+        var keepFrom = rounds[^maxRounds];
+        messages.RemoveAll(m => m.RoundId < keepFrom);
+    }
+
     /// <summary>
-    /// 会话状态：承载会话标识（<see cref="ConversationId"/>）与会话内历史缓存（<see cref="Messages"/>）。
+    /// 会话状态：<b>只承载会话标识</b>（<see cref="ConversationId"/>）。
     /// 经 <see cref="ProviderSessionState{TState}"/> 存 <see cref="AgentSession.StateBag"/>，随会话快照持久化
-    /// （镜像官方 <c>ValkeyChatHistoryProvider.State</c> / 老 <c>SqliteChatHistoryProvider.State</c> 的会话内缓存模式）。
+    /// （跨请求 / 重启稳定）。原会话内历史缓存（<c>messages</c> 键）随「只存不取」定型删除；旧快照里多余的
+    /// <c>messages</c> 键在反序列化时被 <see cref="JsonSerializer"/> 忽略（未知属性），无需迁移。
     /// </summary>
     public sealed class State
     {
@@ -533,20 +604,15 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
         public string ConversationId { get; }
 
         /// <summary>
-        /// 会话内缓存：provider 已拥有的历史消息（含所属轮 id）。用途：(1) <see cref="ProvideChatHistoryAsync"/>
-        /// 免重复查库；(2) <see cref="StoreChatHistoryAsync"/> 判定「客户端重发的是既有历史」以免重复落库。
-        /// 规模受 <see cref="SqlChatHistoryOptions.MaxRoundsToLoad"/> 约束（按轮截断）。
+        /// 最近 N 轮消息缓存（受 MaxRoundsToLoad 约束）。重启后可恢复，不需查库。
         /// </summary>
         [JsonPropertyName("messages")]
         public List<CachedMessage> Messages { get; set; } = [];
     }
 
-    /// <summary>会话内缓存的历史消息：消息本体 + 所属轮 id（用于按 <see cref="SqlChatHistoryOptions.MaxRoundsToLoad"/> 整轮截断与活跃轮比对）。</summary>
+    /// <summary>缓存项：消息本体 + 所属轮次 id。</summary>
     public sealed class CachedMessage
     {
-        /// <summary>初始化缓存项。</summary>
-        /// <param name="roundId">该消息所属轮次 id。</param>
-        /// <param name="message">消息本体。</param>
         [JsonConstructor]
         public CachedMessage(int roundId, ChatMessage message)
         {
@@ -554,11 +620,9 @@ public sealed class SqlChatHistoryProvider : ChatHistoryProvider, IChatHistoryCl
             Message = message ?? throw new ArgumentNullException(nameof(message));
         }
 
-        /// <summary>获取该消息所属轮次 id。</summary>
         [JsonPropertyName("roundId")]
         public int RoundId { get; }
 
-        /// <summary>获取消息本体。</summary>
         [JsonPropertyName("message")]
         public ChatMessage Message { get; }
     }

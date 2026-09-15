@@ -46,8 +46,7 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
         _connectionString = $"Data Source={_dbPath}";
         var options = new AIShop.Service.Agui.SqlChatHistoryOptions
         {
-            ConnectionString = _connectionString,
-            MaxRoundsToLoad = 2
+            ConnectionString = _connectionString
         };
         // 注入确定性会话标识（默认初始化器生成 GUID，测试需要可断言的稳定 id）。
         _provider = new AIShop.Service.Agui.SqlChatHistoryProvider(
@@ -266,29 +265,116 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
         Assert.All(ReadRows(), r => Assert.False(r.IsDeleted));
     }
 
+    [Fact]
+    public async Task Store_AfterTtlSoftDeletesEntireConversation_NextRoundStillWrites()
+    {
+        // 请求流程闭环：整会话过期被 TTL【整轮软删】后，同一用户的下一条消息仍必须能落库。
+        // TTL 清理只置 is_deleted=1，行还占着 (conversation_id, sequence)；而 UNIQUE 约束不含 is_deleted。
+        // 会话快照侧是【硬删】（agent_sessions 行没了、用户回来建新会话），但 conversation_id 两边都等于用户名
+        // —— 所以历史的「重置」并不存在，新轮必须在既有序号之后续号，不能回到 1 去撞软删行。
+        await StoreSimpleRound("旧问题", "旧回答");
+        BackdateRound(1, DateTimeOffset.Now.AddDays(-100));
+
+        Assert.Equal(1, await _provider.CleanupExpiredRoundsAsync(ttlDays: 30));
+        Assert.All(ReadRows(), r => Assert.True(r.IsDeleted)); // 前置：该会话已无任何可写序号
+
+        // 30 天后该用户再次请求（客户端仍带本地历史重发，落到同一 conversation_id）
+        await InvokeStoreAsync(
+            _session,
+            [
+                new ChatMessage(ChatRole.User, "旧问题"),
+                new ChatMessage(ChatRole.Assistant, "旧回答"),
+                new ChatMessage(ChatRole.User, "新问题"),
+            ],
+            [new ChatMessage(ChatRole.Assistant, "新回答")]);
+
+        var rows = ReadRows();
+        var fresh = rows.Where(r => !r.IsDeleted).ToList();
+        Assert.Equal(new[] { "新问题", "新回答" }, fresh.Select(r => r.Text));
+        Assert.Equal(2, Assert.Single(fresh, r => r.Role == "user").RoundId); // 轮次继续递增，不与旧轮重号
+        Assert.True(
+            fresh.Min(r => r.Sequence) > 2,
+            "新轮序号必须避开已软删行占用的 1..2，否则撞 UNIQUE(conversation_id, sequence)");
+    }
+
     // ---------- 事务原子性 ----------
 
     [Fact]
     public async Task Store_BatchConflictsWithExistingUniqueSequence_RollsBackWholeBatchAndThrows()
     {
-        // 预置一条【软删除】行占用 sequence=2（不进 MAX 计算、读取不可见，但仍受 UNIQUE(conversation_id, sequence) 约束）。
-        // 随后写入一批 3 条（当前轮次的 1 条 user + 2 条响应）：第 1 条 seq=1 成功，第 2 条 seq=2 触发 UNIQUE 冲突
-        // → 整批回滚 + 乐观重试 3 次后抛异常。断言：第 1 条也被回滚（非删除行 0 条），证明确有事务原子性。
-        // （当前轮次按位置取「最后一条 user 起」，故多条消息须由 user + 响应构成，不能是 3 条连续 user。）
+        // 乐观重试的触发前提是【取号之后、插入之前】有别人抢走同一序号。修复「软删行不进 MAX」之后，
+        // 预置行会被 MAX 看见、新批次自动从它之后起号，再也撞不上——旧版本条测试正是靠那个缺陷搭的台子，
+        // 故改用 SQLite trigger 模拟真并发：批次插入 seq=1 时，「另一位写入者」立刻占掉 seq=2。
+        // 于是批次插到第 2 条撞 UNIQUE(conversation_id, sequence) → 整批回滚 → 重试 3 次仍被 trigger 重现冲突
+        // → 抛 InvalidOperationException。断言回滚彻底：一行不留（trigger 那行同事务，一并回滚）。
         await _provider.InitializeAsync();
         ExecuteSql(
-            "INSERT INTO chat_messages (conversation_id, sequence, role, message_json, round_id, is_deleted, deleted_at, created_at) " +
-            "VALUES ($c, 2, 'user', '{}', 1, 1, $now, $now)",
-            ("$c", _conversationId),
-            ("$now", DateTimeOffset.Now.ToString("O")));
+            """
+            CREATE TRIGGER simulate_concurrent_writer
+            AFTER INSERT ON chat_messages
+            WHEN NEW.sequence = 1
+            BEGIN
+                INSERT INTO chat_messages (conversation_id, sequence, role, message_json, round_id, created_at)
+                VALUES (NEW.conversation_id, 2, 'user', '{}', 1, NEW.created_at);
+            END
+            """);
 
+        // 当前轮次 = 1 条 user + 2 条响应 → 批次写 seq 1/2/3，第 2 条即撞上 trigger 占掉的 seq=2。
         await Assert.ThrowsAsync<InvalidOperationException>(() => InvokeStoreAsync(
             _session,
             [new ChatMessage(ChatRole.User, "第一条")],
             [new ChatMessage(ChatRole.Assistant, "第二条"), new ChatMessage(ChatRole.Assistant, "第三条")]));
 
-        var nonDeleted = ReadRows().Count(r => !r.IsDeleted);
-        Assert.Equal(0, nonDeleted); // 第 1 条 seq=1 已随整批回滚，未被部分写入
+        Assert.Empty(ReadRows()); // 整批 + trigger 行同事务回滚，未留任何部分写入
+    }
+
+    // ---------- 生产场景：同一用户并发请求 ----------
+
+    [Fact]
+    public async Task Store_ConcurrentRequestsForSameConversation_AllSucceed()
+    {
+        // conversation_id = 用户名，故同一用户的并发请求（两个 tab / 并发 run / 客户端重试）共用同一序号空间
+        // 与同一个 SQLite 写锁。所有批次都从同一个 MAX(sequence) 取号 → 必然互相争抢。
+        // 断言：全部成功、序号无重复、一轮不丢。
+        const int concurrency = 16;
+
+        var tasks = Enumerable.Range(0, concurrency)
+            .Select(i => InvokeStoreAsync(
+                _session,
+                [new ChatMessage(ChatRole.User, $"问题{i}")],
+                [new ChatMessage(ChatRole.Assistant, $"回答{i}")]))
+            .ToArray();
+
+        await Task.WhenAll(tasks); // 任一批次失败即在此抛出
+
+        var rows = ReadRows();
+        Assert.Equal(concurrency * 2, rows.Count);
+        Assert.Equal(rows.Count, rows.Select(r => r.Sequence).Distinct().Count());
+    }
+
+    // ---------- 落库失败兜底：不得中断请求 ----------
+
+    [Fact]
+    public async Task InvokedAsync_WhenStoreThrows_DoesNotPropagate()
+    {
+        // 落库失败（连接串指向不存在的目录 → 库打不开）不得上抛。流式路径下 provider 通知发生在【所有 yield
+        // 之后】，上抛会让「答复已完整吐出」的流异常断开：RUN_FINISHED 不发出、端点侧 SaveSessionAsync 也不执行。
+        // 兜底后只记 Error 日志、请求继续（代价是该轮静默不入库，见 InvokedCoreAsync 的 remarks）。
+        var brokenDbPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "nope.db");
+        var provider = new AIShop.Service.Agui.SqlChatHistoryProvider(
+            new AIShop.Service.Agui.SqlChatHistoryOptions { ConnectionString = $"Data Source={brokenDbPath}" },
+            _ => new AIShop.Service.Agui.SqlChatHistoryProvider.State(_conversationId));
+
+        var context = new ChatHistoryProvider.InvokedContext(
+            Substitute.For<AIAgent>(),
+            _session,
+            [new ChatMessage(ChatRole.User, "问题")],
+            [new ChatMessage(ChatRole.Assistant, "回答")]);
+
+        var exception = await Record.ExceptionAsync(
+            () => provider.InvokedAsync(context).AsTask());
+
+        Assert.Null(exception); // 断言：落库失败被兜底，异常未上抛
     }
 
     // ---------- 幂等 / 重复写入不产生重复行 ----------
@@ -415,6 +501,51 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
         Assert.Equal(new[] { threadId }, ReadConversationIds());
     }
 
+    // ---------- 会话内缓存：装入 / 随快照恢复 / 按轮截断 ----------
+
+    [Fact]
+    public async Task Cache_LoadsOnStore_SurvivesRestart_AndTrimsToMaxRounds()
+    {
+        // 第 1 轮 → 缓存装入本轮消息
+        await StoreSimpleRound("问题1", "回答1");
+        Assert.Equal(new[] { "问题1", "回答1" }, ReadCachedMessages(_session).Select(m => m.Text));
+
+        // StateBag 序列化往返（模拟宿主重启）→ 缓存随会话快照恢复，新的 provider 实例继续写
+        using var document = JsonDocument.Parse(_session.StateBag.Serialize().GetRawText());
+        var restored = new TestSession(AgentSessionStateBag.Deserialize(document.RootElement));
+        var provider2 = NewProvider(_conversationId);
+
+        await InvokeStoreAsync(provider2, restored,
+            [new ChatMessage(ChatRole.User, "问题2")],
+            [new ChatMessage(ChatRole.Assistant, "回答2")]);
+
+        // MaxRoundsToLoad 默认 2 → 两轮都在窗口内，未截断
+        Assert.Equal(new[] { "问题1", "回答1", "问题2", "回答2" },
+            ReadCachedMessages(restored).Select(m => m.Text));
+
+        await InvokeStoreAsync(provider2, restored,
+            [new ChatMessage(ChatRole.User, "问题3")],
+            [new ChatMessage(ChatRole.Assistant, "回答3")]);
+
+        // 第 3 轮越窗 → 截到最近 2 轮，最旧的「问题1/回答1」被丢弃
+        Assert.Equal(new[] { "问题2", "回答2", "问题3", "回答3" },
+            ReadCachedMessages(restored).Select(m => m.Text));
+    }
+
+    [Fact]
+    public async Task Provide_IgnoresSessionCache_AlwaysReturnsEmpty()
+    {
+        // 可证伪前提：缓存【确有内容】（上一条路径已验证），Provide 仍返回空——
+        // 证明缓存不参与模型上下文，即「只存不取」在注入侧成立。
+        await StoreSimpleRound("问题", "回答");
+        Assert.NotEmpty(ReadCachedMessages(_session));
+
+        var provided = await InvokeProvideAsync(
+            _provider, _session, [new ChatMessage(ChatRole.User, "新问题")]);
+
+        Assert.Empty(provided);
+    }
+
     // ---------- 只处理「当前轮次」（纯位置判定）：客户端重发整段前文不重复入库 ----------
 
     [Fact]
@@ -450,11 +581,11 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
     }
 
     [Fact]
-    public async Task Store_ClientResendsHistoryBeyondCacheWindow_StillDeduplicates()
+    public async Task Store_ClientResendsDeepHistory_StoresOnlyCurrentTurn()
     {
-        // 客户端重发的历史超过 MaxRoundsToLoad 缓存窗口（默认 2 轮）、且 id 与库中全不同时，
-        // 仍只落库当前轮新增（位置判定与缓存窗口无关）。
-        const string conversationId = "conv-beyond-window";
+        // 客户端重发的历史深于当前轮（含 3 个完整旧轮）、且 id 与库中全不同时，仍只落库当前轮新增
+        // （纯按位置判定，与历史深度无关）。
+        const string conversationId = "conv-deep-history";
 
         var provider = NewProvider(conversationId);
         var session = new TestSession();
@@ -547,6 +678,53 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
 
         Assert.Same(resolved, agent.ChatHistoryProvider);
         Assert.IsNotType<InMemoryChatHistoryProvider>(agent.ChatHistoryProvider);
+    }
+
+    [Fact]
+    public void AddAguiChatHistoryProvider_BindsCleanupKeysFromAguiSection()
+    {
+        // 清理参数可从配置改：Agui:TtlDays / Agui:CleanupBatchSize。此前只设连接串、这两个值恒为类默认
+        // 且无从更改——而数据量最大的 chat_messages 正归它管（运维改 Agui:SessionTtlDays 不会影响它）。
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [AguiChatHistoryDependencyInjection.ProviderConfigKey] = AguiChatHistoryDependencyInjection.SqlProviderValue,
+                ["Agui:TtlDays"] = "7",
+                ["Agui:CleanupBatchSize"] = "3"
+            })
+            .Build();
+
+        var services = new ServiceCollection();
+        services.AddAguiChatHistoryProvider(config, _connectionString);
+        using var sp = services.BuildServiceProvider();
+
+        var options = sp.GetRequiredService<AIShop.Service.Agui.SqlChatHistoryOptions>();
+        Assert.Equal(7, options.TtlDays);
+        Assert.Equal(3, options.CleanupBatchSize);
+
+        // 连接串仍以显式参数（Agui:ChatConnection seam）为唯一来源，不被节绑定干扰
+        Assert.Equal(_connectionString, options.ConnectionString);
+    }
+
+    [Fact]
+    public void AddAguiChatHistoryProvider_WithoutCleanupKeys_KeepsClassDefaults()
+    {
+        // 未配置清理参数时保持类默认（30 天 / 每批 10 轮），行为零变化。
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [AguiChatHistoryDependencyInjection.ProviderConfigKey] = AguiChatHistoryDependencyInjection.SqlProviderValue
+            })
+            .Build();
+
+        var services = new ServiceCollection();
+        services.AddAguiChatHistoryProvider(config);
+
+        using var sp = services.BuildServiceProvider();
+        var options = sp.GetRequiredService<AIShop.Service.Agui.SqlChatHistoryOptions>();
+
+        Assert.Equal(AIShop.Service.Agui.SqlChatHistoryOptions.DefaultTtlDays, options.TtlDays);
+        Assert.Equal(AIShop.Service.Agui.SqlChatHistoryOptions.DefaultCleanupBatchSize, options.CleanupBatchSize);
     }
 
     // ---------- helpers ----------
@@ -659,6 +837,21 @@ public sealed class SqlChatHistoryProviderTests : IDisposable
         }
 
         return messages;
+    }
+
+    /// <summary>从会话 StateBag 读回本 provider 自己键下的缓存消息（不经 Provide——它恒空，读不到缓存）。</summary>
+    private static List<ChatMessage> ReadCachedMessages(AgentSession session)
+    {
+        using var document = JsonDocument.Parse(session.StateBag.Serialize().GetRawText());
+        var stateKey = nameof(AIShop.Service.Agui.SqlChatHistoryProvider);
+        Assert.True(
+            document.RootElement.TryGetProperty(stateKey, out var stateElement),
+            $"会话 StateBag 应含 {stateKey} 键");
+
+        var state = JsonSerializer.Deserialize<AIShop.Service.Agui.SqlChatHistoryProvider.State>(
+            stateElement.GetRawText(), AgentAbstractionsJsonUtilities.DefaultOptions);
+        Assert.NotNull(state);
+        return state!.Messages.Select(m => m.Message).ToList();
     }
 
     private void BackdateRound(int roundId, DateTimeOffset createdAt)
