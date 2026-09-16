@@ -13,8 +13,10 @@ namespace AIShop.Service.Agui;
 /// <summary>
 /// AGUIShoppingAgent 装配（agui-host T4 + T8）：从零设计的新购物 <see cref="ChatClientAgent"/>。
 /// 形态 = <c>chatClient.AsAIAgent(name: "AGUIShopping", instructions, tools)</c>（T8 起经
-/// <see cref="ChatClientAgentOptions"/> 重载构造，等价于位置签名并额外挂 AIContextProviders），工具复用
-/// <see cref="CartToolProvider.CreateTools()"/>（5 购物工具，与老 Agent 同源）。
+/// <see cref="ChatClientAgentOptions"/> 重载构造，等价于位置签名并额外挂 AIContextProviders），购物工具复用
+/// <see cref="CartToolProvider.CreateTools()"/>（5 购物 + 3 通用，与老 Agent 同源）；T7 起推荐的
+/// <c>recommend_products</c> 以独立 <see cref="RecommendationToolProvider"/> 追加（共 9 个工具），
+/// <see cref="CartToolProvider.CreateTools"/> 的返回集合零改动。
 /// 会话由 AG-UI <c>AgentSessionStore</c>（ThreadId）承载，无自管 session 字典、无 StateBag 偏好注入；
 /// 不复用旧 ShoppingAssistantAgent 的 HarnessAgent 外壳与 <c>Reply + Keywords + Preferences</c> JSON 回复协议。
 /// T8 起装配 <see cref="CompactionProvider"/> 上下文压缩（阈值对齐老 ShoppingAssistantAgent），见 Create 内注释。
@@ -53,6 +55,7 @@ public static class AGUIShoppingAgent
         - update_cart_quantity：把购物车中某商品的数量设置成用户要求的最终值（如「只要 2 件」）。
         - get_cart_summary：查看当前购物车的内容与合计。
         - remove_from_cart：从购物车移除某个商品条目。
+        - recommend_products：获取结合当前对话内容与用户偏好的商品推荐（用于推荐面板展示）。
 
         请遵循以下工作方式：
         1. 用户提出购物/寻找请求 → 先 search_product，命中后在回复中说明商品名称与价格（不要在回复中出现商品内部编号），再按用户意图推进购买。
@@ -62,7 +65,11 @@ public static class AGUIShoppingAgent
         4. 每次执行工具后给用户一句自然的文字反馈（加购成功、车内现有商品等），不要沉默，也不要用冗长解释替代行动。
         5. 用户身份与购物车由系统自动关联，无需向用户询问任何登录信息。
 
-        6. 面向用户的回复输出规约（用户明确要求，优先级最高）：
+        6. 用户表达「推荐点什么 / 看看有什么 / 有没有好的」这类**推荐类意图**时，调用 recommend_products
+           （把用户当前想问的内容作为 query 传入），再基于返回结果用自然语言介绍；**不要每轮都调用它**——
+           单次请求的工具调用次数有限（3 次），无谓调用会挤占 search_product 等必要调用的机会。
+
+        7. 面向用户的回复输出规约（用户明确要求，优先级最高）：
            - 一律为简体中文纯文本，禁止任何 Markdown 标记：不要用加粗或斜体（**、*、__），
              不要用列表符号（-、*、数字加点的项目列表），不要用标题（#），不要用代码块（```）。
            - 简洁自然：每执行完一步工具后，紧跟一句自然的文字说明结果（如「已为您加入购物车」「购物车当前共 1 件，合计 ¥129.99」），
@@ -91,6 +98,13 @@ public static class AGUIShoppingAgent
     /// 由宿主按配置 <c>Agui:ChatHistoryProvider == "Sql"</c> 经 <see cref="AguiChatHistoryDependencyInjection.AddAguiChatHistoryProvider"/>
     /// 注册并注入；null（未配置 / 非 Sql）时不设置，<see cref="ChatClientAgent"/> 退回 MAF 默认
     /// <c>InMemoryChatHistoryProvider</c>（既有行为零变化）。</param>
+    /// <param name="recommendationTools">推荐工具 provider（agui-client-support T7，可选）。非 null 时把其
+    /// <see cref="RecommendationToolProvider.CreateTools"/> 的商品推荐工具**追加**在
+    /// <see cref="CartToolProvider.CreateTools"/> 之后（最终 9 个工具：5 购物 + 3 通用 + <c>recommend_products</c>）；
+    /// null 时维持仅购物工具。新增能力一律走独立 provider 追加，<b>不得</b>改
+    /// <see cref="CartToolProvider.CreateTools"/> 的返回集合（老 <c>ShoppingAssistantAgent</c> 与之同源）。
+    /// ⚠️ <c>Program.cs</c> 的 keyed agent 工厂是唯一生产调用点，漏传该实参则工具静默不挂载
+    /// （编译通过、工具集仍为 8），由宿主级 <c>RecommendationToolMountingTests</c> 锁定。</param>
     /// <returns>装配完成的新购物 Agent（<see cref="ChatClientAgent"/> 经 <c>AgentTelemetry.Instrument</c> 包装，
     /// 运行时类型为 <c>OpenTelemetryAgent</c>；Level=None 时裸返回 <see cref="ChatClientAgent"/>，由 AG-UI AgentSessionStore 承载会话）。</returns>
     public static AIAgent Create(
@@ -101,7 +115,8 @@ public static class AGUIShoppingAgent
         IMemoryService? memoryService = null,
         ICurrentUserAccessor? currentUser = null,
         CompactionStrategy? compactionStrategy = null,
-        ChatHistoryProvider? chatHistoryProvider = null)
+        ChatHistoryProvider? chatHistoryProvider = null,
+        RecommendationToolProvider? recommendationTools = null)
     {
         var instructions = instructionsOverride ?? DefaultInstructions;
 
@@ -131,14 +146,20 @@ public static class AGUIShoppingAgent
 
         // AG-UI 官方宿主形态：位置签名 AsAIAgent(instructions, name, description, tools, ...) 实为包一层
         // ChatClientAgentOptions；这里直接构造 ChatClientAgentOptions（Name/ChatOptions/AIContextProviders），
-        // 以便把压缩/记忆 provider 经 AIContextProviders 挂入。ChatOptions.Tools 承载 5 购物工具。
+        // 以便把压缩/记忆 provider 经 AIContextProviders 挂入。ChatOptions.Tools 承载购物工具。
+        // T7：推荐工具以【独立 provider 追加】方式拼在购物工具之后（cartTools 的位置与语义不变，既有调用点源码兼容）；
+        // cartTools.CreateTools() 的返回集合零改动——老 ShoppingAssistantAgent 与之同源，往其中加工具会让老链长出计划外工具。
+        var tools = recommendationTools is null
+            ? cartTools.CreateTools()
+            : [.. cartTools.CreateTools(), .. recommendationTools.CreateTools()];
+
         var options = new ChatClientAgentOptions
         {
             Name = AgentName,
             ChatOptions = new ChatOptions
             {
                 Instructions = instructions,
-                Tools = cartTools.CreateTools()
+                Tools = tools
             },
             AIContextProviders = contextProviders,
             // 聊天历史 provider（§7 迁移路径第 1 条）：非 null 时用宿主按配置选定的持久化 provider；

@@ -3,7 +3,6 @@ using System.Text;
 using System.Text.Json.Nodes;
 using AIShop.AguiHost;
 using AIShop.AguiHost.Model;
-using AIShop.Infrastructure.MemoryService;
 using AIShop.Service;
 using AIShop.Service.Agui;
 using Mem0Sharp;
@@ -36,8 +35,9 @@ public sealed class AguiE2ETestsCollection;
 /// 隔离：Program.cs T16 seam 读可选配置键 <c>Agui:DbConnection</c> / <c>Agui:RagConnection</c> / <c>Agui:SessionConnection</c>
 /// （实测 ConfigureAppConfiguration 不达 Program 顶层读取，故经同名环境变量 <c>Agui__*Connection</c> 注入临时库路径——
 /// WebApplicationBuilder 在 CreateBuilder 阶段读环境变量，早于 Program 顶层读取 seam；缺省键行为零变化由既有测试回回归）。
-/// 另 RemoveAll Mem0 记忆服务三件套（IMemoryService/IMemoryStore/SqliteMemoryStore）——记忆链路会用全局纯净
-/// IChatClient（= stub 工厂脚本化 mock）做 LLM 提取，避免 mock 被非 Agent 调用路径污染（记忆非验收 2/3 范围）。
+/// 另 RemoveAll Mem0 记忆服务（IMemoryService）——记忆链路会用全局纯净 IChatClient（= stub 工厂脚本化 mock）
+/// 做 LLM 提取，避免 mock 被非 Agent 调用路径污染（记忆非验收 2/3 范围）。IMemoryStore/SqliteMemoryStore **不**移除：
+/// 它们无 LLM 调用，且 T7 起 recommend_products 工具依赖 IMemoryStore（移除会让 keyed agent 工厂解析失败）。
 /// </summary>
 [Collection(nameof(AguiE2ETests))]
 public sealed class AguiE2ETests : IDisposable
@@ -196,8 +196,8 @@ public sealed class AguiE2ETests : IDisposable
     /// <summary>
     /// 装配 WAF：以 <see cref="MockToolChatClient"/> 作所有 modelId 的底层（<see cref="IModelChatClientFactory"/> stub，
     /// C5 seam——agent 聊天底层经 RouterChatClient → 工厂），并经 Program.cs T16 seam 环境变量注入临时业务/向量/会话库。
-    /// 同时 RemoveAll Mem0 记忆服务（IMemoryService/IMemoryStore/SqliteMemoryStore）：记忆链会用全局纯净 IChatClient
-    /// 做 LLM 提取，避免脚本化工具 mock 被非 Agent 路径调用污染；记忆非验收 2/3 范围，移除不改变断言语义。
+    /// 同时 RemoveAll Mem0 <c>IMemoryService</c>：记忆链会用全局纯净 IChatClient 做 LLM 提取，避免脚本化工具 mock
+    /// 被非 Agent 路径调用污染；记忆非验收 2/3 范围，移除不改变断言语义（记忆存储为何保留见 StartFactory 内注释）。
     /// </summary>
     private WebApplicationFactory<Program> StartFactory(MockToolChatClient mock)
     {
@@ -225,11 +225,12 @@ public sealed class AguiE2ETests : IDisposable
                     services.RemoveAll<IModelChatClientFactory>();
                     services.AddSingleton<IModelChatClientFactory>(new StubModelChatClientFactory(mock));
 
-                    // 移除 Mem0 记忆服务（见上方注释）；记忆模型（Models/bge-small-zh-v1.5）与语义检索共享同名目录但
-                    // 记忆非本测试范围——移除使 mock 只服务 Agent 工具链路，避免 LlmMemoryExtractor 等非预期调用。
+                    // 只移除 IMemoryService（见上方注释）：它一旦被解析，AGUIShopping 就会挂 MemoryContextProvider，
+                    // 记忆链会用全局纯净 IChatClient（= 脚本化 mock）做 LLM 提取 → 污染 mock。
+                    // IMemoryStore / SqliteMemoryStore 保持注册：它们不做任何 LLM 调用，且 T7 起 AGUIShopping 的
+                    // recommend_products 工具（RecommendationToolProvider）依赖 IMemoryStore——一并移除会让 keyed
+                    // agent 工厂无法解析（Development 下 DI ValidateOnBuild 直接报错，宿主起不来）。
                     services.RemoveAll<IMemoryService>();
-                    services.RemoveAll<IMemoryStore>();
-                    services.RemoveAll<SqliteMemoryStore>();
                 });
             });
 

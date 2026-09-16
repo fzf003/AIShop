@@ -101,7 +101,11 @@ try
             memoryService: ResolveMemoryService(sp),
             currentUser: sp.GetRequiredService<ICurrentUserAccessor>(),
             compactionStrategy: sp.GetRequiredService<ContextWindowCompactionStrategy>(),
-            chatHistoryProvider: sp.GetService<SqlChatHistoryProvider>())
+            chatHistoryProvider: sp.GetService<SqlChatHistoryProvider>(),
+            // agui-client-support T7：推荐工具 provider 必须显式传入——本 keyed factory 是 Create 的【唯一生产装配点】，
+            // 漏传则该可选参为 null、recommend_products 静默不挂载（编译通过、工具集退化为 8）。用【具名实参】避免与
+            // 上方其它可选参按位置错位；由宿主级 RecommendationToolMountingTests（解析 keyed AIAgent 读工具集）锁定。
+            recommendationTools: sp.GetRequiredService<RecommendationToolProvider>())
         );
 
      // 解析 Mem0 记忆服务（IMemoryService）。IMemoryService 单例构造会 new LocalBgeEmbeddingGenerator(modelDir)

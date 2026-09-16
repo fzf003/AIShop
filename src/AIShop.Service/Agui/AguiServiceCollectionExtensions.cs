@@ -70,6 +70,14 @@ public static class AguiServiceCollectionExtensions
         // 购物工具工厂（5 购物工具复用，与老 Agent 同源）：注入 IServiceScopeFactory + ICurrentUserAccessor + IProductSemanticSearch
         services.AddSingleton<CartToolProvider>();
 
+        // 推荐工具工厂（agui-client-support T7）：向 AGUIShopping 追加 recommend_products（独立 provider，不改
+        // CartToolProvider.CreateTools() 的返回集合）。依赖 = IServiceScopeFactory（scope 解析 Scoped 的
+        // RecommendationService/IProductCatalogService）+ ICurrentUserAccessor + IMemoryStore + IMemoryCache——
+        // 后两者由本方法内 AddMemoryService 与 AddInfrastructure(AddMemoryCache) 注册（生产恒可解析）；
+        // 主构造为纯委托持有、不触碰 DB，故注册为 Singleton 与 CartToolProvider 同款（真正的 DB/记忆读取
+        // 发生在工具被调用时，经 scope 解析的 Scoped 服务完成）。
+        services.AddSingleton<RecommendationToolProvider>();
+
         // C5（agui-model-switch，M4 收口装配面）：AguiHost 自建「模型 → 底层客户端」工厂 + 逐轮选模型上下文/
         // 委托客户端，取代老 Service ModelRouter 作为 AguiHost 的模型 seam（老 ModelRouter 零改动、本宿主不再注册）。
         //  - IModelChatClientFactory/AguiModelClientFactory：读 Models 节 + ActiveModel 缺省；每模型底层懒建缓存 +

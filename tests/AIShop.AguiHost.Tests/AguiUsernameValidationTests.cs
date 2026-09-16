@@ -5,7 +5,6 @@ using AIShop.AguiHost;
 using AIShop.AguiHost.Model;
 using AIShop.Core.Entities;
 using AIShop.Core.Interfaces;
-using AIShop.Infrastructure.MemoryService;
 using AIShop.Service;
 using AIShop.Service.Agui;
 using Mem0Sharp;
@@ -234,9 +233,10 @@ public sealed class AguiUsernameValidationTests : IDisposable
     /// <see cref="ICurrentUserAccessor"/> 替身（记录读库次数与 SetCurrentUser 调用）。
     /// </summary>
     /// <remarks>
-    /// 同时 RemoveAll Mem0 记忆服务三件套（<see cref="IMemoryService"/> / <see cref="IMemoryStore"/> /
-    /// <c>SqliteMemoryStore</c>）：记忆链会用全局纯净 <c>IChatClient</c>（= 脚本化 mock）做 LLM 提取，
-    /// 移除后 mock 只服务 Agent 工具链路，且不产生额外记忆库文件——记忆不属于本工单断言语义。
+    /// 同时 RemoveAll Mem0 <c>IMemoryService</c>：记忆链会用全局纯净 <c>IChatClient</c>（= 脚本化 mock）做 LLM 提取，
+    /// 移除后 mock 只服务 Agent 工具链路。记忆存储（<c>IMemoryStore</c> / <c>SqliteMemoryStore</c>）**不**移除——
+    /// 它们无 LLM 调用，且 T7 起 <c>recommend_products</c> 工具依赖 <c>IMemoryStore</c>（移除会让 keyed agent
+    /// 工厂解析失败、宿主起不来）。
     /// 环境变量在 <c>CreateClient()</c>（触发 host 构建、Program 顶层读取 seam 的时点）之后立即恢复，防进程级污染。
     /// </remarks>
     private WebApplicationFactory<Program> StartFactory()
@@ -271,9 +271,12 @@ public sealed class AguiUsernameValidationTests : IDisposable
                     services.RemoveAll<ICurrentUserAccessor>();
                     services.AddSingleton<ICurrentUserAccessor>(_accessor);
 
+                    // 只移除 IMemoryService（见上方 remarks）：它一旦被解析，AGUIShopping 就会挂 MemoryContextProvider，
+                    // 记忆链用全局纯净 IChatClient（= 脚本化 mock）做 LLM 提取 → 污染 mock 调用计数。
+                    // IMemoryStore / SqliteMemoryStore 保持注册：它们不做任何 LLM 调用，且 T7 起 recommend_products
+                    // 工具依赖 IMemoryStore——一并移除会让 keyed agent 工厂无法解析（Development 下 DI ValidateOnBuild
+                    // 直接报错，宿主起不来）。
                     services.RemoveAll<IMemoryService>();
-                    services.RemoveAll<IMemoryStore>();
-                    services.RemoveAll<SqliteMemoryStore>();
                 });
             });
 
