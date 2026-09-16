@@ -134,6 +134,11 @@ try
     // 映射为 AG-UI SSE 端点 "/"，保持 T5 装配语义（MapAGUIServer 请求管线、username 中间件顺序）不回退。
     app.MapAGUIServer(AGUIShoppingAgent.AgentName, "/");
 
+    // agui-client-support T2：辅助 REST 端点——根级 GET /models（模型清单，数据取自模型工厂、公开可读）。
+    // 与 "/"（AG-UI SSE）、/health、/alive、/devui、/v1/* 路由互不冲突；映射顺序不影响请求管线
+    // （路由注册与中间件顺序无关，中间件顺序见上方 username/model 注入与 T4 CORS）。
+    app.MapSupportEndpoints();
+
     // 健康检查端点（T10）：MapDefaultEndpoints 暴露 /health + /alive（ServiceDefaults），供 Aspire Dashboard
     // 健康探测；走独立路径与 AG-UI "/" 端点、DevUI/OpenAI 路由互不冲突。生产/开发均映射（对齐老宿主 AIShop.Api）。
     app.MapDefaultEndpoints();
