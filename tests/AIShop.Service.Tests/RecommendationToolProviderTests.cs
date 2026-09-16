@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json;
 using AIShop.Core.Interfaces;
@@ -10,11 +11,15 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using NSubstitute;
+using Serilog;
+using Serilog.Core;
+using Serilog.Events;
 
 namespace AIShop.Service.Tests;
 
 /// <summary>
-/// recommend_products 工具（T5 段）：对话关键词 → 推荐链路、JSON 契约与「零大模型调用」护栏。
+/// recommend_products 工具（T5 段：对话关键词 → 推荐链路、JSON 契约与「零大模型调用」护栏；
+/// T6 段：偏好记忆直读 + IMemoryCache 缓存 / 确定性 / 降级）。
 /// 夹具沿用 RecommendationServiceTests 模式：替身 IProductRepository（返回 <see cref="ProductSeedData.Products"/>）
 /// + 真实 ProductCatalog + 真实 RecommendationService 注册进测试用 ServiceCollection。
 /// </summary>
@@ -27,6 +32,12 @@ public sealed class RecommendationToolProviderTests
 
     /// <summary>身份缺失时的说明性文案。</summary>
     private const string IdentityMissingMessage = "无法确定用户身份";
+
+    /// <summary>
+    /// warm（偏好缓存已命中）状态下单次调用的耗时预算。阈值极宽松——正常路径是纯内存计算（亚毫秒级），
+    /// 本断言只为拦住「执行路径上偷偷加了一次大模型往返」这一量级的回退（design §8.5）。
+    /// </summary>
+    private static readonly TimeSpan WarmCallBudget = TimeSpan.FromSeconds(1);
 
     // ---------- 零大模型调用（spec R9 场景 2）----------
 
@@ -51,7 +62,7 @@ public sealed class RecommendationToolProviderTests
         // 以「一被调用即抛异常」的替身注册 IMemoryService / IChatClient：若工具路径上存在大模型调用，这里必炸
         var throwingMemoryService = DispatchProxy.Create<IMemoryService, ThrowingProxy>();
         var throwingChatClient = DispatchProxy.Create<IChatClient, ThrowingProxy>();
-        using var harness = new Harness(throwingMemoryService, throwingChatClient);
+        using var harness = new Harness(memoryService: throwingMemoryService, chatClient: throwingChatClient);
         harness.Accessor.SetCurrentUser(TestUser);
 
         // 前提校验（防空转）：替身确实「一被调用即抛异常」——否则本用例只是空转，
@@ -158,6 +169,125 @@ public sealed class RecommendationToolProviderTests
         Assert.False(IsRequired(root, "query"), schema);
     }
 
+    // ---------- 偏好进入推荐（spec R11 场景 1）----------
+
+    [Fact]
+    public async Task ShouldRecommendFromPreference_WhenQueryHitsNoKeyword()
+    {
+        using var harness = new Harness(memories: [Preference("用户喜欢跑步")]);
+        harness.Accessor.SetCurrentUser(TestUser);
+
+        var json = await harness.Provider.RecommendProductsAsync("帮我随便看看");
+
+        var root = Parse(json);
+        Assert.True(root.GetProperty("hasRecommendation").GetBoolean());
+        Assert.Equal("根据您的兴趣，为您推荐：", root.GetProperty("message").GetString());
+
+        // 「用户喜欢跑步」抽出偏好关键词（健身 / 跑步 / 运动）→ 匹配出的商品进入推荐，
+        // 且理由归属「偏好」（当前对话无任何命中）
+        var products = ProductsOf(json).EnumerateArray().ToList();
+        Assert.NotEmpty(products);
+        Assert.All(products, product =>
+            Assert.StartsWith("根据你的偏好「", product.GetProperty("reason").GetString()));
+
+        var runningShoe = products.Single(product => product.GetProperty("id").GetInt32() == 3);
+        Assert.Equal("根据你的偏好「健身」", runningShoe.GetProperty("reason").GetString());
+
+        // 记忆读取按用户名过滤（与写入侧 MemoryContextProvider 的 UserId=username 口径一致）
+        harness.Store.Received(1).GetAllAsync(
+            Arg.Is<MemoryFilter?>(filter => filter != null && filter.UserId == TestUser),
+            Arg.Any<CancellationToken>());
+    }
+
+    // ---------- 偏好读取命中缓存（spec R11 场景 2）----------
+
+    [Fact]
+    public async Task ShouldReadMemoryOnce_WhenPreferenceCacheIsWarm()
+    {
+        using var harness = new Harness(memories: [Preference("用户喜欢跑步")]);
+        harness.Accessor.SetCurrentUser(TestUser);
+
+        var first = await harness.Provider.RecommendProductsAsync("我想买跑步鞋");
+        var second = await harness.Provider.RecommendProductsAsync("我想买跑步鞋");
+
+        // 第二次走 IMemoryCache，不再全表枚举该用户记忆；两次结果完全一致
+        harness.Store.Received(1).GetAllAsync(Arg.Any<MemoryFilter?>(), Arg.Any<CancellationToken>());
+        Assert.Equal(first, second);
+    }
+
+    // ---------- 记忆读取失败降级（spec R11 场景 3）----------
+
+    [Fact]
+    public async Task ShouldDegradeToCuratedFallbackAndWarn_WhenMemoryReadThrows()
+    {
+        using var harness = new Harness(store: FailingStore());
+        harness.Accessor.SetCurrentUser(TestUser);
+
+        var sink = new CollectingSink();
+        var original = Log.Logger;
+        Log.Logger = new LoggerConfiguration().MinimumLevel.Verbose().WriteTo.Sink(sink).CreateLogger();
+        string json;
+        try
+        {
+            json = await harness.Provider.RecommendProductsAsync("帮我随便看看");
+        }
+        finally
+        {
+            Log.Logger = original;
+        }
+
+        // 降级：不抛异常，退化为「无对话关键词 + 无偏好 → 精选兜底」
+        var root = Parse(json);
+        Assert.False(root.GetProperty("hasRecommendation").GetBoolean());
+        Assert.Equal(CuratedFallbackMessage, root.GetProperty("message").GetString());
+        Assert.Equal(0, ProductsOf(json).GetArrayLength());
+
+        // 降级不静默：记录一条含用户名的 Warning
+        var warning = Assert.Single(sink.Events, e =>
+            e.Level == LogEventLevel.Warning && e.RenderMessage().Contains(TestUser, StringComparison.Ordinal));
+        Assert.Contains("记忆偏好读取失败", warning.MessageTemplate.Text);
+    }
+
+    // ---------- 确定性：不依赖存储枚举顺序（spec R11 第 2 段）----------
+
+    [Fact]
+    public async Task ShouldProduceIdenticalResult_WhenMemoryEnumerationOrderDiffers()
+    {
+        Memory[] memories = [Preference("用户喜欢跑步"), Preference("用户想买耳机")];
+
+        using var first = new Harness(memories: memories);
+        using var reversed = new Harness(memories: [.. memories.Reverse()]);
+        first.Accessor.SetCurrentUser(TestUser);
+        reversed.Accessor.SetCurrentUser(TestUser);
+
+        var firstJson = await first.Provider.RecommendProductsAsync("帮我随便看看");
+        var reversedJson = await reversed.Provider.RecommendProductsAsync("帮我随便看看");
+
+        // 同一记忆集合、不同枚举顺序 → 偏好关键词与推荐顺序完全一致
+        Assert.Equal(firstJson, reversedJson);
+        Assert.NotEmpty(ProductsOf(firstJson).EnumerateArray());
+        Assert.StartsWith("根据你的偏好「", ProductsOf(firstJson).EnumerateArray().First().GetProperty("reason").GetString());
+    }
+
+    // ---------- 延迟预算（design §8.5 验收②）----------
+
+    [Fact]
+    public async Task ShouldStayWithinLatencyBudget_WhenPreferenceCacheIsWarm()
+    {
+        using var harness = new Harness(memories: [Preference("用户喜欢跑步")]);
+        harness.Accessor.SetCurrentUser(TestUser);
+
+        await harness.Provider.RecommendProductsAsync("我想买跑步鞋");   // 预热偏好缓存
+
+        var stopwatch = Stopwatch.StartNew();
+        await harness.Provider.RecommendProductsAsync("我想买跑步鞋");
+        stopwatch.Stop();
+
+        Assert.True(stopwatch.Elapsed < WarmCallBudget,
+            $"warm 状态下单次调用耗时 {stopwatch.ElapsedMilliseconds}ms，超出预算 {WarmCallBudget.TotalMilliseconds}ms");
+        harness.Store.Received(1).GetAllAsync(Arg.Any<MemoryFilter?>(), Arg.Any<CancellationToken>());
+    }
+
     // ---------- 夹具 ----------
 
     private static JsonElement Parse(string json) => JsonDocument.Parse(json).RootElement.Clone();
@@ -171,6 +301,50 @@ public sealed class RecommendationToolProviderTests
             && required.ValueKind == JsonValueKind.Array
             && required.EnumerateArray().Any(element => element.GetString() == propertyName);
 
+    /// <summary>一条测试用记忆（UserId 与 <see cref="TestUser"/> 一致，对齐 MemoryContextProvider 的写入口径）。</summary>
+    private static Memory Preference(string text)
+        => new() { Id = Guid.NewGuid().ToString(), Text = text, UserId = TestUser };
+
+    /// <summary>
+    /// 替身记忆存储：<c>GetAllAsync</c> **枚举即失败**（与真实 SQLite 失败同形：异常发生在枚举期
+    /// <c>MoveNextAsync</c>，而非方法调用期）。
+    /// </summary>
+    private static IMemoryStore FailingStore()
+    {
+        var store = Substitute.For<IMemoryStore>();
+        store.GetAllAsync(Arg.Any<MemoryFilter?>(), Arg.Any<CancellationToken>())
+            .Returns(_ => new FailingAsyncEnumerable());
+        return store;
+    }
+
+    /// <summary>枚举即抛异常的异步序列。</summary>
+    private sealed class FailingAsyncEnumerable : IAsyncEnumerable<Memory>
+    {
+        private const string FailureMessage = "记忆库不可用（测试注入）";
+
+        public IAsyncEnumerator<Memory> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+            => new FailingEnumerator();
+
+        private sealed class FailingEnumerator : IAsyncEnumerator<Memory>
+        {
+            /// <summary>首轮 <see cref="MoveNextAsync"/> 即抛异常，故本属性不可达。</summary>
+            public Memory Current => throw new InvalidOperationException(FailureMessage);
+
+            public ValueTask<bool> MoveNextAsync()
+                => throw new InvalidOperationException(FailureMessage);
+
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+    }
+
+    /// <summary>收集 Serilog 日志事件的内存 sink（仅测试用；配合临时替换全局 Log.Logger 捕获告警）。</summary>
+    private sealed class CollectingSink : ILogEventSink
+    {
+        public List<LogEvent> Events { get; } = [];
+
+        public void Emit(LogEvent logEvent) => Events.Add(logEvent);
+    }
+
     /// <summary>
     /// 测试装配：工具 provider 经 DI 容器解析（非直构），使「依赖了被禁服务」在装配期即暴露
     /// （解析到一调用即抛异常的替身）。
@@ -179,17 +353,23 @@ public sealed class RecommendationToolProviderTests
     {
         private readonly ServiceProvider _services;
 
-        public Harness(IMemoryService? memoryService = null, IChatClient? chatClient = null)
+        public Harness(
+            IReadOnlyList<Memory>? memories = null,
+            IMemoryStore? store = null,
+            IMemoryService? memoryService = null,
+            IChatClient? chatClient = null)
         {
             var repository = Substitute.For<IProductRepository>();
             repository.GetAll().Returns(ProductSeedData.Products);
+
+            Store = store ?? StoreReturning(memories ?? []);
 
             var services = new ServiceCollection();
             services.AddSingleton(repository);
             services.AddScoped<IProductCatalogService>(_ => new ProductCatalog(repository));
             services.AddScoped<RecommendationService>();
             services.AddSingleton<ICurrentUserAccessor>(Accessor);
-            services.AddSingleton(Substitute.For<IMemoryStore>());
+            services.AddSingleton(Store);
             services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));
             if (memoryService is not null) services.AddSingleton(memoryService);
             if (chatClient is not null) services.AddSingleton(chatClient);
@@ -201,9 +381,33 @@ public sealed class RecommendationToolProviderTests
 
         public ICurrentUserAccessor Accessor { get; } = new CurrentUserAccessor();
 
+        /// <summary>注入 provider 的记忆存储替身（供断言读取次数 / 过滤条件）。</summary>
+        public IMemoryStore Store { get; }
+
         public RecommendationToolProvider Provider { get; }
 
         public void Dispose() => _services.Dispose();
+
+        /// <summary>
+        /// 替身记忆存储：<c>GetAllAsync</c> 返回**异步序列**（与 <c>SqliteMemoryStore</c> 的签名一致），
+        /// 生产代码必须 <c>await foreach</c> 消费；调用次数可经 <c>Received</c> 断言（缓存命中验证）。
+        /// </summary>
+        private static IMemoryStore StoreReturning(IReadOnlyList<Memory> memories)
+        {
+            var store = Substitute.For<IMemoryStore>();
+            store.GetAllAsync(Arg.Any<MemoryFilter?>(), Arg.Any<CancellationToken>())
+                .Returns(_ => AsAsyncEnumerable(memories));
+            return store;
+        }
+
+        private static async IAsyncEnumerable<Memory> AsAsyncEnumerable(IEnumerable<Memory> memories)
+        {
+            foreach (var memory in memories)
+            {
+                await Task.Yield();
+                yield return memory;
+            }
+        }
     }
 
     /// <summary>任何成员被调用即抛异常的接口替身（证明被禁服务不在工具执行路径上）。
