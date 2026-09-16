@@ -21,6 +21,14 @@ namespace AIShop.AguiHost;
 /// 因此本类提供两个层次：① <see cref="ResolveUsername"/> —— 纯函数（可单测），从 forwarded metadata 读 username；
 /// ② <see cref="UseAguiUsernameForwarding"/> —— 装配中间件，置于 <c>MapAGUIServer</c> 之前，缓冲读同一请求体、
 /// 解析 metadata 并在 agent 运行前把 username（或缺省用户）写入 <see cref="ICurrentUserAccessor"/>。
+/// <para>
+/// <b>本校验不是认证 / 授权（agui-client-support R5）</b>：三个种子账户（marla / steve / fzf003）无密码、无凭证、
+/// 无 token，用户身份完全<b>由请求体自称</b>——<c>forwardedProps.username</c> 写谁就是谁。该用户名直接决定数据归属
+/// （会话 store key = <c>{agentName}:{username}</c>、<c>conversation_id</c>、购物车 / 聊天历史 / 记忆的读写主体），
+/// 因此任何人只要在请求体里写别人的用户名，就能读写别人的会话与购物车——存在性校验<b>不减少</b>这一能力
+/// （三个名字都是公开的）。本校验解决的唯一问题是「用户名拼错导致静默空会话 / 工具层『用户不存在』错误文本」，
+/// 属数据质量与 UX 问题。<b>严禁</b>在注释、文档或对外文案中把它表述为「登录校验」「登录」「鉴权」或「认证」。
+/// </para>
 /// </remarks>
 internal static class AguiUsernameForwarder
 {
@@ -59,7 +67,8 @@ internal static class AguiUsernameForwarder
     /// <summary>
     /// 装配挂点中间件：把 username 写入 <see cref="ICurrentUserAccessor"/> 的请求管线入口。
     /// 对每个 AG-UI <c>POST RunAgentInput</c>：缓冲读取请求体 → 从 forwarded metadata（<c>forwardedProps.username</c>）
-    /// 解析 username → 执行流注入 <see cref="ICurrentUserAccessor"/>（缺失/解析失败一律 <see cref="DefaultUsername"/>）→
+    /// 解析 username → <b>显式携带且非空白</b>时先做用户表存在性校验（不存在则 404 短路，不进入 Agent）→
+    /// 执行流注入 <see cref="ICurrentUserAccessor"/>（缺失/解析失败一律 <see cref="DefaultUsername"/>）→
     /// 回退 Body 位置后放行，由 <c>MapAGUIServer</c> 端点继续处理（同一请求体重新反序列化）。
     /// </summary>
     internal static IApplicationBuilder UseAguiUsernameForwarding(this IApplicationBuilder app)
@@ -108,11 +117,53 @@ internal static class AguiUsernameForwarder
                 username = null;
             }
 
-            // 执行流级注入：metadata 缺失 → 缺省用户（购物工具经 CurrentUser 读取同一用户，无需感知用户来源）
+            // agui-client-support T3（spec R3）：仅对【显式携带且非空白】的 username 做用户表存在性校验。
+            // 不在表内 → 写 404 + {"detail":"User not found"}（形状对齐老 POST /api/login）并短路：
+            // 不进入 Agent、不注入身份、不回落缺省用户 → 零 LLM 调用 / 零会话快照 / 零聊天历史 / 零购物车 / 零记忆副作用。
+            // 这是 fail-fast：校验发生在中间件层（MapAGUIServer 之前），若下沉到 Agent 工具层，失败将发生在一轮 LLM 之后
+            // （秒级延迟 + token 成本），且错误只能以自然语言字符串返回，前端无法据此回到登录页。
+            if (username is not null && !await IsExistingUserAsync(context, username))
+                return;
+
+            // 缺省回落路径零改动（spec R4）：缺失 / 非字符串 / 空白 → DefaultUsername，且【不读库】（零开销、零回归）。
+            // 只校验显式携带的 username，是为了避免把一处登录页 UX 校验扩散成对非 AG-UI POST（如 Development 下的
+            // DevUI / OpenAI wire 端点）的全局约束——那类请求的体里没有 forwardedProps，永远走本分支。
             var accessor = context.RequestServices.GetRequiredService<ICurrentUserAccessor>();
             accessor.SetCurrentUser(username ?? DefaultUsername);
 
             await next(context);
         });
+    }
+
+    /// <summary>
+    /// 显式 username 的用户表存在性校验（agui-client-support T3，spec R3）。
+    /// 返回 <c>true</c> = 用户存在、放行；返回 <c>false</c> = 已写出 404 短路响应，调用方<b>必须立即 return</b>。
+    /// </summary>
+    /// <remarks>
+    /// 实现要点：
+    /// <list type="bullet">
+    /// <item><see cref="IUserRepository"/> 是 Scoped（EF <c>DbContext</c>），必须经 <c>CreateScope()</c> 解析，
+    /// <b>不得</b>缓存到静态字段 / 单例。</item>
+    /// <item>取消令牌取 <c>RequestAborted</c>。</item>
+    /// <item>读库异常<b>不</b> try/catch 吞（与老 <c>/api/login</c> 一致）：自然上抛为 5xx。把「读不出来」乐观当作
+    /// 「校验通过」会掩盖数据层故障。</item>
+    /// <item>响应是<b>普通 HTTP 404 + JSON</b>，不是 AG-UI 端点的 SSE 事件流（本中间件位于 MapAGUIServer 之前），
+    /// 客户端需能处理非流式 / 非 200 响应。</item>
+    /// </list>
+    /// 提醒：本方法只证明「该用户名在用户表中存在」，<b>不是</b>认证 / 授权，也<b>不是</b>访问控制（身份由请求体自称）。
+    /// </remarks>
+    private static async Task<bool> IsExistingUserAsync(HttpContext context, string username)
+    {
+        using var scope = context.RequestServices.CreateScope();
+        var userRepository = scope.ServiceProvider.GetRequiredService<IUserRepository>();
+        var user = await userRepository.GetByUsernameAsync(username, context.RequestAborted);
+        if (user is not null)
+            return true;
+
+        context.Response.StatusCode = StatusCodes.Status404NotFound;
+        await context.Response.WriteAsJsonAsync(
+            new { detail = "User not found" },
+            context.RequestAborted);
+        return false;
     }
 }

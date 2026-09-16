@@ -25,6 +25,17 @@ public interface IModelChatClientFactory
     /// <summary>缺省模型 id（＝ 配置节 <c>ActiveModel</c>；ActiveModel 缺失时为 Models 节首个键）。</summary>
     string DefaultModelId { get; }
 
+    /// <summary>
+    /// 全部已配置模型清单（agui-client-support T1）：**清单的唯一来源**——端点层（<c>GET /models</c>）
+    /// MUST NOT 二次解析 <c>Models</c> 配置节（spec R2），只转发本属性。
+    /// </summary>
+    /// <remarks>
+    /// 顺序 = 构造时 <c>Models</c> 子节的 <c>IConfiguration.GetChildren()</c> 顺序（**子键序数升序**，非 appsettings 书写顺序），
+    /// 确定且可复现；<see cref="ModelDescriptor.Name"/> 缺省回退节键、<see cref="ModelDescriptor.IsDefault"/>
+    /// 的大小写口径均与工厂其余解析规则同源（口径只在工厂实现一处）。
+    /// </remarks>
+    IReadOnlyList<ModelDescriptor> AvailableModels { get; }
+
     /// <summary>模型 id 是否已配置（<see cref="StringComparer.OrdinalIgnoreCase"/>）。</summary>
     bool ContainsModel(string modelId);
 

@@ -17,14 +17,23 @@ internal sealed class StubModelChatClientFactory : IModelChatClientFactory
 {
     private readonly Meai.IChatClient _client;
 
-    public StubModelChatClientFactory(Meai.IChatClient client, string defaultModelId = "qwen")
+    public StubModelChatClientFactory(Meai.IChatClient client, string defaultModelId = "qwen",
+        IReadOnlyList<ModelDescriptor>? availableModels = null)
     {
         _client = client;
         DefaultModelId = defaultModelId;
+        AvailableModels = availableModels ?? [];
     }
 
     /// <inheritdoc />
     public string DefaultModelId { get; }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// agui-client-support T1：本 stub 供离线 WAF 驱动聊天链路，模型清单非其关注点 → 缺省空列表
+    /// （<c>ModelDescriptor</c> 的清单断言走真实工厂 <c>AguiModelClientFactoryTests</c>，不在此处造假数据）。
+    /// </remarks>
+    public IReadOnlyList<ModelDescriptor> AvailableModels { get; }
 
     /// <summary><see cref="GetClient"/> 收到的 modelId 调用序列（按调用顺序记录）。</summary>
     public List<string> RequestedModelIds { get; } = [];

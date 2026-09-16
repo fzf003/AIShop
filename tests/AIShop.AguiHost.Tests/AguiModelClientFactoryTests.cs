@@ -148,4 +148,88 @@ public sealed class AguiModelClientFactoryTests
 
         Assert.Same(factory.GetDefaultClient(), factory.GetClient("qwen"));
     }
+
+    // ── agui-client-support T1：AvailableModels（清单唯一来源，spec ADDED R1 / R2）──────────────────
+
+    [Fact]
+    public void AvailableModels_ProjectsIdNameAndWireModelOfEveryConfiguredSection()
+    {
+        // 清单内容 = Models 节配置（id = 节键、name = 节内 Name、model = 节内 Model），ActiveModel=qwen 时仅 qwen 项 isDefault
+        // （对应 spec R1 场景 1 数据面 + R2「name/model 口径只在工厂实现一处」）
+        var factory = CreateFactory(ActiveModelJson);
+
+        var models = factory.AvailableModels;
+
+        Assert.Equal(
+            new[] { ("deepseek", "DeepSeek", "deepseek-test"), ("gpt-4.1", "Mimo", "mimo-v2"), ("qwen", "Qwen", "qwen3-test") },
+            models.Select(m => (m.Id, m.Name, m.Model)));
+        Assert.Equal(new[] { false, false, true }, models.Select(m => m.IsDefault));
+    }
+
+    [Fact]
+    public void AvailableModels_WhenSectionOmitsName_FallsBackToSectionKey()
+    {
+        // 某节省略 Name → 该项 name 等于其节键（工厂唯一缺省规则，对应 spec R2 场景 2 前半）
+        var json = """
+            { "Models": {
+                "qwen": { "Endpoint": "https://example.com/v1", "Key": "test-key", "Model": "qwen3-test" },
+                "deepseek": { "Endpoint": "https://api.deepseek.com/v1", "Key": "test-key", "Model": "deepseek-test", "Name": "DeepSeek" }
+              }, "ActiveModel": "qwen" }
+            """;
+        var factory = CreateFactory(json);
+
+        var models = factory.AvailableModels;
+
+        var qwen = Assert.Single(models, m => m.Id == "qwen");
+        Assert.Equal("qwen", qwen.Name);
+        var deepseek = Assert.Single(models, m => m.Id == "deepseek");
+        Assert.Equal("DeepSeek", deepseek.Name);
+    }
+
+    [Fact]
+    public void AvailableModels_WhenActiveModelMissing_MarksFirstOrdinalKeyAsDefaultOnly()
+    {
+        // ActiveModel 缺失 → 缺省 = 子键序数升序首键（deepseek）；恰有一项 isDefault = true
+        // （对应 spec R1 第 3 段 + R2 场景 2 后半）
+        var factory = CreateFactory(NoActiveModelJson);
+
+        var models = factory.AvailableModels;
+
+        Assert.Equal(new[] { "deepseek", "gpt-4.1", "qwen" }, models.Select(m => m.Id));
+        Assert.Equal("deepseek", factory.DefaultModelId);
+        Assert.Single(models, m => m.IsDefault);
+        Assert.Equal("deepseek", models.Single(m => m.IsDefault).Id);
+    }
+
+    [Fact]
+    public void AvailableModels_WhenActiveModelIsUnknownKey_MarksNoItemAsDefault()
+    {
+        // ActiveModel 配成未知键（gpt-5）→ 全部 isDefault = false，不抛异常、不误标任一项
+        // （工厂守卫 ContainsModel(DefaultModelId) && ...；对应 spec R1 场景 3 + design §9 补断言要求）
+        var json = $$"""
+            { "Models": { {{ModelsBlock}} }, "ActiveModel": "gpt-5" }
+            """;
+        var factory = CreateFactory(json);
+
+        var models = factory.AvailableModels;
+
+        Assert.Equal(3, models.Count);
+        Assert.DoesNotContain(models, m => m.IsDefault);
+    }
+
+    [Fact]
+    public void AvailableModels_TwoConsecutiveCalls_ReturnIdenticalContentAndOrder()
+    {
+        // 连续两次调用内容与顺序完全相同（顺序确定可复现；不等于 appsettings 书写顺序——书写序为 qwen/deepseek/gpt-4.1，
+        // 实际为子键序数升序。对应 spec R1 场景 2「顺序确定」；§七 确认项 A）
+        var factory = CreateFactory(ActiveModelJson);
+
+        var first = factory.AvailableModels;
+        var second = factory.AvailableModels;
+
+        Assert.Equal(
+            first.Select(m => (m.Id, m.Name, m.Model, m.IsDefault)).ToArray(),
+            second.Select(m => (m.Id, m.Name, m.Model, m.IsDefault)));
+        Assert.Equal(new[] { "deepseek", "gpt-4.1", "qwen" }, second.Select(m => m.Id));
+    }
 }

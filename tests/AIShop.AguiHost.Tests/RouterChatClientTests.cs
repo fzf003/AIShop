@@ -40,6 +40,13 @@ public sealed class RouterChatClientTests
 
         public string DefaultModelId { get; }
 
+        /// <inheritdoc />
+        /// <remarks>
+        /// agui-client-support T1：本 stub 只服务 Router 选模型断言，模型清单非其关注点 → 恒空列表
+        /// （接口新增成员的手写实现同步，<c>Array.Empty</c> 语义即「本替身不提供清单」）。
+        /// </remarks>
+        public IReadOnlyList<ModelDescriptor> AvailableModels => [];
+
         public Meai.IChatClient DefaultClient { get; }
 
         /// <summary>GetClient 收到的 modelId 调用序列（按调用顺序记录）。</summary>

@@ -29,6 +29,10 @@ public sealed class AguiModelClientFactory : IModelChatClientFactory
     private sealed record ModelConfig(string Endpoint, string Key, string Model, string Name);
 
     private readonly IReadOnlyDictionary<string, ModelConfig> _models;
+
+    /// <summary>构造时一次性投影好的清单（属性只读回字段，不在 getter 内复制集合，避免 SonarAnalyzer S2365）。</summary>
+    private readonly IReadOnlyList<ModelDescriptor> _availableModels;
+
     private readonly AgentTelemetryOptions _telemetryOptions;
     private readonly ConcurrentDictionary<string, Lazy<IChatClient>> _clients;
 
@@ -50,6 +54,7 @@ public sealed class AguiModelClientFactory : IModelChatClientFactory
         }
 
         var models = new Dictionary<string, ModelConfig>(StringComparer.OrdinalIgnoreCase);
+        var modelIds = new List<string>();   // GetChildren() 子键序数升序——AvailableModels 的输出序
         foreach (var section in modelsSection.GetChildren())
         {
             var cfg = new ModelConfig(
@@ -58,12 +63,33 @@ public sealed class AguiModelClientFactory : IModelChatClientFactory
                 section["Model"] ?? "",
                 section["Name"] ?? section.Key);
             models[section.Key] = cfg;
+            modelIds.Add(section.Key);
         }
 
         _models = models;
         DefaultModelId = configuration["ActiveModel"] ?? models.Keys.FirstOrDefault() ?? string.Empty;
+        // 清单按 modelIds（= GetChildren() 子键序数升序，非 appsettings 书写顺序）投影：
+        // 不复用 _models 枚举序——Dictionary 枚举顺序无契约保证，不能当输出序。
+        _availableModels = modelIds
+            .Select(id => new ModelDescriptor(
+                id,
+                models[id].Name,
+                models[id].Model,
+                IsDefaultModel(id)))
+            .ToList();
         _clients = new ConcurrentDictionary<string, Lazy<IChatClient>>(StringComparer.OrdinalIgnoreCase);
     }
+
+    /// <inheritdoc />
+    public IReadOnlyList<ModelDescriptor> AvailableModels => _availableModels;
+
+    /// <summary>
+    /// 该项是否为默认模型：仅当 <see cref="DefaultModelId"/> 命中已知节键时恰有一项为 <c>true</c>；
+    /// 配成未知键（或缺失且无首键可回退）时全部为 <c>false</c>——宁可不高亮，也不虚假高亮（spec R1 第 3 段守卫语义）。
+    /// </summary>
+    private bool IsDefaultModel(string modelId)
+        => ContainsModel(DefaultModelId)
+            && string.Equals(modelId, DefaultModelId, StringComparison.OrdinalIgnoreCase);
 
     /// <inheritdoc />
     public bool ContainsModel(string modelId) => _models.ContainsKey(modelId);
