@@ -67,6 +67,11 @@ try
         dbConnection: builder.Configuration["Agui:DbConnection"],
         ragConnection: builder.Configuration["Agui:RagConnection"]);
 
+    // agui-client-support T4 CORS（design §6）：仅当配置了有效的 Cors:AllowedOrigins 白名单时才注册命名策略
+    // AguiClient；appsettings 不写 Cors 节 → 返回 false → AddCors/UseCors 均不注册，请求管线与现状逐字节一致
+    // （开发用 Vite dev proxy、生产用同域反代，浏览器视角同源，默认不需要 CORS）。配置形态错误在此启动期抛出。
+    var corsEnabled = builder.Services.AddAguiCors(builder.Configuration);
+
     // 会话历史持久化（T12）：keyed AgentSessionStore（key = "AGUIShopping"）指向独立会话库 agui.sessions.db，
     // 取代默认 ephemeral（Noop）——MapAGUIServer 按 agent.Name keyed 解析命中，流结束 SaveSessionAsync 落库、
     // 同 ThreadId 下次 GetSessionAsync 还原（重启不丢上下文）。缺省连接串见 AddAguiSessionStore/扩展内常量。
@@ -120,6 +125,12 @@ try
 
     // 启动引导（T3）：MigrateAsync + 幂等播种 marla/steve/fzf003 + 18 商品 + RAG 索引预热（失败仅 Warning）
     await AguiServiceCollectionExtensions.InitializeAsync(app.Services);
+
+    // T4 CORS 中间件（仅在配置了有效白名单时注册，design §6.3）：置于 username 注入中间件【之前】——
+    // 预检 OPTIONS 在 CORS 中间件内结束（返回 204），不会被读请求体的中间件额外处理；两个端点（"/" 与 /models）
+    // 由同一命名策略覆盖。用中间件式命名策略而非端点级 [EnableCors]：后者依赖路由元数据顺序，易在自建中间件旁静默失效。
+    if (corsEnabled)
+        app.UseCors(AguiCors.PolicyName);
 
     // T5 username 注入中间件（置于 MapAGUIServer 之前）：AGUI forwarded metadata(username) → ICurrentUserAccessor（缺省 steve）
     app.UseAguiUsernameForwarding();
