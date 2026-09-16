@@ -3,9 +3,11 @@ using System.Text.Json;
 namespace AIShop.AguiHost.Tests;
 
 /// <summary>
-/// T8 跨宿主模型配置一致性（spec ADDED「两份 appsettings 的模型配置一致」）：
+/// T8 跨宿主模型配置一致性（spec ADDED「两份 appsettings 的模型配置一致（<c>ActiveModel</c> 除外）」）：
 /// <c>src/AIShop.Api/appsettings.json</c> 与 <c>src/AIShop.AguiHost/appsettings.json</c> 的
-/// <c>Models</c> 节键集合、同名键的 <c>Model</c> 值、<c>ActiveModel</c> 三者必须一致（以 AguiHost 为准）。
+/// <c>Models</c> 节键集合、同名键的 <c>Model</c> 值两项必须一致（以 AguiHost 为准）。
+/// <c>ActiveModel</c> 两宿主<b>有意各自独立</b>（<c>AIShop.Api = qwen</c>、<c>AguiHost = gpt-4.1</c>），
+/// <b>不参与断言</b>——把老链缺省模型换成指向 MiMo 的 <c>gpt-4.1</c> 会引入间歇性工具调用失效（design §7.2）。
 /// 本变更只对齐配置值（design §7.2 方案 A），漂移由本测试锁死。
 ///
 /// 两份文件按【仓库根】定位（自测试输出目录上溯找 <c>AIShop.sln</c>），而非相对测试进程 CWD——
@@ -20,11 +22,11 @@ public sealed class AppSettingsModelParityTests
 
     /// <summary>
     /// 一致性断言本体（spec 场景「一致性被测试锁定」）：① <c>Models</c> 键集合相同
-    /// ② 同名键的 <c>Model</c> 值相同 ③ <c>ActiveModel</c> 相同。
-    /// 任一份文件的键集合、Model 值或 ActiveModel 被单独修改，本用例即失败。
+    /// ② 同名键的 <c>Model</c> 值相同。任一份文件的键集合或 <c>Model</c> 值被单独修改，本用例即失败；
+    /// <c>ActiveModel</c> 有意不参与（见类注释）。
     /// </summary>
     [Fact]
-    public void ModelsAndActiveModel_AreIdenticalAcrossApiAndAguiHost()
+    public void Models_AreIdenticalAcrossApiAndAguiHost()
     {
         using var api = LoadSettings(ResolveSettingsPath(ApiHostProject));
         using var agui = LoadSettings(ResolveSettingsPath(AguiHostProject));
@@ -46,12 +48,6 @@ public sealed class AppSettingsModelParityTests
             Assert.True(string.Equals(aguiModel, apiModel, StringComparison.Ordinal),
                 $"Models.{key}.Model 不一致：{ApiHostProject}=\"{apiModel}\"，{AguiHostProject}=\"{aguiModel}\"");
         }
-
-        // ③ ActiveModel 相同
-        var aguiActive = agui.RootElement.GetProperty("ActiveModel").GetString();
-        var apiActive = api.RootElement.GetProperty("ActiveModel").GetString();
-        Assert.True(string.Equals(aguiActive, apiActive, StringComparison.Ordinal),
-            $"ActiveModel 不一致：{ApiHostProject}=\"{apiActive}\"，{AguiHostProject}=\"{aguiActive}\"");
     }
 
     /// <summary>
