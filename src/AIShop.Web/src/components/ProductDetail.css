@@ -1,0 +1,101 @@
+/**
+ * 商品详情弹窗样式 —— 逐项对照原型 v3 的 `.dbox` / `.dbd` / `.dbd .big` / `.dft` / `.addbtn`。
+ *
+ * 说明：本组件由 `ProductModal` 渲染，两者样式各自**自包含**（组件级 CSS 随组件文件走）；
+ * `.modal` / `.pprice` / `.addbtn` 与 `ProductModal.css` 的同名规则取值一致，
+ * 若后续（C11 / C12）把共享原语收口到 `styles/`，需同步这两处。
+ */
+.modal {
+  position: fixed;
+  inset: 0;
+  /* 与商品模态同为 101（原型同值）：详情在 DOM 中更靠后，故叠在其上。 */
+  z-index: 101;
+  background: rgba(20, 20, 40, 0.32);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dbox {
+  background: var(--card);
+  border-radius: var(--r-lg);
+  width: min(560px, 92vw);
+  overflow: hidden;
+  box-shadow: 0 24px 60px -12px rgba(20, 20, 40, 0.3);
+}
+
+.dbd {
+  padding: 26px;
+  display: flex;
+  gap: 20px;
+}
+
+.dbd .big {
+  width: 96px;
+  height: 96px;
+  border-radius: var(--r-md);
+  background: var(--brand-soft);
+  display: grid;
+  place-items: center;
+  font-size: 2.6rem;
+  flex-shrink: 0;
+}
+
+.dinfo {
+  flex: 1;
+}
+
+.dinfo h2 {
+  font-size: 1.3rem;
+  font-weight: 800;
+}
+
+.dinfo .pprice {
+  font-size: 1.15rem;
+  margin-top: 8px;
+  color: var(--price);
+  font-weight: 700;
+}
+
+.dmeta {
+  font-size: 0.82rem;
+  color: var(--ink-3);
+  margin-top: 8px;
+}
+
+.dtags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.tag {
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 3px 10px;
+  font-size: 0.74rem;
+  color: var(--ink-2);
+  background: var(--bg);
+}
+
+.dft {
+  padding: 0 26px 26px;
+}
+
+.dft .addbtn {
+  margin-top: 0;
+  background: transparent;
+  color: var(--ink-3);
+  border: none;
+  border-radius: var(--r-sm);
+  padding: 12px;
+  font-size: 1.35rem;
+  line-height: 1;
+  width: 100%;
+  transition: 0.12s;
+}
+
+.dft .addbtn:hover {
+  color: var(--brand);
+}
