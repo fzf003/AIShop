@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using AIShop.Core.StaticData;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
@@ -14,6 +16,12 @@ namespace AIShop.AguiHost.Tests;
 /// 覆盖 spec ADDED「客户端支撑端点的身份来源」（缺参 400 且不回落）、「新端点的用户存在性校验与错误契约」
 /// （校验先于写入）、「购物车端点」（读 / 加购 / 合并 / 非法入参 / 改量与移除 / 条目不存在不假成功 / 清空幂等 /
 /// 非 GUID 段不进业务）、「客户端支撑端点复用既有仓储」（落 agui.db、直查 CartItems 表）。
+/// <para>
+/// agui-client-support T15：跨面契约一致性 + 既有面零影响（专项验证）——
+/// ①「REST 与 AG-UI 的 404 状态码与响应体逐字节一致」由【同一份】中间件实现保证（spec「新端点的用户存在性校验与
+/// 错误契约」场景 2）；② 新端点挂载后既有 <c>/models</c>、<c>/health</c>、<c>/alive</c> 的状态码与形状不变
+/// （spec「新增端点对既有端点零影响」场景 3）。
+/// </para>
 /// <para>
 /// 驱动方式：WAF <b>真实宿主</b>（<see cref="WebApplicationFactory{TEntryPoint}"/>）+ 临时业务库（Program 的 T16
 /// 环境变量 seam <c>Agui__DbConnection</c>）+ 真实播种——临时库由 <c>InitializeAsync</c> 的 <c>MigrateAsync</c>
@@ -508,6 +516,66 @@ public sealed class AguiCartEndpointTests : IDisposable
         Assert.Contains("MapCartEndpoints", programSource);
     }
 
+    [Fact]
+    public async Task UnknownUsername_RestAndAguiFaces_ReturnSameStatusAndByteIdenticalBody()
+    {
+        // spec「新端点的用户存在性校验与错误契约」场景 2（与 AG-UI 面的 404 契约逐字节一致）：
+        // 同一不存在的用户名 nobody 分别打 REST（GET /cart?username=nobody）与 AG-UI（POST /，forwardedProps.username=nobody）。
+        // 两个 404 由中间件【同一份】IsExistingUserAsync 产生（同一宿主、同一批用户、同一失败语义），
+        // 故状态码与响应体文本逐字节相同——断言的是「同一份实现」，比「两处各写一个常量」更早暴露契约漂移。
+        // 不存在的用户名用非种子名 nobody（真实播种只含 marla/steve/fzf003）。
+        var factory = StartFactory();
+        using var client = factory.CreateClient();
+
+        using var rest = await client.GetAsync("/cart?username=nobody");
+
+        using var agui = await client.PostAsync(
+            "/",
+            new StringContent(RunAgentBody("t15-nobody-thread", username: "nobody"), Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.NotFound, rest.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, agui.StatusCode);
+
+        var restBody = await rest.Content.ReadAsStringAsync();
+        var aguiBody = await agui.Content.ReadAsStringAsync();
+
+        // 逐字节一致：同一字节集既锁状态码同源，也锁响应体文本同源
+        Assert.Equal(restBody, aguiBody);
+        Assert.Contains(UserNotFoundBody, restBody);
+
+        await factory.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ExistingSupportAndHealthRoutes_KeepOriginalStatusAndShape_WhenNewEndpointsMounted()
+    {
+        // spec「新增端点对既有端点零影响」场景 3（路由不重叠）：/products 与 /cart* 挂载后，
+        // 既有 /models、/health、/alive 的路由匹配结果不变——原状态码 + 原形状（/models 为长度 3 的裸数组，
+        // 与 AguiModelsEndpointTests 的「不替换模型工厂」口径一致：本类也不替换任何服务）。
+        var factory = StartFactory();
+        using var client = factory.CreateClient();
+
+        using (var models = await client.GetAsync("/models"))
+        {
+            Assert.Equal(HttpStatusCode.OK, models.StatusCode);
+
+            using var json = JsonDocument.Parse(await models.Content.ReadAsStringAsync());
+            var items = json.RootElement.EnumerateArray().ToList();
+
+            // 形状不变：裸数组 + 每项含 id（不锁具体配置值，配置漂移属 /models 自有用例的职责）
+            Assert.Equal(3, items.Count);
+            Assert.All(items, item => Assert.True(item.TryGetProperty("id", out _)));
+        }
+
+        using (var health = await client.GetAsync("/health"))
+            Assert.Equal(HttpStatusCode.OK, health.StatusCode);
+
+        using (var alive = await client.GetAsync("/alive"))
+            Assert.Equal(HttpStatusCode.OK, alive.StatusCode);
+
+        await factory.DisposeAsync();
+    }
+
     /// <summary>
     /// 装配 WAF 真实宿主：临时业务 / 向量 / 会话 / 聊天历史四套库（Program T16 环境变量 seam
     /// <c>Agui__*Connection</c>），<b>不替换任何服务</b>——商品与用户都来自真实播种，这正是本类断言的
@@ -573,6 +641,28 @@ public sealed class AguiCartEndpointTests : IDisposable
             .Single(i => i.GetProperty("productId").GetInt32() == productId)
             .GetProperty("id").GetGuid();
     }
+
+    /// <summary>
+    /// 构造 AG-UI <c>RunAgentInput</c> 形状的请求体 JSON（顶层 <c>forwardedProps.username</c>），
+    /// 供「REST 与 AG-UI 的 404 契约逐字节一致」用例驱动 AG-UI 面。
+    /// </summary>
+    /// <remarks>
+    /// 本用例的请求在中间件层即被 404 短路（<c>nobody</c> 非种子用户），<b>不会</b>进入 Agent，
+    /// 故消息内容仅需满足 RunAgentInput 的最低形状；<c>threadId</c> 亦不会落库。
+    /// </remarks>
+    private static string RunAgentBody(string threadId, string username)
+        => new JsonObject
+        {
+            ["threadId"] = threadId,
+            ["messages"] = new JsonArray(
+                new JsonObject
+                {
+                    ["id"] = $"m-{Guid.NewGuid():N}",
+                    ["role"] = "user",
+                    ["content"] = "你好",
+                }),
+            ["forwardedProps"] = new JsonObject { ["username"] = username },
+        }.ToJsonString();
 
     /// <summary>
     /// 直查临时业务库某表行数（落库 / 零写入断言用）：库文件不存在 → 0；表不存在 → 0（都表示「未写入」）。
