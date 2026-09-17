@@ -159,6 +159,11 @@ try
     // 与 "/"、/models、/health、/alive、/devui、/v1/* 路由互不冲突，映射顺序不影响请求管线。
     app.MapProductEndpoints();
 
+    // agui-client-support T13：根级 /cart 组（购物车 REST 端点，身份必填——缺 ?username= 中间件 400 短路、不回落缺省）。
+    // 复用既有 ICartRepository / IProductRepository（与 AI 购物工具同一批仓储与实体，非第二套实现），
+    // 数据落 AguiHost 自己的业务库 agui.db；与既有路由互不冲突，映射顺序不影响请求管线。
+    app.MapCartEndpoints();
+
     // 健康检查端点（T10）：MapDefaultEndpoints 暴露 /health + /alive（ServiceDefaults），供 Aspire Dashboard
     // 健康探测；走独立路径与 AG-UI "/" 端点、DevUI/OpenAI 路由互不冲突。生产/开发均映射（对齐老宿主 AIShop.Api）。
     app.MapDefaultEndpoints();
