@@ -36,6 +36,14 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    /**
+     * 打开 CSS 处理。
+     *
+     * Vitest 默认 `css: false`，会把 `.css` 模块替换成**空串** —— 连 `?raw` 与
+     * `import.meta.glob(..., { query: '?raw' })` 拿到的都是空内容，「读样式源码做断言」
+     * 的用例（R17-1 的 `.welcome` 样式、C12 的 `tokens.css` 令牌）因此无法成立。
+     */
+    css: true,
     include: ['src/**/*.test.{ts,tsx}'],
   },
 })

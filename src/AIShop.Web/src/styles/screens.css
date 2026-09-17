@@ -112,3 +112,78 @@
   place-items: center;
   padding: 24px;
 }
+
+/* 主界面顶栏的其余元素（原型 v3 的 `.chip` / `.logout` / `.cartbtn`）。
+   与 `.appbar` / `.brand` / `.spacer` / `.ghost` 同属「主界面外壳」，故继续落在这里。
+   用户徽标的配色类（`.u-marla` / `.u-steve` / `.u-fzf`）复用 `AccountPicker.css`，不另起一套。 */
+.chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.chip .av {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 0.7rem;
+}
+
+.logout {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 9px 14px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+
+.logout:hover {
+  border-color: #dc2626;
+  color: #dc2626;
+}
+
+.cartbtn {
+  position: relative;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 9px 15px;
+  font-size: 0.83rem;
+  font-weight: 600;
+}
+
+.cartbtn:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+.cartbtn .cnt {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  background: var(--price);
+  color: #fff;
+  font-size: 0.66rem;
+  font-weight: 700;
+  min-width: 19px;
+  height: 19px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  padding: 0 5px;
+}
+
+/* 主界面内容区：左聊天 + 右推荐栏（聊天区由 ChatPanel.css 提供，推荐栏由 RecoPanel.css 提供） */
+.main {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}

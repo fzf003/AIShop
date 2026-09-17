@@ -12,7 +12,7 @@
  * （`api/http.ts`，背后是 `agui.username` 键）取用户名，绝不硬编码字面量、也不另存副本——
  * AG-UI 的 `forwardedProps.username` 与 REST 的 `?username=` 因此必然同源。
  */
-import type { Message } from '@ag-ui/client'
+import type { HttpAgent, Message } from '@ag-ui/client'
 import { useSyncExternalStore } from 'react'
 
 import { currentUsername } from '../api/http'
@@ -105,6 +105,18 @@ export async function runRound(text: string): Promise<void> {
 /** `useSyncExternalStore` 的快照读取点；未启动会话时返回空快照。 */
 export function getSnapshot(): SessionSnapshot {
   return snapshot
+}
+
+/**
+ * 当前会话的官方客户端实例；未启动会话时为 `null`。
+ *
+ * 存在的理由（C11 装配点）：工具胶囊要经 `attachToolEvents(agent, tracker)` 订阅 AG-UI 事件
+ * （handoff-C7 遗留 1），而 `startSession` 不返回会话、store 也没有别的暴露面 —— 该只读访问器
+ * 是「事件订阅」与「会话生命周期」对齐（切账户重建、旧订阅随旧 agent 失效）的最小接缝。
+ * 它**不改变**任何会话行为：仅把已有实例交出去。
+ */
+export function getAgent(): HttpAgent | null {
+  return session?.agent ?? null
 }
 
 /** 订阅 store 变更；返回退订函数。 */
