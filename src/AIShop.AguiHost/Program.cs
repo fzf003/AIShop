@@ -154,6 +154,11 @@ try
     // （路由注册与中间件顺序无关，中间件顺序见上方 username/model 注入与 T4 CORS）。
     app.MapSupportEndpoints();
 
+    // agui-client-support T12：根级 GET /products（全量商品目录，公开可读——缺 ?username= 放行且不注入身份、
+    // 带了非空值仍校验）。数据源单一 = IProductRepository.GetAll()（与 AI 工具 / 加购校验共用同一份缓存）；
+    // 与 "/"、/models、/health、/alive、/devui、/v1/* 路由互不冲突，映射顺序不影响请求管线。
+    app.MapProductEndpoints();
+
     // 健康检查端点（T10）：MapDefaultEndpoints 暴露 /health + /alive（ServiceDefaults），供 Aspire Dashboard
     // 健康探测；走独立路径与 AG-UI "/" 端点、DevUI/OpenAI 路由互不冲突。生产/开发均映射（对齐老宿主 AIShop.Api）。
     app.MapDefaultEndpoints();
