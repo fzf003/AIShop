@@ -42,3 +42,7 @@ docs/design
 docs/implementation
 openspec/
 
+# 前端（src/AIShop.Web，独立 npm 工程）：依赖与构建产物不入库
+node_modules/
+dist/
+*.local

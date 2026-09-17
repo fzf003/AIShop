@@ -1,0 +1,47 @@
+/**
+ * 设计令牌 —— 逐字照抄原型 v3（docs/prototypes/agui-client-v3.html）的 `:root` 与正文字体栈。
+ * 原型是 spec R13 指定的视觉唯一依据，这里的值不得自行"优化"。
+ */
+:root {
+  --ink: #141428;
+  --ink-2: #3d3d5c;
+  --ink-3: #8a8aa3;
+  --line: #e8e8f0;
+  --bg: #f6f7fb;
+  --card: #fff;
+  --brand: #4f46e5;
+  --brand-soft: #eef0ff;
+  --price: #e8590c;
+  --ok: #12a150;
+  --warn: #f59e0b;
+  --r-lg: 20px;
+  --r-md: 14px;
+  --r-sm: 10px;
+  --shadow: 0 1px 3px rgba(20, 20, 40, 0.06), 0 8px 24px -8px rgba(20, 20, 40, 0.1);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  height: 100vh;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+input,
+select {
+  font-family: inherit;
+  outline: none;
+}

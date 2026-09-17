@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AIShop · AG-UI 客户端原型 v3</title>
+<style>
+  :root{
+    --ink:#141428;--ink-2:#3d3d5c;--ink-3:#8a8aa3;
+    --line:#e8e8f0;--bg:#f6f7fb;--card:#fff;
+    --brand:#4f46e5;--brand-soft:#eef0ff;
+    --price:#e8590c;--ok:#12a150;--warn:#f59e0b;
+    --r-lg:20px;--r-md:14px;--r-sm:10px;
+    --shadow:0 1px 3px rgba(20,20,40,.06),0 8px 24px -8px rgba(20,20,40,.10);
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--bg);color:var(--ink);height:100vh;overflow:hidden;-webkit-font-smoothing:antialiased}
+  .screen{display:none;height:100vh}.screen.active{display:flex}
+  button{font-family:inherit;cursor:pointer}
+  input,select{font-family:inherit;outline:none}
+
+  /* 登录 / 模型 */
+  #login,#model{flex-direction:column;align-items:center;justify-content:center;gap:30px}
+  .logo{font-size:2rem;font-weight:800;letter-spacing:-.03em}
+  .logo span{color:var(--brand)}
+  .sub{color:var(--ink-3);font-size:.9rem;margin-top:8px;text-align:center}
+  .lcard{background:var(--card);border-radius:var(--r-lg);padding:30px 34px;box-shadow:var(--shadow);width:574px}
+  .lcard h3{font-size:.78rem;letter-spacing:.08em;color:var(--ink-3);font-weight:600;margin-bottom:16px}
+  .login-btns{display:flex;gap:16px}
+  .ubtn{flex:1;display:flex;flex-direction:column;align-items:center;gap:10px;border:none;border-radius:var(--r-md);
+        padding:26px 16px;font-size:.95rem;font-weight:700;transition:.15s}
+  .ubtn:hover{transform:translateY(-3px);box-shadow:0 8px 20px -6px rgba(20,20,40,.22)}
+  .ubtn .av{width:48px;height:48px;border-radius:50%;display:grid;place-items:center;font-size:1.5rem;flex-shrink:0}
+  .ubtn .key{font-size:.7rem;opacity:.55;font-weight:400}
+  .u-marla{background:#f3e8ff;color:#7e22ce}.u-marla .av{background:#e9d5ff}
+  .u-steve{background:#dbeafe;color:#1d4ed8}.u-steve .av{background:#bfdbfe}
+  .u-fzf{background:#d1fae5;color:#047857}.u-fzf .av{background:#a7f3d0}
+  .mgrid{display:flex;gap:16px}
+  .mcard{background:var(--card);border:2px solid var(--line);border-radius:var(--r-lg);padding:26px 30px;
+         cursor:pointer;text-align:center;min-width:158px;transition:.15s}
+  .mcard:hover{border-color:#c7c7dd;transform:translateY(-3px);box-shadow:var(--shadow)}
+  .mcard.on{border-color:var(--brand);background:var(--brand-soft)}
+  .mcard .e{font-size:2rem;display:block;margin-bottom:10px}
+  .mcard .n{font-weight:700;font-size:.95rem}
+  .mcard .d{font-size:.72rem;color:var(--ink-3);margin-top:5px}
+  .mcard .b{display:inline-block;margin-top:10px;font-size:.66rem;background:var(--brand);color:#fff;padding:3px 9px;border-radius:20px;font-weight:600}
+
+  /* 主界面 */
+  #app{flex-direction:column}
+  header{display:flex;align-items:center;gap:12px;padding:13px 22px;background:var(--card);
+         border-bottom:1px solid var(--line);flex-shrink:0;z-index:40}
+  .brand{font-weight:800;font-size:1.02rem;letter-spacing:-.02em;margin-right:4px}
+  .brand span{color:var(--brand)}
+  .chip{display:flex;align-items:center;gap:8px;padding:7px 14px;border-radius:20px;font-size:.85rem;font-weight:600}
+  .chip .av{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font-size:.7rem}
+  .spacer{margin-left:auto}
+  .ghost{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:8px 15px;
+         font-size:.83rem;font-weight:600;color:var(--ink-2);transition:.12s}
+  .ghost:hover{border-color:var(--brand);color:var(--brand)}
+
+  /* 模型切换（真能点） */
+  .mwrap{position:relative}
+  .mbadge{background:var(--ink);color:#fff;border:none;border-radius:20px;padding:9px 15px;font-size:.83rem;
+          font-weight:600;display:flex;align-items:center;gap:8px}
+  .mbadge:hover{background:#26264a}
+  .mdd{display:none;position:absolute;top:calc(100% + 10px);right:0;background:var(--card);
+       border:1px solid var(--line);border-radius:var(--r-md);box-shadow:var(--shadow);
+       min-width:210px;overflow:hidden;z-index:50}
+  .mdd.on{display:block}
+  .mdd button{display:flex;align-items:center;gap:9px;width:100%;background:none;border:none;
+              padding:12px 16px;font-size:.86rem;text-align:left;color:var(--ink)}
+  .mdd button:hover{background:var(--bg)}
+  .mdd .c{margin-left:auto;color:var(--ok);font-weight:700}
+
+  .cartbtn{position:relative;background:var(--card);border:1px solid var(--line);border-radius:20px;
+           padding:9px 15px;font-size:.83rem;font-weight:600}
+  .cartbtn:hover{border-color:var(--brand);color:var(--brand)}
+  .cartbtn .cnt{position:absolute;top:-6px;right:-6px;background:var(--price);color:#fff;font-size:.66rem;
+                font-weight:700;min-width:19px;height:19px;border-radius:10px;display:grid;place-items:center;padding:0 5px}
+
+  .main{display:flex;flex:1;overflow:hidden}
+  .chat{flex:1;display:flex;flex-direction:column;min-width:0}
+  .msgs{flex:1;overflow-y:auto;padding:24px 26px;display:flex;flex-direction:column;gap:14px}
+  .row{display:flex;max-width:76%}
+  .row.u{align-self:flex-end}.row.a{align-self:flex-start}
+  .bub{padding:12px 17px;border-radius:var(--r-lg);font-size:.92rem;line-height:1.6;white-space:pre-wrap}
+  .row.u .bub{background:var(--ink);color:#fff;border-bottom-right-radius:6px}
+  .row.a .bub{background:var(--card);box-shadow:var(--shadow);border-bottom-left-radius:6px}
+
+  /* 工具胶囊 */
+  .tool{align-self:flex-start;max-width:78%}
+  .tool-chip{display:inline-flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--line);
+             border-radius:20px;padding:6px 13px;font-size:.78rem;color:var(--ink-2);transition:.12s}
+  .tool-chip:hover{border-color:var(--brand);color:var(--brand)}
+  .tool-chip .nm{font-family:ui-monospace,"Consolas",monospace;font-size:.75rem}
+  .tool-chip .t{color:var(--ink-3);font-size:.72rem}
+  .tool-chip .caret{font-size:.55rem;color:var(--ink-3);transition:transform .15s}
+  .tool.open .tool-chip .caret{transform:rotate(180deg)}
+  .tool-body{display:none;margin-top:9px;background:var(--card);border:1px solid var(--line);
+             border-radius:var(--r-md);overflow:hidden;font-size:.83rem}
+  .tool.open .tool-body{display:block}
+  .tool-meta{display:flex;gap:16px;padding:9px 15px;background:var(--bg);border-bottom:1px solid var(--line);
+             font-size:.75rem;color:var(--ink-3);flex-wrap:wrap}
+  .tool-meta b{color:var(--ink-2)}
+  .tool-sec{padding:11px 15px}.tool-sec+.tool-sec{border-top:1px solid var(--line)}
+  .tool-sec .lbl{font-size:.68rem;letter-spacing:.07em;color:var(--ink-3);font-weight:700;margin-bottom:7px}
+  .tool-sec code{font-family:ui-monospace,"Consolas",monospace;font-size:.79rem;color:var(--ink-2);
+                 background:var(--bg);padding:2px 7px;border-radius:6px;display:inline-block;margin:2px 4px 2px 0}
+  .prow{display:flex;align-items:center;gap:11px;padding:8px 0}
+  .prow+.prow{border-top:1px dashed var(--line)}
+  .pthumb{width:40px;height:40px;border-radius:var(--r-sm);background:var(--brand-soft);
+          display:grid;place-items:center;font-size:1.1rem;flex-shrink:0}
+  .pinfo{flex:1;min-width:0}
+  .pname{font-size:.87rem;font-weight:600}
+  .pprice{font-size:.85rem;color:var(--price);font-weight:700;margin-top:2px}
+  .cline{display:flex;justify-content:space-between;padding:5px 0;font-size:.86rem}
+  .ctot{display:flex;justify-content:space-between;padding-top:9px;margin-top:6px;
+        border-top:1px solid var(--line);font-weight:700;font-size:.9rem}
+  .ctot .amt{color:var(--price)}
+  .cur::after{content:"▋";animation:bl 1s step-end infinite;color:var(--ink-3)}
+  @keyframes bl{50%{opacity:0}}
+
+  .inp-area{border-top:1px solid var(--line);padding:15px 22px;background:var(--card);flex-shrink:0}
+  .inp-wrap{display:flex;gap:10px}
+  .inp-wrap input{flex:1;border:1px solid var(--line);border-radius:var(--r-md);padding:13px 17px;
+                  font-size:.92rem;background:var(--bg);color:var(--ink)}
+  .inp-wrap input:focus{border-color:var(--brand);background:var(--card)}
+  .send{background:var(--brand);color:#fff;border:none;border-radius:var(--r-md);padding:0 24px;
+        font-size:.9rem;font-weight:700}
+  .send:hover{background:#4338ca}
+
+  /* 推荐面板 */
+  .reco{width:360px;background:var(--card);border-left:1px solid var(--line);display:flex;flex-direction:column;flex-shrink:0}
+  .reco-hd{padding:18px 20px;border-bottom:1px solid var(--line)}
+  .reco-hd h4{font-size:.94rem;font-weight:700}
+  .reco-hd p{font-size:.76rem;color:var(--ink-3);margin-top:4px}
+  .reco-body{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:12px}
+  .rhint{font-size:.76rem;color:var(--ink-3);background:var(--bg);border-radius:var(--r-sm);padding:10px 13px;line-height:1.6}
+  .rcard{border:1px solid var(--line);border-radius:var(--r-md);padding:13px;display:flex;gap:12px;align-items:center;transition:.12s}
+  .rcard:hover{border-color:var(--brand);box-shadow:var(--shadow)}
+  .rcard .pthumb{width:46px;height:46px;font-size:1.25rem}
+  .rtag{display:inline-block;font-size:.66rem;background:var(--brand-soft);color:var(--brand);
+        padding:2px 8px;border-radius:20px;font-weight:700;margin-top:5px}
+  .radd{margin-left:auto;background:transparent;color:var(--ink-3);border:none;
+        width:32px;height:32px;display:grid;place-items:center;font-size:1.1rem;line-height:1;flex-shrink:0;transition:.12s}
+  .radd:hover{color:var(--brand);transform:scale(1.12)}
+
+  /* 遮罩/抽屉/模态 */
+  .ov{display:none;position:fixed;inset:0;background:rgba(20,20,40,.32);z-index:100}
+  .ov.on{display:block}
+  .drawer{position:fixed;top:0;right:0;bottom:0;width:410px;background:var(--card);z-index:101;
+          transform:translateX(100%);transition:transform .22s cubic-bezier(.4,0,.2,1);
+          display:flex;flex-direction:column;box-shadow:-8px 0 32px rgba(20,20,40,.14)}
+  .drawer.on{transform:none}
+  .dhd{display:flex;align-items:center;padding:18px 22px;border-bottom:1px solid var(--line)}
+  .dhd h3{font-size:1rem;font-weight:700}
+  .dhd .x{margin-left:auto;background:none;border:none;color:var(--ink-3);font-size:1.1rem}
+  .dbody{flex:1;overflow-y:auto;padding:18px 22px}
+  .citem{display:flex;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid var(--line)}
+  .qty{display:flex;align-items:center;gap:7px}
+  .qty button{width:24px;height:24px;border-radius:7px;border:1px solid var(--line);background:var(--card);
+              font-size:.85rem;color:var(--ink-2)}
+  .qty button:hover{border-color:var(--brand);color:var(--brand)}
+  .del{background:none;border:none;color:var(--ink-3);font-size:.95rem;padding:0 4px}
+  .del:hover{color:#dc2626}
+  .dfoot{border-top:1px solid var(--line);padding:18px 22px}
+  .dfoot .ctot{font-size:1rem;margin-bottom:14px}
+  .dacts{display:flex;gap:10px}
+  .clear{flex:0 0 auto;background:var(--card);border:1px solid var(--line);border-radius:var(--r-md);
+         padding:14px 18px;font-size:.88rem;font-weight:600;color:var(--ink-2)}
+  .clear:hover{border-color:#dc2626;color:#dc2626}
+  .checkout{flex:1;background:var(--brand);color:#fff;border:none;border-radius:var(--r-md);
+            padding:14px;font-size:.94rem;font-weight:700}
+  .checkout:hover{background:#4338ca}
+  .empty{text-align:center;color:var(--ink-3);font-size:.86rem;padding:50px 0}
+
+  /* Toast */
+  .toast{position:fixed;top:22px;left:50%;transform:translateX(-50%) translateY(-14px);
+         z-index:9999;background:var(--ok);color:#fff;padding:11px 22px;border-radius:var(--r-sm);
+         font-size:.87rem;font-weight:600;opacity:0;pointer-events:none;
+         transition:opacity .2s,transform .2s;box-shadow:0 8px 24px -6px rgba(20,20,40,.3)}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+  /* 欢迎语 */
+  .welcome{align-self:center;text-align:center;color:var(--ink-3);font-size:.88rem;
+           background:var(--bg);border-radius:20px;padding:9px 20px;margin-bottom:6px}
+
+  /* 快捷加购（购物车抽屉内） */
+  .qa{border-top:1px solid var(--line);padding:14px 22px;background:var(--bg)}
+  .qa-lbl{font-size:.68rem;font-weight:700;color:var(--ink-3);letter-spacing:.08em;margin-bottom:9px}
+  .qa-chips{display:flex;flex-wrap:wrap;gap:7px}
+  .qa-chip{border:1px solid var(--line);border-radius:20px;padding:5px 13px;font-size:.79rem;
+           background:var(--card);color:var(--ink-2);transition:.12s}
+  .qa-chip:hover{border-color:var(--brand);color:var(--brand);background:var(--brand-soft)}
+
+  /* 退出登录 */
+  .logout{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:9px 14px;
+          font-size:.82rem;font-weight:600;color:var(--ink-3)}
+  .logout:hover{border-color:#dc2626;color:#dc2626}
+
+  .modal{display:none;position:fixed;inset:0;z-index:101;background:rgba(20,20,40,.32);
+         align-items:center;justify-content:center}
+  .modal.on{display:flex}
+  .mbox{background:var(--card);border-radius:var(--r-lg);width:min(900px,92vw);max-height:84vh;
+         display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 60px -12px rgba(20,20,40,.3)}
+  .mhd{padding:20px 26px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px}
+  .mhd h3{font-size:1.05rem;font-weight:700}
+  .mhd .pc{font-size:.78rem;color:var(--ink-3)}
+  .mhd .x{margin-left:auto;background:none;border:none;color:var(--ink-3);font-size:1.15rem}
+  .toolbar{display:flex;gap:10px;padding:16px 26px 0}
+  .toolbar input{flex:1;border:1px solid var(--line);border-radius:var(--r-sm);padding:10px 14px;
+                 font-size:.88rem;background:var(--bg);color:var(--ink)}
+  .toolbar input:focus{border-color:var(--brand);background:var(--card)}
+  .toolbar select{border:1px solid var(--line);border-radius:var(--r-sm);padding:10px 12px;
+                  font-size:.86rem;background:var(--card);color:var(--ink-2)}
+  .cats{display:flex;gap:8px;padding:14px 26px 0;flex-wrap:wrap}
+  .cat{border:1px solid var(--line);background:var(--card);border-radius:20px;padding:6px 14px;
+       font-size:.8rem;color:var(--ink-2)}
+  .cat:hover{border-color:var(--brand);color:var(--brand)}
+  .cat.on{background:var(--brand);border-color:var(--brand);color:#fff;font-weight:600}
+  .pgrid{padding:20px 26px 26px;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:14px}
+  .pcard{border:1px solid var(--line);border-radius:var(--r-md);padding:15px;text-align:center;transition:.12s;
+         display:flex;flex-direction:column}
+  .pcard:hover{border-color:var(--brand);box-shadow:var(--shadow);transform:translateY(-2px)}
+  .pcard .pthumb{width:56px;height:56px;margin:0 auto 10px;font-size:1.5rem;cursor:pointer}
+  .pcard .pname{cursor:pointer}
+  .pdesc{font-size:.73rem;color:var(--ink-3);line-height:1.5;margin-top:6px;min-height:32px}
+  .pcard .pprice{margin-top:8px;font-size:.92rem}
+  .addbtn{margin-top:11px;background:transparent;color:var(--ink-3);border:none;border-radius:var(--r-sm);
+          padding:8px;font-size:1.15rem;line-height:1;width:100%;transition:.12s}
+  .addbtn:hover{color:var(--brand)}
+
+  /* 商品详情 */
+  .dbox{background:var(--card);border-radius:var(--r-lg);width:min(560px,92vw);overflow:hidden;
+        box-shadow:0 24px 60px -12px rgba(20,20,40,.3)}
+  .dbd{padding:26px;display:flex;gap:20px}
+  .dbd .big{width:96px;height:96px;border-radius:var(--r-md);background:var(--brand-soft);
+            display:grid;place-items:center;font-size:2.6rem;flex-shrink:0}
+  .dbd h2{font-size:1.3rem;font-weight:800}
+  .dbd .pprice{font-size:1.15rem;margin-top:8px}
+  .dbd .dsc{font-size:.88rem;color:var(--ink-2);line-height:1.7;margin-top:12px}
+  .dft{padding:0 26px 26px}
+  .dft .addbtn{padding:12px;font-size:1.35rem}
+
+  #notes{position:fixed;bottom:20px;left:20px;background:var(--ink);color:#fff;border-radius:var(--r-md);
+         padding:15px 19px;font-size:.78rem;line-height:1.75;max-width:340px;z-index:200;
+         box-shadow:0 12px 32px -8px rgba(20,20,40,.4)}
+  #notes b{color:#a5b4fc}
+  #notes .x{position:absolute;top:9px;right:13px;background:none;border:none;color:#fff;opacity:.5;font-size:1rem}
+  #notes .x:hover{opacity:1}
+</style>
+</head>
+<body>
+
+<!-- 1 登录 -->
+<div id="login" class="screen active">
+  <div style="text-align:center"><div class="logo">AI<span>Shop</span> 购物助手</div><div class="sub">选择一个账户开始</div></div>
+  <div class="lcard">
+    <h3>选择账户</h3>
+    <div class="login-btns">
+      <button class="ubtn u-marla" onclick="pickUser('marla')"><span class="av">👩</span>Marla<span class="key">marla</span></button>
+      <button class="ubtn u-steve" onclick="pickUser('steve')"><span class="av">👨</span>Steve<span class="key">steve</span></button>
+      <button class="ubtn u-fzf"   onclick="pickUser('fzf003')"><span class="av">🧑</span>fzf003<span class="key">fzf003</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- 2 模型 -->
+<div id="model" class="screen">
+  <div style="text-align:center"><div class="logo">选择模型</div><div class="sub">对话中随时可切换</div></div>
+  <div class="mgrid" id="mgrid"></div>
+  <div style="font-size:.78rem;color:var(--ink-3)">清单来自 AguiHost 的 <code>GET /models</code></div>
+</div>
+
+<!-- 3 主界面 -->
+<div id="app" class="screen">
+  <header>
+    <div class="brand">AI<span>Shop</span></div>
+    <div class="chip u-marla" id="uchip"><span class="av">👩</span>Marla</div>
+    <button class="logout" onclick="logout()" title="退出登录">退出</button>
+    <div class="spacer"></div>
+    <button class="ghost" onclick="openProducts()">🛍 浏览商品</button>
+    <div class="mwrap">
+      <button class="mbadge" id="mbadge" onclick="document.getElementById('mdd').classList.toggle('on')">⚡ Qwen <span style="font-size:.6rem;opacity:.7">▼</span></button>
+      <div class="mdd" id="mdd"></div>
+    </div>
+    <button class="cartbtn" onclick="openCart()">🛒 购物车<span class="cnt" id="cnt">1</span></button>
+  </header>
+
+  <div class="main">
+    <div class="chat">
+      <div class="msgs">
+        <div class="welcome">👋 开始聊天，告诉我您的喜好</div>
+        <div class="row u"><div class="bub">帮我找双跑鞋</div></div>
+
+        <div class="tool">
+          <div class="tool-chip" onclick="this.parentElement.classList.toggle('open')">🔍 <span class="nm">search_product</span><span class="t">320ms</span><span class="caret">▼</span></div>
+          <div class="tool-body">
+            <div class="tool-meta"><span>耗时 <b>320ms</b></span><span>Token <b>142</b></span><span>状态 <b style="color:var(--ok)">成功</b></span></div>
+            <div class="tool-sec"><div class="lbl">参数</div><code>query: "跑鞋"</code></div>
+            <div class="tool-sec"><div class="lbl">结果</div>
+              <div class="prow"><div class="pthumb">👟</div><div class="pinfo"><div class="pname">专业跑鞋</div><div class="pprice">¥129.99</div></div></div>
+              <div class="prow"><div class="pthumb">👟</div><div class="pinfo"><div class="pname">轻量跑鞋</div><div class="pprice">¥199.00</div></div></div>
+              <div class="prow"><div class="pthumb">🥾</div><div class="pinfo"><div class="pname">越野跑鞋</div><div class="pprice">¥259.00</div></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row a"><div class="bub">为您找到 3 款跑鞋：
+
+· 专业跑鞋 ¥129.99
+· 轻量跑鞋 ¥199.00
+· 越野跑鞋 ¥259.00
+
+需要我帮您加入购物车吗？</div></div>
+
+        <div class="row u"><div class="bub">把专业跑鞋加进去</div></div>
+        <div class="tool open">
+          <div class="tool-chip" onclick="this.parentElement.classList.toggle('open')">🛒 <span class="nm">add_to_cart</span><span class="t">180ms</span><span class="caret">▼</span></div>
+          <div class="tool-body">
+            <div class="tool-meta"><span>耗时 <b>180ms</b></span><span>Token <b>86</b></span><span>状态 <b style="color:var(--ok)">成功</b></span></div>
+            <div class="tool-sec"><div class="lbl">参数</div><code>product_id: 3</code><code>quantity: 1</code></div>
+            <div class="tool-sec"><div class="lbl">结果</div>
+              <div class="cline"><span>专业跑鞋 × 1</span><span>¥129.99</span></div>
+              <div class="ctot"><span>合计</span><span class="amt">¥129.99</span></div></div>
+          </div>
+        </div>
+        <div class="row a"><div class="bub">已为您加入购物车，当前共 1 件，合计 ¥129.99。</div></div>
+
+        <div class="row u"><div class="bub">有没有适合夜跑的，顺便推荐点别的</div></div>
+
+        <!-- ★ 推荐工具：低延迟，一次调用产出面板数据 -->
+        <div class="tool open">
+          <div class="tool-chip" onclick="this.parentElement.classList.toggle('open')">✨ <span class="nm">recommend_products</span><span class="t">210ms</span><span class="caret">▼</span></div>
+          <div class="tool-body">
+            <div class="tool-meta"><span>耗时 <b>210ms</b></span><span>Token <b>178</b></span><span>状态 <b style="color:var(--ok)">成功</b></span></div>
+            <div class="tool-sec"><div class="lbl">参数</div><code>context: "夜跑"</code><code>limit: 3</code></div>
+            <div class="tool-sec"><div class="lbl">结果（同时驱动右侧推荐面板）</div>
+              <div class="prow"><div class="pthumb">🎧</div><div class="pinfo"><div class="pname">运动蓝牙耳机</div><div class="pprice">¥349.00</div><div style="font-size:.72rem;color:var(--ink-3);margin-top:2px">因为你提到夜跑</div></div></div>
+              <div class="prow"><div class="pthumb">🧦</div><div class="pinfo"><div class="pname">专业跑步袜</div><div class="pprice">¥39.00</div><div style="font-size:.72rem;color:var(--ink-3);margin-top:2px">与已选跑鞋搭配</div></div></div>
+            </div>
+          </div>
+        </div>
+        <div class="row a"><div class="bub">夜跑的话建议配一副运动耳机（¥349），另外专业跑步袜（¥39）和跑鞋很搭。推荐已放到右侧。</div></div>
+      </div>
+
+      <div class="inp-area"><div class="inp-wrap"><input placeholder="说点什么…（原型不可输入）" disabled><button class="send">发送</button></div></div>
+    </div>
+
+    <aside class="reco">
+      <div class="reco-hd"><h4>为你推荐</h4><p>来自 <code style="font-size:.72rem">recommend_products</code> · 结合对话与偏好</p></div>
+      <div class="reco-body" id="recoBody"></div>
+    </aside>
+  </div>
+</div>
+
+<!-- 购物车抽屉 -->
+<div id="carOv" class="ov" onclick="closeCart()"></div>
+<aside class="drawer" id="drawer">
+  <div class="dhd"><h3>购物车</h3><button class="x" onclick="closeCart()">✕</button></div>
+  <div class="dbody" id="cbody"></div>
+  <div class="qa" id="qa" style="display:none">
+    <div class="qa-lbl">快捷加购</div>
+    <div class="qa-chips" id="qaChips"></div>
+  </div>
+  <div class="dfoot">
+    <div class="ctot"><span>合计</span><span class="amt" id="ctotal">¥0.00</span></div>
+    <div class="dacts">
+      <button class="clear" onclick="clearCart()">🗑 清空</button>
+      <button class="checkout">去结算</button>
+    </div>
+  </div>
+</aside>
+
+<!-- 商品模态 -->
+<div id="pm" class="modal" onclick="if(event.target===this)closeProducts()">
+  <div class="mbox">
+    <div class="mhd"><h3>📦 全部商品</h3><span class="pc" id="pc"></span><button class="x" onclick="closeProducts()">✕</button></div>
+    <div class="toolbar">
+      <input id="q" placeholder="🔍 搜索商品名称或描述…" oninput="renderProducts()">
+      <select id="sort" onchange="renderProducts()">
+        <option value="default">默认排序</option>
+        <option value="price_asc">价格 ↑</option>
+        <option value="price_desc">价格 ↓</option>
+      </select>
+    </div>
+    <div class="cats" id="cats"></div>
+    <div class="pgrid" id="pgrid"></div>
+  </div>
+</div>
+
+<!-- 商品详情 -->
+<div id="pd" class="modal" onclick="if(event.target===this)closeDetail()">
+  <div class="dbox">
+    <div class="dbd">
+      <div class="big" id="dEmoji">👟</div>
+      <div style="flex:1">
+        <h2 id="dName"></h2>
+        <div class="pprice" id="dPrice"></div>
+        <div class="dsc" id="dDesc"></div>
+      </div>
+    </div>
+    <div class="dft"><button class="addbtn" id="dAdd" title="加入购物车">🛒</button></div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<div id="notes">
+  <button class="x" onclick="this.parentElement.style.display='none'">✕</button>
+  <b>v3 补全清单</b><br>
+  ① 模型徽标可点切换（✓ 跟随）<br>
+  ② 商品模态：搜索 + 类别 + 排序 + 简介 + 详情弹窗<br>
+  ③ 购物车：透明🛒图标加购 · 🗑清空 · 快捷加购 chips<br>
+  ④ 新增 <code>recommend_products</code> 工具（210ms），驱动回答 + 右侧面板<br>
+  ⑤ Toast 提示 · 退出登录 · 聊天欢迎语
+</div>
+
+<script>
+/* ── 数据 ── */
+const MODELS=[
+  {id:'qwen',emoji:'⚡',name:'Qwen',desc:'qwen3.8-flash',def:true},
+  {id:'deepseek',emoji:'🐋',name:'DeepSeek',desc:'deepseek-v4-flash'},
+  {id:'gpt-4.1',emoji:'🤖',name:'MiMo',desc:'mimo-v2.5'}
+];
+const PRODUCTS=[
+  {id:1,emoji:'👟',name:'专业跑鞋',price:129.99,cat:'鞋类',desc:'轻量缓震中底，适合日常训练与长距离慢跑。'},
+  {id:2,emoji:'👟',name:'轻量跑鞋',price:199.00,cat:'鞋类',desc:'超轻网面，透气性好，适合夏季与速度训练。'},
+  {id:3,emoji:'🥾',name:'越野跑鞋',price:259.00,cat:'鞋类',desc:'加厚大底与防滑纹路，适合山地与碎石路面。'},
+  {id:4,emoji:'🎧',name:'运动蓝牙耳机',price:349.00,cat:'配饰',desc:'IPX5 防水，耳挂式不易脱落，续航 8 小时，适合夜跑。'},
+  {id:5,emoji:'⌚',name:'运动手环',price:229.00,cat:'配饰',desc:'心率 + 配速 + 睡眠监测，支持 20 种运动模式。'},
+  {id:6,emoji:'🧦',name:'专业跑步袜',price:39.00,cat:'配饰',desc:'足弓加压设计，速干抗菌，减少长跑起泡。'},
+  {id:7,emoji:'🎽',name:'速干跑步背心',price:159.00,cat:'服装',desc:'单向导湿面料，反光条设计，夜跑更安全。'},
+  {id:8,emoji:'💧',name:'便携运动水壶',price:59.00,cat:'配饰',desc:'500ml 食品级硅胶，轻便不晃动，配腰带卡扣。'}
+];
+const RECO=[
+  {id:4,tag:'因为你提到夜跑'},{id:6,tag:'与已选跑鞋搭配'},{id:5,tag:'你的历史偏好'}
+];
+
+/* ── 状态 ── */
+let userStyle='marla', userLabel='Marla', curModel='qwen';
+let cart=[{id:1,qty:1}];
+let curCat='全部';
+
+/* ── 初始化 ── */
+document.getElementById('mgrid').innerHTML=MODELS.map(m=>
+  `<div class="mcard${m.def?' on':''}" onclick="pickModel('${m.id}',this)">
+     <span class="e">${m.emoji}</span><div class="n">${m.name}</div><div class="d">${m.desc}</div>
+     ${m.def?'<div class="b">默认</div>':''}</div>`).join('');
+document.getElementById('cats').innerHTML=
+  ['全部',...new Set(PRODUCTS.map(p=>p.cat))].map((c,i)=>
+    `<button class="cat${i===0?' on':''}" onclick="selCat('${c}',this)">${c}</button>`).join('');
+renderReco(); renderCart(); renderModelDD();
+
+/* ── 流程 ── */
+function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active')}
+function pickUser(u){
+  userStyle=u==='fzf003'?'u-fzf':'u-'+u;
+  userLabel=u==='marla'?'Marla':u==='steve'?'Steve':'fzf003';
+  const av=u==='marla'?'👩':u==='steve'?'👨':'🧑';
+  const c=document.getElementById('uchip');
+  c.className='chip '+userStyle;
+  c.innerHTML=`<span class="av">${av}</span>${userLabel}`;
+  go('model');
+}
+function pickModel(id,el){
+  document.querySelectorAll('.mcard').forEach(c=>c.classList.remove('on'));
+  el.classList.add('on'); setCurModel(id); setTimeout(()=>go('app'),200);
+}
+function setCurModel(id){
+  curModel=id;
+  const m=MODELS.find(x=>x.id===id);
+  document.getElementById('mbadge').innerHTML=`${m.emoji} ${m.name} <span style="font-size:.6rem;opacity:.7">▼</span>`;
+  renderModelDD();
+}
+function renderModelDD(){
+  document.getElementById('mdd').innerHTML=MODELS.map(m=>
+    `<button onclick="setCurModel('${m.id}');document.getElementById('mdd').classList.remove('on')">
+       ${m.emoji} ${m.name}${m.id===curModel?'<span class="c">✓</span>':''}</button>`).join('');
+}
+
+/* ── 商品 ── */
+function openProducts(){document.getElementById('pm').classList.add('on');renderProducts();closeDetail()}
+function closeProducts(){document.getElementById('pm').classList.remove('on')}
+function selCat(c,el){curCat=c;document.querySelectorAll('.cat').forEach(x=>x.classList.remove('on'));el.classList.add('on');renderProducts()}
+function renderProducts(){
+  const q=(document.getElementById('q').value||'').trim().toLowerCase();
+  const sort=document.getElementById('sort').value;
+  let list=PRODUCTS.filter(p=>(curCat==='全部'||p.cat===curCat) &&
+    (!q||p.name.toLowerCase().includes(q)||p.desc.toLowerCase().includes(q)));
+  if(sort==='price_asc')list=[...list].sort((a,b)=>a.price-b.price);
+  if(sort==='price_desc')list=[...list].sort((a,b)=>b.price-a.price);
+  document.getElementById('pc').textContent=`共 ${list.length} 件`;
+  document.getElementById('pgrid').innerHTML=list.length?list.map(p=>
+    `<div class="pcard">
+       <div class="pthumb" onclick="showDetail(${p.id})">${p.emoji}</div>
+       <div class="pname" onclick="showDetail(${p.id})">${p.name}</div>
+       <div class="pdesc">${p.desc}</div>
+       <div class="pprice">¥${p.price.toFixed(2)}</div>
+       <button class="addbtn" onclick="addCart(${p.id})" title="加入购物车">🛒</button>
+     </div>`).join(''):'<div class="empty" style="grid-column:1/-1">没有匹配的商品</div>';
+}
+function showDetail(id){
+  const p=PRODUCTS.find(x=>x.id===id);
+  document.getElementById('dEmoji').textContent=p.emoji;
+  document.getElementById('dName').textContent=p.name;
+  document.getElementById('dPrice').textContent='¥'+p.price.toFixed(2);
+  document.getElementById('dDesc').textContent=p.desc+`（分类：${p.cat}）`;
+  document.getElementById('dAdd').onclick=()=>{addCart(p.id);closeDetail()};
+  document.getElementById('pd').classList.add('on');
+}
+function closeDetail(){document.getElementById('pd').classList.remove('on')}
+
+/* ── 购物车 ── */
+function addCart(id){
+  const it=cart.find(c=>c.id===id);
+  if(it)it.qty++; else cart.push({id,qty:1});
+  const p=PRODUCTS.find(x=>x.id===id);
+  renderCart();
+  showToast(`已加入购物车：${p.name}`);
+}
+function showToast(msg){
+  const t=document.getElementById('toast');
+  t.textContent=msg; t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer=setTimeout(()=>t.classList.remove('show'),3000);
+}
+function chQty(id,d){
+  const it=cart.find(c=>c.id===id); if(!it)return;
+  it.qty+=d; if(it.qty<=0)cart=cart.filter(c=>c.id!==id);
+  renderCart();
+}
+function rmItem(id){cart=cart.filter(c=>c.id!==id);renderCart()}
+function clearCart(){cart=[];renderCart()}
+function renderCart(){
+  const n=cart.reduce((s,c)=>s+c.qty,0);
+  document.getElementById('cnt').textContent=n;
+  document.getElementById('cnt').style.display=n?'grid':'none';
+  const body=document.getElementById('cbody');
+  if(!cart.length){
+    body.innerHTML='<div class="empty">购物车是空的</div>';
+    document.getElementById('ctotal').textContent='¥0.00';
+    renderQuickAdd(); return;
+  }
+  let total=0;
+  body.innerHTML=cart.map(c=>{
+    const p=PRODUCTS.find(x=>x.id===c.id); total+=p.price*c.qty;
+    return `<div class="citem">
+      <div class="pthumb">${p.emoji}</div>
+      <div class="pinfo"><div class="pname">${p.name}</div><div class="pprice">¥${p.price.toFixed(2)}</div></div>
+      <div class="qty"><button onclick="chQty(${p.id},-1)">−</button><span>${c.qty}</span><button onclick="chQty(${p.id},1)">+</button></div>
+      <button class="del" onclick="rmItem(${p.id})">🗑</button>
+    </div>`}).join('');
+  document.getElementById('ctotal').textContent='¥'+total.toFixed(2);
+  renderQuickAdd();
+}
+/* 快捷加购：购物车非空、且还有没加购的商品时才显示（同老前端口径） */
+function renderQuickAdd(){
+  const sec=document.getElementById('qa'), chips=document.getElementById('qaChips');
+  const inCart=new Set(cart.map(c=>c.id));
+  const rest=PRODUCTS.filter(p=>!inCart.has(p.id));
+  if(!cart.length || !rest.length){sec.style.display='none';return}
+  sec.style.display='block';
+  chips.innerHTML=rest.slice(0,6).map(p=>
+    `<button class="qa-chip" onclick="addCart(${p.id})">${p.emoji} ${p.name} ¥${p.price.toFixed(2)}</button>`).join('');
+}
+function logout(){
+  cart=[]; curModel='qwen'; userStyle='marla'; userLabel='Marla';
+  closeCart(); closeProducts(); closeDetail();
+  document.getElementById('mdd').classList.remove('on');
+  go('login');
+}
+function openCart(){document.getElementById('carOv').classList.add('on');document.getElementById('drawer').classList.add('on')}
+function closeCart(){document.getElementById('carOv').classList.remove('on');document.getElementById('drawer').classList.remove('on')}
+
+/* ── 推荐面板 ── */
+function renderReco(){
+  document.getElementById('recoBody').innerHTML=
+    '<div class="rhint">💡 面板数据来自 <b>recommend_products</b> 工具的一次调用——不额外请求接口，不额外等一次大模型生成。</div>'+
+    RECO.map(r=>{const p=PRODUCTS.find(x=>x.id===r.id);
+      return `<div class="rcard"><div class="pthumb">${p.emoji}</div>
+        <div class="pinfo"><div class="pname">${p.name}</div><div class="pprice">¥${p.price.toFixed(2)}</div>
+        <div class="rtag">${r.tag}</div></div>
+        <button class="radd" onclick="addCart(${p.id})" title="加入购物车">🛒</button></div>`}).join('');
+}
+</script>
+</body>
+</html>

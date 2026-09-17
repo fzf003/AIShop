@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AG-UI 购物客户端 — 设计原型</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #f5f5f5; color: #1a1a2e; height: 100vh; overflow: hidden;
+  }
+  .screen { display: none; height: 100vh; }
+  .screen.active { display: flex; }
+
+  /* ────────── 登录屏 ────────── */
+  #loginScreen { align-items: center; justify-content: center; flex-direction: column; gap: 28px; }
+  .brand { font-size: 1.9rem; font-weight: 700; letter-spacing: -0.02em; }
+  .brand-sub { color: #888; font-size: 0.92rem; margin-top: 6px; }
+  .login-card {
+    background: #fff; border: 1px solid #eee; border-radius: 20px;
+    padding: 32px 36px; box-shadow: 0 2px 12px rgba(26,26,46,.06); min-width: 380px;
+  }
+  .login-label { font-size: .82rem; color: #888; margin-bottom: 14px; letter-spacing: .04em; }
+  .login-btns { display: flex; flex-direction: column; gap: 10px; }
+  .login-btn {
+    border: none; border-radius: 12px; padding: 14px 18px; font-size: 1rem;
+    font-weight: 600; cursor: pointer; text-align: left; transition: transform .12s, box-shadow .12s;
+    display: flex; align-items: center; gap: 10px; font-family: inherit;
+  }
+  .login-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(26,26,46,.12); }
+  .login-btn.marla { background: #e8d5f5; color: #6b21a8; }
+  .login-btn.steve { background: #d5e8f5; color: #1e40af; }
+  .login-btn.fzf   { background: #d1fae5; color: #065f46; }
+  .login-btn .tag { margin-left: auto; font-size: .74rem; opacity: .65; font-weight: 400; }
+
+  /* ────────── 模型选择屏 ────────── */
+  #modelScreen { align-items: center; justify-content: center; flex-direction: column; gap: 26px; }
+  .model-grid { display: flex; gap: 14px; }
+  .model-card {
+    background: #fff; border: 2px solid #eee; border-radius: 16px; padding: 22px 26px;
+    cursor: pointer; text-align: center; min-width: 150px; transition: all .12s;
+  }
+  .model-card:hover { border-color: #ccc; transform: translateY(-2px); }
+  .model-card.selected { border-color: #16a34a; background: #f0fdf4; }
+  .model-card .emoji { font-size: 1.9rem; display: block; margin-bottom: 8px; }
+  .model-card .mname { font-weight: 600; font-size: .95rem; }
+  .model-card .mdesc { font-size: .74rem; color: #888; margin-top: 4px; }
+  .model-card .badge {
+    display: inline-block; margin-top: 8px; font-size: .68rem; background: #16a34a;
+    color: #fff; padding: 2px 7px; border-radius: 20px;
+  }
+  .hint { font-size: .8rem; color: #999; }
+
+  /* ────────── 聊天屏 ────────── */
+  #chatScreen { flex-direction: column; background: #fff; }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+    border-bottom: 1px solid #eee; flex-shrink: 0;
+  }
+  .user-chip {
+    display: flex; align-items: center; gap: 7px; padding: 5px 12px;
+    border-radius: 20px; font-size: .86rem; font-weight: 600;
+  }
+  .user-chip.marla { background: #e8d5f5; color: #6b21a8; }
+  .user-chip.steve { background: #d5e8f5; color: #1e40af; }
+  .user-chip.fzf   { background: #d1fae5; color: #065f46; }
+  .model-badge {
+    margin-left: auto; background: #1a1a2e; color: #fff; padding: 7px 14px;
+    border-radius: 20px; font-size: .84rem; cursor: pointer; position: relative;
+    display: flex; align-items: center; gap: 7px; user-select: none;
+  }
+  .model-badge:hover { background: #2d2d4a; }
+  .model-badge .caret { font-size: .6rem; opacity: .7; }
+  .model-dropdown {
+    display: none; position: absolute; top: calc(100% + 8px); right: 0; background: #fff;
+    border: 1px solid #eee; border-radius: 12px; box-shadow: 0 6px 24px rgba(26,26,46,.14);
+    min-width: 190px; overflow: hidden; z-index: 20;
+  }
+  .model-badge:hover .model-dropdown { display: block; }
+  .dd-item {
+    padding: 11px 16px; font-size: .87rem; color: #1a1a2e; cursor: pointer;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .dd-item:hover { background: #f5f5f5; }
+  .dd-item .check { margin-left: auto; color: #16a34a; font-weight: 700; }
+
+  #messages { flex: 1; overflow-y: auto; padding: 22px 20px; display: flex; flex-direction: column; gap: 16px; }
+  .msg { display: flex; max-width: 78%; }
+  .msg.user { align-self: flex-end; }
+  .msg.assistant { align-self: flex-start; }
+  .bubble {
+    padding: 11px 16px; border-radius: 16px; font-size: .93rem; line-height: 1.55; white-space: pre-wrap;
+  }
+  .msg.user .bubble { background: #1a1a2e; color: #fff; border-bottom-right-radius: 5px; }
+  .msg.assistant .bubble { background: #f5f5f5; border-bottom-left-radius: 5px; }
+
+  /* 工具调用块 —— 原型重点 */
+  .tool-block {
+    align-self: flex-start; max-width: 82%; border: 1px solid #e5e7eb;
+    border-radius: 12px; background: #fafafa; overflow: hidden; font-size: .85rem;
+  }
+  .tool-head {
+    display: flex; align-items: center; gap: 8px; padding: 9px 14px;
+    background: #f0f0f0; border-bottom: 1px solid #e5e7eb; color: #555; font-weight: 500;
+  }
+  .tool-head .icon { font-size: .95rem; }
+  .tool-head .name { font-family: ui-monospace, "Consolas", monospace; font-size: .8rem; color: #666; }
+  .tool-head .status { margin-left: auto; font-size: .76rem; }
+  .tool-head .status.ok { color: #16a34a; }
+  .tool-head .status.run { color: #d97706; }
+  .tool-args { padding: 8px 14px; color: #666; font-size: .8rem; font-family: ui-monospace, "Consolas", monospace;
+               border-bottom: 1px solid #f0f0f0; }
+  .tool-result { padding: 10px 14px; color: #444; }
+
+  /* 工具结果里的商品卡片 */
+  .prod-row { display: flex; align-items: center; gap: 11px; padding: 8px 0; }
+  .prod-row + .prod-row { border-top: 1px dashed #e5e7eb; }
+  .prod-thumb {
+    width: 38px; height: 38px; border-radius: 9px; background: #e8d5f5;
+    display: flex; align-items: center; justify-content: center; font-size: 1.05rem; flex-shrink: 0;
+  }
+  .prod-info { flex: 1; min-width: 0; }
+  .prod-name { font-size: .87rem; font-weight: 500; color: #1a1a2e; }
+  .prod-price { font-size: .84rem; color: #16a34a; font-weight: 600; margin-top: 2px; }
+
+  .cart-line { display: flex; justify-content: space-between; padding: 5px 0; font-size: .86rem; }
+  .cart-total {
+    display: flex; justify-content: space-between; padding-top: 9px; margin-top: 6px;
+    border-top: 1px solid #e5e7eb; font-weight: 700; font-size: .9rem;
+  }
+  .cart-total .amt { color: #16a34a; }
+
+  .cursor::after {
+    content: "▋"; animation: blink 1s step-end infinite; color: #888; margin-left: 1px;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  footer { border-top: 1px solid #eee; padding: 14px 20px; flex-shrink: 0; }
+  .composer { display: flex; gap: 10px; }
+  #chatInput {
+    flex: 1; border: 1px solid #ddd; border-radius: 12px; padding: 12px 16px;
+    font-size: .93rem; font-family: inherit; outline: none; color: #1a1a2e;
+  }
+  #chatInput:focus { border-color: #1a1a2e; }
+  .send-btn {
+    background: #1a1a2e; color: #fff; border: none; border-radius: 12px;
+    padding: 0 22px; font-size: .9rem; font-weight: 600; cursor: pointer; font-family: inherit;
+  }
+  .send-btn:hover { background: #2d2d4a; }
+
+  /* 说明浮层 */
+  #notes {
+    position: fixed; bottom: 18px; left: 18px; background: #1a1a2e; color: #fff;
+    border-radius: 12px; padding: 14px 18px; font-size: .8rem; line-height: 1.7;
+    max-width: 330px; box-shadow: 0 8px 28px rgba(26,26,46,.28); z-index: 50;
+  }
+  #notes b { color: #7dd3a0; }
+  #notes .close { position: absolute; top: 8px; right: 12px; cursor: pointer; opacity: .6; }
+  #notes .close:hover { opacity: 1; }
+</style>
+</head>
+<body>
+
+<!-- ══════ 1. 账户选择 ══════ -->
+<div id="loginScreen" class="screen active">
+  <div style="text-align:center">
+    <div class="brand">AIShop 购物助手</div>
+    <div class="brand-sub">选择一个账户开始</div>
+  </div>
+  <div class="login-card">
+    <div class="login-label">选择账户</div>
+    <div class="login-btns">
+      <button class="login-btn marla" onclick="pickUser('marla')">👩 Marla <span class="tag">marla</span></button>
+      <button class="login-btn steve" onclick="pickUser('steve')">👨 Steve <span class="tag">steve</span></button>
+      <button class="login-btn fzf"   onclick="pickUser('fzf003')">🧑 fzf003 <span class="tag">fzf003</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ 2. 模型选择 ══════ -->
+<div id="modelScreen" class="screen">
+  <div style="text-align:center">
+    <div class="brand">选择模型</div>
+    <div class="brand-sub">随时可在对话中切换</div>
+  </div>
+  <div class="model-grid">
+    <div class="model-card selected" onclick="pickModel(this,'qwen')">
+      <span class="emoji">⚡</span><div class="mname">Qwen</div>
+      <div class="mdesc">qwen3.8-flash</div><div class="badge">默认</div>
+    </div>
+    <div class="model-card" onclick="pickModel(this,'deepseek')">
+      <span class="emoji">🐋</span><div class="mname">DeepSeek</div>
+      <div class="mdesc">deepseek-v4-flash</div>
+    </div>
+    <div class="model-card" onclick="pickModel(this,'gpt-4.1')">
+      <span class="emoji">🤖</span><div class="mname">MiMo</div>
+      <div class="mdesc">mimo-v2.5</div>
+    </div>
+  </div>
+  <div class="hint">← 点选一个（模型清单来自 AguiHost 的 <code>GET /models</code>）</div>
+</div>
+
+<!-- ══════ 3. 聊天 ══════ -->
+<div id="chatScreen" class="screen">
+  <header>
+    <div class="user-chip marla" id="userChip">👩 Marla</div>
+    <div class="model-badge" id="modelBadge">
+      <span id="modelName">Qwen</span><span class="caret">▼</span>
+      <div class="model-dropdown">
+        <div class="dd-item" onclick="switchModel('Qwen','qwen')">⚡ Qwen <span class="check">✓</span></div>
+        <div class="dd-item" onclick="switchModel('DeepSeek','deepseek')">🐋 DeepSeek</div>
+        <div class="dd-item" onclick="switchModel('MiMo','gpt-4.1')">🤖 MiMo</div>
+      </div>
+    </div>
+  </header>
+
+  <div id="messages">
+    <!-- 用户 -->
+    <div class="msg user"><div class="bubble">帮我找双跑鞋</div></div>
+
+    <!-- 工具调用 1：搜索（已完成） -->
+    <div class="tool-block">
+      <div class="tool-head">
+        <span class="icon">🔧</span><span class="name">search_product</span>
+        <span class="status ok">✓ 完成</span>
+      </div>
+      <div class="tool-args">query: "跑鞋"</div>
+      <div class="tool-result">
+        <div class="prod-row"><div class="prod-thumb">👟</div><div class="prod-info"><div class="prod-name">专业跑鞋</div><div class="prod-price">¥129.99</div></div></div>
+        <div class="prod-row"><div class="prod-thumb">👟</div><div class="prod-info"><div class="prod-name">轻量跑鞋</div><div class="prod-price">¥199.00</div></div></div>
+        <div class="prod-row"><div class="prod-thumb">🥾</div><div class="prod-info"><div class="prod-name">越野跑鞋</div><div class="prod-price">¥259.00</div></div></div>
+      </div>
+    </div>
+
+    <div class="msg assistant"><div class="bubble">为您找到 3 款跑鞋：
+
+· 专业跑鞋 ¥129.99
+· 轻量跑鞋 ¥199.00
+· 越野跑鞋 ¥259.00
+
+需要我帮您加入购物车吗？</div></div>
+
+    <div class="msg user"><div class="bubble">把专业跑鞋加进去</div></div>
+
+    <!-- 工具调用 2：加购（已完成） -->
+    <div class="tool-block">
+      <div class="tool-head">
+        <span class="icon">🛒</span><span class="name">add_to_cart</span>
+        <span class="status ok">✓ 完成</span>
+      </div>
+      <div class="tool-args">product_id: 3, quantity: 1</div>
+      <div class="tool-result">
+        <div class="cart-line"><span>专业跑鞋 × 1</span><span>¥129.99</span></div>
+        <div class="cart-total"><span>合计</span><span class="amt">¥129.99</span></div>
+      </div>
+    </div>
+
+    <div class="msg assistant"><div class="bubble">已为您加入购物车，当前共 1 件，合计 ¥129.99。</div></div>
+
+    <div class="msg user"><div class="bubble">再看看有没有耳机</div></div>
+
+    <!-- 工具调用 3：进行中 -->
+    <div class="tool-block">
+      <div class="tool-head">
+        <span class="icon">🔧</span><span class="name">search_product</span>
+        <span class="status run">● 执行中…</span>
+      </div>
+      <div class="tool-args">query: "耳机"</div>
+    </div>
+
+    <div class="msg assistant"><div class="bubble cursor">正在为您搜索耳机</div></div>
+  </div>
+
+  <footer>
+    <div class="composer">
+      <input id="chatInput" placeholder="说点什么…（原型不可输入）" disabled>
+      <button class="send-btn">发送</button>
+    </div>
+  </footer>
+</div>
+
+<!-- 说明 -->
+<div id="notes">
+  <span class="close" onclick="this.parentElement.style.display='none'">✕</span>
+  <b>这是设计原型，不是可运行程序。</b><br>
+  重点看三处：<br>
+  ① 工具调用块（灰底框）——模型每一步在做什么<br>
+  ② 工具结果里的商品卡片 / 购物车摘要<br>
+  ③ 顶部模型徽标可切换（悬停展开）<br>
+  <span style="opacity:.7">点账户按钮 → 看完整流程</span>
+</div>
+
+<script>
+  let currentUser = 'marla';
+
+  function goTo(id) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+  }
+
+  function pickUser(u) {
+    currentUser = u;
+    const chip = document.getElementById('userChip');
+    chip.className = 'user-chip ' + (u === 'fzf003' ? 'fzf' : u);
+    chip.textContent = u === 'marla' ? '👩 Marla' : u === 'steve' ? '👨 Steve' : '🧑 fzf003';
+    goTo('modelScreen');
+  }
+
+  function pickModel(el, id) {
+    document.querySelectorAll('.model-card').forEach(c => c.classList.remove('selected'));
+    el.classList.add('selected');
+    document.getElementById('modelName').textContent = el.querySelector('.mname').textContent;
+    setTimeout(() => goTo('chatScreen'), 180);
+  }
+
+  function switchModel(name) {
+    document.getElementById('modelName').textContent = name;
+  }
+</script>
+</body>
+</html>
