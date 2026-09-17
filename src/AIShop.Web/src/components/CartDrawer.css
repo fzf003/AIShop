@@ -1,0 +1,246 @@
+/**
+ * 购物车抽屉样式 —— 照抄原型 v3 的 `.ov` / `.drawer` / `.dhd` / `.dbody` / `.citem` / `.qty` /
+ * `.del` / `.dfoot` / `.ctot` / `.dacts` / `.clear` / `.checkout` / `.pthumb` / `.pname` /
+ * `.pprice` / `.qa*` / `.empty`（design §7：抽屉 410px 滑出 + 遮罩）。
+ *
+ * 色值一律走 `tokens.css` 令牌；组件级自包含（`ProductModal.css` 里也有一份 `.pthumb` 等，
+ * 同值同义 —— 合并它们需要一次跨多个文件的收口，不在本工单范围，见 handoff-C9 遗留 5）。
+ */
+.ov {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 20, 40, 0.32);
+  z-index: 100;
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 410px;
+  background: var(--card);
+  z-index: 101;
+  transform: translateX(100%);
+  transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  flex-direction: column;
+  box-shadow: -8px 0 32px rgba(20, 20, 40, 0.14);
+}
+
+.drawer.on {
+  transform: none;
+}
+
+.dhd {
+  display: flex;
+  align-items: center;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+.dhd h3 {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.dhd .x {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--ink-3);
+  font-size: 1.1rem;
+}
+
+.dbody {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 22px;
+}
+
+.citem {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.pthumb {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--r-sm);
+  background: var(--brand-soft);
+  display: grid;
+  place-items: center;
+  font-size: 1.1rem;
+  flex-shrink: 0;
+}
+
+.pinfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.pname {
+  font-size: 0.87rem;
+  font-weight: 600;
+}
+
+.pprice {
+  font-size: 0.85rem;
+  color: var(--price);
+  font-weight: 700;
+  margin-top: 2px;
+}
+
+.qty {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.qty button {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  font-size: 0.85rem;
+  color: var(--ink-2);
+}
+
+.qty button:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+.del {
+  background: none;
+  border: none;
+  color: var(--ink-3);
+  font-size: 0.95rem;
+  padding: 0 4px;
+}
+
+.del:hover {
+  color: #dc2626;
+}
+
+.dfoot {
+  border-top: 1px solid var(--line);
+  padding: 18px 22px;
+}
+
+.ctot {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 700;
+  font-size: 0.9rem;
+  margin-bottom: 14px;
+}
+
+.ctot .amt {
+  color: var(--price);
+}
+
+.dacts {
+  display: flex;
+  gap: 10px;
+}
+
+.clear {
+  flex: 0 0 auto;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 14px 18px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.clear:hover {
+  border-color: #dc2626;
+  color: #dc2626;
+}
+
+.checkout {
+  flex: 1;
+  background: var(--brand);
+  color: #fff;
+  border: none;
+  border-radius: var(--r-md);
+  padding: 14px;
+  font-size: 0.94rem;
+  font-weight: 700;
+}
+
+.checkout:hover {
+  background: #4338ca;
+}
+
+.checkout:disabled {
+  background: var(--brand-soft);
+  color: var(--ink-3);
+  cursor: not-allowed;
+}
+
+.empty {
+  text-align: center;
+  color: var(--ink-3);
+  font-size: 0.86rem;
+  padding: 50px 0;
+}
+
+.retry {
+  margin-top: 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 8px 18px;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.retry:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+/* 快捷加购（仅在「车非空 且 仍有未加购商品」时渲染，见组件注释） */
+.qa {
+  border-top: 1px solid var(--line);
+  padding: 14px 22px;
+  background: var(--bg);
+}
+
+.qa-lbl {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--ink-3);
+  letter-spacing: 0.08em;
+  margin-bottom: 9px;
+}
+
+.qa-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.qa-chip {
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 5px 13px;
+  font-size: 0.79rem;
+  background: var(--card);
+  color: var(--ink-2);
+}
+
+.qa-chip:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+  background: var(--brand-soft);
+}

@@ -1,0 +1,30 @@
+/**
+ * Toast 样式 —— 照抄原型 v3 的 `.toast` / `.toast.show`（spec R13 第 3 段：顶部居中、绿底白字、
+ * 不阻塞点击），色值一律走 `tokens.css` 令牌。
+ */
+.toast {
+  position: fixed;
+  top: 22px;
+  left: 50%;
+  /* 未显示时略微上浮，出现时归位（原型 v3 的 translateY(-14px) → 0） */
+  transform: translateX(-50%) translateY(-14px);
+  z-index: 9999;
+  background: var(--ok);
+  color: #fff;
+  padding: 11px 22px;
+  border-radius: var(--r-sm);
+  font-size: 0.87rem;
+  font-weight: 600;
+  opacity: 0;
+  /* 浮于内容之上，但不拦截点击（R13-3：不阻塞用户继续操作） */
+  pointer-events: none;
+  transition:
+    opacity 0.2s,
+    transform 0.2s;
+  box-shadow: 0 8px 24px -6px rgba(20, 20, 40, 0.3);
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
