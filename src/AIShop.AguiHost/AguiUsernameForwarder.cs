@@ -22,6 +22,13 @@ namespace AIShop.AguiHost;
 /// ② <see cref="UseAguiUsernameForwarding"/> —— 装配中间件，置于 <c>MapAGUIServer</c> 之前，缓冲读同一请求体、
 /// 解析 metadata 并在 agent 运行前把 username（或缺省用户）写入 <see cref="ICurrentUserAccessor"/>。
 /// <para>
+/// <b>同一中间件承担两条身份通道（agui-client-support 第 6 项，design §13.3）</b>：③ 第 6 项新增的商品 / 购物车
+/// REST 端点带 <see cref="AguiClientRestEndpoint"/> 元数据标记，身份走查询参数 <c>?username=</c>，分支依据是该标记
+/// （不是 HTTP 方法、也不是路径字符串，见 <see cref="HandleRestIdentityAsync"/>）。两条通道共用同一份「解析 →
+/// 存在性校验 → 注入 → 短路」实现，杜绝「AG-UI 校验、REST 不校验」的分叉；但 <b>REST 面 MUST NOT 回落缺省用户</b>
+/// （缺参在购物车端点被 400 拒绝、在 <c>/products</c> 被放行，两者都不是回落）。
+/// </para>
+/// <para>
 /// <b>本校验不是认证 / 授权（agui-client-support R5）</b>：三个种子账户（marla / steve / fzf003）无密码、无凭证、
 /// 无 token，用户身份完全<b>由请求体自称</b>——<c>forwardedProps.username</c> 写谁就是谁。该用户名直接决定数据归属
 /// （会话 store key = <c>{agentName}:{username}</c>、<c>conversation_id</c>、购物车 / 聊天历史 / 记忆的读写主体），
@@ -75,6 +82,17 @@ internal static class AguiUsernameForwarder
     {
         return app.Use(async (context, next) =>
         {
+            // 【第 6 项】REST 通道优先：带 AguiClientRestEndpoint 元数据的端点，身份走查询参数 ?username=。
+            // 必须排在下面的「非 POST 放行」之前——GET /cart 无请求体，若走 AG-UI 分支会被直接放行、身份不注入。
+            // 分支依据 = 端点自身携带的元数据（不是 HTTP 方法、也不是路径字符串）：元数据随路由走，
+            // 失配时的失败方向安全（REST 请求落入 AG-UI 分支 → 身份未注入 → 端点返回 400 明确拒绝，
+            // 而非静默按缺省用户处理，spec R20）。REST 面 MUST NOT 回落 DefaultUsername（design §13.4）。
+            if (context.GetEndpoint()?.Metadata.GetMetadata<AguiClientRestEndpoint>() is { } restEndpoint)
+            {
+                await HandleRestIdentityAsync(context, restEndpoint, next);
+                return;
+            }
+
             // 仅 AG-UI 承载 body 的 POST（RunAgentInput）需要提取 username；其余请求透传
             if (!HttpMethods.IsPost(context.Request.Method))
             {
@@ -133,6 +151,52 @@ internal static class AguiUsernameForwarder
 
             await next(context);
         });
+    }
+
+    /// <summary>
+    /// REST 通道身份处理（agui-client-support 第 6 项，spec R15 / R16 / R17）：
+    /// 从查询参数 <c>?username=</c> 解析身份 → 存在性校验 → 注入 <see cref="ICurrentUserAccessor"/> → 放行；
+    /// 任一失败步骤短路返回。<b>不读请求体</b>（GET 无体；POST 体是业务载荷，不是身份载体）。
+    /// </summary>
+    /// <remarks>
+    /// 缺参（缺失 / 空白）时的行为由端点标记 <see cref="AguiClientRestEndpoint.RequireUsername"/> 决定：
+    /// <list type="bullet">
+    /// <item><c>true</c>（购物车 5 端点，缺省）→ <c>400</c> + <c>{"detail":"Username is required"}</c> 短路；
+    /// 不调用端点、不注入身份、<b>不回落 <see cref="DefaultUsername"/></b>——避免「前端漏发身份」被静默当作
+    /// 缺省用户的身份处理。</item>
+    /// <item><c>false</c>（仅 <c>GET /products</c>，公开可读）→ 不注入身份、直接放行（端点返回 200）。
+    /// <b>这不是回落</b>：<see cref="ICurrentUserAccessor"/> 保持 null（与 <c>/models</c> 的公开可读取舍同源）。</item>
+    /// </list>
+    /// 两种取值下「带了非空白值」的行为一致：与 AG-UI 面<b>同一份</b>存在性校验（<see cref="IsExistingUserAsync"/>）
+    /// ——查无此人 → 404 短路（错误体逐字节一致），命中 → 注入后放行。
+    /// </remarks>
+    private static async Task HandleRestIdentityAsync(
+        HttpContext context,
+        AguiClientRestEndpoint endpoint,
+        RequestDelegate next)
+    {
+        var username = AguiClientIdentity.TryResolveQueryUsername(context.Request);
+
+        if (username is null)
+        {
+            if (!endpoint.RequireUsername)
+            {
+                await next(context);
+                return;
+            }
+
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(
+                new { detail = AguiClientIdentity.UsernameRequiredDetail },
+                context.RequestAborted);
+            return;
+        }
+
+        if (!await IsExistingUserAsync(context, username))
+            return;
+
+        context.RequestServices.GetRequiredService<ICurrentUserAccessor>().SetCurrentUser(username);
+        await next(context);
     }
 
     /// <summary>
