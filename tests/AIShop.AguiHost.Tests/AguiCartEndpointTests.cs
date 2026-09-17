@@ -8,11 +8,12 @@ using Microsoft.Data.Sqlite;
 namespace AIShop.AguiHost.Tests;
 
 /// <summary>
-/// agui-client-support T13：根级购物车 REST 端点 <c>GET /cart</c> 与 <c>POST /cart/items</c> 的契约测试
-/// （DTO 形状、加购合并、入参校验、身份必填 / 存在性校验、落库与「不另建实现」的静态源码断言）。
+/// agui-client-support T13 / T14：根级购物车 REST 端点（<c>GET /cart</c>、<c>POST /cart/items</c>、
+/// <c>PUT /cart/items/{itemId:guid}</c>、<c>DELETE /cart/items/{itemId:guid}</c>、<c>DELETE /cart</c>）的契约测试
+/// （DTO 形状、加购合并、改量绝对数量、移除、清空幂等、入参校验、身份必填 / 存在性校验、落库与「不另建实现」的静态源码断言）。
 /// 覆盖 spec ADDED「客户端支撑端点的身份来源」（缺参 400 且不回落）、「新端点的用户存在性校验与错误契约」
-/// （校验先于写入）、「购物车端点」（读 / 加购 / 合并 / 非法入参）、「客户端支撑端点复用既有仓储」（落 agui.db、
-/// 直查 CartItems 表）。
+/// （校验先于写入）、「购物车端点」（读 / 加购 / 合并 / 非法入参 / 改量与移除 / 条目不存在不假成功 / 清空幂等 /
+/// 非 GUID 段不进业务）、「客户端支撑端点复用既有仓储」（落 agui.db、直查 CartItems 表）。
 /// <para>
 /// 驱动方式：WAF <b>真实宿主</b>（<see cref="WebApplicationFactory{TEntryPoint}"/>）+ 临时业务库（Program 的 T16
 /// 环境变量 seam <c>Agui__DbConnection</c>）+ 真实播种——临时库由 <c>InitializeAsync</c> 的 <c>MigrateAsync</c>
@@ -40,6 +41,12 @@ public sealed class AguiCartEndpointTests : IDisposable
     /// <summary>商品不存在的错误体片段。</summary>
     private const string ProductNotFoundBody = "\"detail\":\"Product not found\"";
 
+    /// <summary>改 / 删的条目不在本人购物车时的错误体片段（预检失败，防 200 假成功）。</summary>
+    private const string CartItemNotFoundBody = "\"detail\":\"Cart item not found\"";
+
+    /// <summary>条目不存在文案（用于断言「非 GUID 段」的 404 响应体【不含】此文案——它由路由层而非端点产生）。</summary>
+    private const string CartItemNotFoundLiteral = "Cart item not found";
+
     /// <summary>购物车端点的实现文件（静态源码断言对象）。</summary>
     private const string CartEndpointsSourcePath = "src/AIShop.AguiHost/AguiCartEndpoints.cs";
 
@@ -48,6 +55,9 @@ public sealed class AguiCartEndpointTests : IDisposable
 
     /// <summary>已存在的种子用户名（真实播种，身份校验会命中）。</summary>
     private const string ExistingUser = "marla";
+
+    /// <summary>另一个已存在的种子用户（用于证明清空 / 预检只作用于该用户、不影响他人购物车）。</summary>
+    private const string OtherExistingUser = "steve";
 
     private readonly List<string> _cleanupDirs = [];
     private readonly List<(string Key, string? Previous)> _envRestore = [];
@@ -259,6 +269,223 @@ public sealed class AguiCartEndpointTests : IDisposable
     }
 
     [Fact]
+    public async Task UpdateThenRemoveCartItem_ReturnsUpdatedCartAndPersistsChanges()
+    {
+        // spec「购物车端点」场景 5（改量与移除成功）：PUT 把条目设为【绝对数量】5（不是 2+5 累加），
+        // 随后 DELETE 该条目 → 200 且返回体不再含该条目；库侧条目已删、无残留。
+        var product = ProductSeedData.Products[0];
+
+        var factory = StartFactory();
+        using var client = factory.CreateClient();
+
+        var itemId = await AddItemAndGetItemIdAsync(client, ExistingUser, product.Id, quantity: 2);
+
+        using var updated = await client.PutAsJsonAsync(
+            $"/cart/items/{itemId}?username={ExistingUser}", new { quantity = 5 });
+        Assert.Equal(HttpStatusCode.OK, updated.StatusCode);
+
+        using (var json = JsonDocument.Parse(await updated.Content.ReadAsStringAsync()))
+        {
+            var root = json.RootElement;
+            var items = root.GetProperty("items").EnumerateArray().ToList();
+            Assert.Single(items);
+            Assert.Equal(itemId, items[0].GetProperty("id").GetGuid());
+            Assert.Equal(5, items[0].GetProperty("quantity").GetInt32());
+            Assert.Equal(5, root.GetProperty("totalItems").GetInt32());
+        }
+
+        using var removed = await client.DeleteAsync($"/cart/items/{itemId}?username={ExistingUser}");
+        Assert.Equal(HttpStatusCode.OK, removed.StatusCode);
+
+        using (var json = JsonDocument.Parse(await removed.Content.ReadAsStringAsync()))
+        {
+            var root = json.RootElement;
+            Assert.Empty(root.GetProperty("items").EnumerateArray().ToList());
+            Assert.Equal(0, root.GetProperty("totalItems").GetInt32());
+        }
+
+        await factory.DisposeAsync();
+        SqliteConnection.ClearAllPools();
+
+        // 库侧：该商品的条目行已随 DELETE 删除（PUT 时确实写到了 5，删除后归零）
+        var (rows, quantity) = await ReadCartItemAsync(_businessDbPath, product.Id);
+        Assert.Equal(0L, rows);
+        Assert.Equal(0L, quantity);
+    }
+
+    [Fact]
+    public async Task UpdateOrRemoveCartItem_ForeignOrUnknownItemId_Returns404AndLeavesAllCartsUnchanged()
+    {
+        // spec「购物车端点」场景 6（条目不存在不得假成功）：itemId 不在 marla 车里 —— 含【属于另一用户购物车】的条目，
+        // 也必须 404 + {"detail":"Cart item not found"}，且任何购物车条目均未被修改或删除。
+        // 这是「预检防仓储静默 no-op 的 200 假成功」的核心断言（改 / 删两端点各验一次）。
+        var marlaProduct = ProductSeedData.Products[0];
+        var steveProduct = ProductSeedData.Products[1];
+
+        var factory = StartFactory();
+        using var client = factory.CreateClient();
+
+        _ = await AddItemAndGetItemIdAsync(client, ExistingUser, marlaProduct.Id, quantity: 2);
+        var steveItemId = await AddItemAndGetItemIdAsync(client, OtherExistingUser, steveProduct.Id, quantity: 3);
+        var unknownItemId = Guid.NewGuid();
+
+        // ① 属于 steve 的条目：marla 改量 / 移除 → 均 404
+        using (var foreignPut = await client.PutAsJsonAsync(
+            $"/cart/items/{steveItemId}?username={ExistingUser}", new { quantity = 9 }))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, foreignPut.StatusCode);
+            Assert.Contains(CartItemNotFoundBody, await foreignPut.Content.ReadAsStringAsync());
+        }
+
+        using (var foreignDelete = await client.DeleteAsync($"/cart/items/{steveItemId}?username={ExistingUser}"))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, foreignDelete.StatusCode);
+            Assert.Contains(CartItemNotFoundBody, await foreignDelete.Content.ReadAsStringAsync());
+        }
+
+        // ② 完全不存在的条目：marla 改量 / 移除 → 均 404
+        using (var unknownPut = await client.PutAsJsonAsync(
+            $"/cart/items/{unknownItemId}?username={ExistingUser}", new { quantity = 9 }))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, unknownPut.StatusCode);
+            Assert.Contains(CartItemNotFoundBody, await unknownPut.Content.ReadAsStringAsync());
+        }
+
+        using (var unknownDelete = await client.DeleteAsync($"/cart/items/{unknownItemId}?username={ExistingUser}"))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, unknownDelete.StatusCode);
+            Assert.Contains(CartItemNotFoundBody, await unknownDelete.Content.ReadAsStringAsync());
+        }
+
+        await factory.DisposeAsync();
+        SqliteConnection.ClearAllPools();
+
+        // 「任何条目均未被修改或删除」：steve 的条目数量仍为 3（没被 marla 的 PUT 改成 9、也没被 DELETE 删掉）
+        var (steveRows, steveQuantity) = await ReadCartItemAsync(_businessDbPath, steveProduct.Id);
+        Assert.Equal(1L, steveRows);
+        Assert.Equal(3L, steveQuantity);
+
+        // marla 自己的条目也未被这些失败请求改动
+        var (marlaRows, marlaQuantity) = await ReadCartItemAsync(_businessDbPath, marlaProduct.Id);
+        Assert.Equal(1L, marlaRows);
+        Assert.Equal(2L, marlaQuantity);
+    }
+
+    [Fact]
+    public async Task UpdateCartItem_NonPositiveQuantity_Returns400AndLeavesQuantityUnchanged()
+    {
+        // spec「购物车端点」第 4 段：改量的 quantity 非正必须 400（拦在 Cart.UpdateItemQuantity 抛异常之前），
+        // 且条目数量【不变】（校验发生在写入之前）。
+        var product = ProductSeedData.Products[0];
+
+        var factory = StartFactory();
+        using var client = factory.CreateClient();
+
+        var itemId = await AddItemAndGetItemIdAsync(client, ExistingUser, product.Id, quantity: 2);
+
+        using (var zero = await client.PutAsJsonAsync(
+            $"/cart/items/{itemId}?username={ExistingUser}", new { quantity = 0 }))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, zero.StatusCode);
+            Assert.Contains(QuantityMustBePositiveBody, await zero.Content.ReadAsStringAsync());
+        }
+
+        using (var negative = await client.PutAsJsonAsync(
+            $"/cart/items/{itemId}?username={ExistingUser}", new { quantity = -4 }))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, negative.StatusCode);
+            Assert.Contains(QuantityMustBePositiveBody, await negative.Content.ReadAsStringAsync());
+        }
+
+        await factory.DisposeAsync();
+        SqliteConnection.ClearAllPools();
+
+        var (rows, quantity) = await ReadCartItemAsync(_businessDbPath, product.Id);
+        Assert.Equal(1L, rows);
+        Assert.Equal(2L, quantity);
+    }
+
+    [Fact]
+    public async Task ClearCart_RemovesOwnItemsOnlyAndIsIdempotent()
+    {
+        // spec「购物车端点」场景 7（清空购物车且幂等）：marla 有 2 个条目 → DELETE /cart → 200 空车；
+        // 【再次】调用仍 200 空车（幂等）；库侧该用户条目全删，【其他用户购物车不受影响】。
+        var marlaFirst = ProductSeedData.Products[0];
+        var marlaSecond = ProductSeedData.Products[1];
+        var steveProduct = ProductSeedData.Products[2];
+
+        var factory = StartFactory();
+        using var client = factory.CreateClient();
+
+        _ = await AddItemAndGetItemIdAsync(client, ExistingUser, marlaFirst.Id, quantity: 2);
+        _ = await AddItemAndGetItemIdAsync(client, ExistingUser, marlaSecond.Id, quantity: 1);
+        _ = await AddItemAndGetItemIdAsync(client, OtherExistingUser, steveProduct.Id, quantity: 4);
+
+        using (var cleared = await client.DeleteAsync($"/cart?username={ExistingUser}"))
+        {
+            Assert.Equal(HttpStatusCode.OK, cleared.StatusCode);
+
+            using var json = JsonDocument.Parse(await cleared.Content.ReadAsStringAsync());
+            var root = json.RootElement;
+            Assert.Empty(root.GetProperty("items").EnumerateArray().ToList());
+            Assert.Equal(0, root.GetProperty("totalItems").GetInt32());
+            Assert.Equal(0m, root.GetProperty("totalPrice").GetDecimal());
+        }
+
+        // 幂等：无购物车可清时同样 200 空车（仓储内部 no-op，不抛、不建行）
+        using (var again = await client.DeleteAsync($"/cart?username={ExistingUser}"))
+        {
+            Assert.Equal(HttpStatusCode.OK, again.StatusCode);
+
+            using var json = JsonDocument.Parse(await again.Content.ReadAsStringAsync());
+            Assert.Empty(json.RootElement.GetProperty("items").EnumerateArray().ToList());
+            Assert.Equal(0, json.RootElement.GetProperty("totalItems").GetInt32());
+        }
+
+        await factory.DisposeAsync();
+        SqliteConnection.ClearAllPools();
+
+        // 该用户两个条目均已删除
+        Assert.Equal(0L, (await ReadCartItemAsync(_businessDbPath, marlaFirst.Id)).Rows);
+        Assert.Equal(0L, (await ReadCartItemAsync(_businessDbPath, marlaSecond.Id)).Rows);
+
+        // 其他用户购物车不受影响：steve 的条目仍在、数量仍为 4；整表只剩这一行
+        var (steveRows, steveQuantity) = await ReadCartItemAsync(_businessDbPath, steveProduct.Id);
+        Assert.Equal(1L, steveRows);
+        Assert.Equal(4L, steveQuantity);
+        Assert.Equal(1L, await CountTableRowsAsync(_businessDbPath, "CartItems"));
+    }
+
+    [Fact]
+    public async Task NonGuidItemSegment_Returns404WithoutEnteringBusinessHandling()
+    {
+        // spec「购物车端点」场景 8（非 GUID 条目段不进入业务处理）：路由约束 {itemId:guid} 不匹配 →
+        // 框架直接 404，【不进 handler】——故响应体不含端点的 "Cart item not found"（空体），也不暴露任何用户数据。
+        var factory = StartFactory();
+        using var client = factory.CreateClient();
+
+        using (var delete = await client.DeleteAsync($"/cart/items/not-a-guid?username={ExistingUser}"))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, delete.StatusCode);
+            Assert.DoesNotContain(CartItemNotFoundLiteral, await delete.Content.ReadAsStringAsync());
+        }
+
+        using (var put = await client.PutAsJsonAsync(
+            $"/cart/items/not-a-guid?username={ExistingUser}", new { quantity = 1 }))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, put.StatusCode);
+            Assert.DoesNotContain(CartItemNotFoundLiteral, await put.Content.ReadAsStringAsync());
+        }
+
+        await factory.DisposeAsync();
+        SqliteConnection.ClearAllPools();
+
+        // 未进入业务处理 → 零副作用
+        Assert.Equal(0L, await CountTableRowsAsync(_businessDbPath, "Carts"));
+        Assert.Equal(0L, await CountTableRowsAsync(_businessDbPath, "CartItems"));
+    }
+
+    [Fact]
     public void CartEndpointSource_UsesExistingRepositoriesWithoutSecondImplementation()
     {
         // spec「客户端支撑端点复用既有仓储」：购物车端点的唯一读写入口是既有 ICartRepository、商品走既有
@@ -327,6 +554,24 @@ public sealed class AguiCartEndpointTests : IDisposable
         foreach (var (key, previous) in _envRestore)
             Environment.SetEnvironmentVariable(key, previous);
         _envRestore.Clear();
+    }
+
+    /// <summary>
+    /// 经 <c>POST /cart/items</c> 加购并返回<b>该商品</b>条目的 <c>itemId</c>（T14 的改量 / 移除需要真实存在的条目 ID）。
+    /// 断言响应 200 且该商品在车内恰有一条（重复加购会合并而非新增行，故 <c>Single</c> 成立）；
+    /// 若加购未生效，调用方拿到的会是 <c>Guid.Empty</c>，后续断言随之显式失败。
+    /// </summary>
+    private static async Task<Guid> AddItemAndGetItemIdAsync(
+        HttpClient client, string username, int productId, int quantity)
+    {
+        using var response = await client.PostAsJsonAsync(
+            $"/cart/items?username={username}", new { productId, quantity });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        return json.RootElement.GetProperty("items").EnumerateArray()
+            .Single(i => i.GetProperty("productId").GetInt32() == productId)
+            .GetProperty("id").GetGuid();
     }
 
     /// <summary>

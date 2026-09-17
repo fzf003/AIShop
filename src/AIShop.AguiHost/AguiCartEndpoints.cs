@@ -7,7 +7,18 @@ namespace AIShop.AguiHost;
 /// AguiHost 的购物车 REST 端点（agui-client-support 第 6 项，design §13.2 / §13.5 / §13.6 / §13.8）。
 /// <para>
 /// 根级 <c>/cart</c> 组（<c>RequireUsername</c> 缺省 <c>true</c> = 身份必填）：<c>GET /cart</c>（读）、
-/// <c>POST /cart/items</c>（加购）；改量 / 移除 / 清空由 T14 在同一文件内追加。
+/// <c>POST /cart/items</c>（加购）、<c>PUT /cart/items/{itemId:guid}</c>（改量为<b>绝对数量</b>）、
+/// <c>DELETE /cart/items/{itemId:guid}</c>（移除条目）、<c>DELETE /cart</c>（清空，幂等）。
+/// </para>
+/// <para>
+/// <b>静默 no-op 陷阱（改 / 删必读）</b>：<c>CartRepository.UpdateItemQuantityAsync</c> 与
+/// <c>RemoveItemAsync</c> 在条目不存在时<b>静默 no-op（返回 <c>void</c>、不报错）</b> → 若端点在调用前不预检，
+/// 「改 / 删别人或不存在的条目」会返回 <b>200 假成功</b>。预检（<c>GetByUserIdAsync</c> + <see cref="Cart.FindItem"/>）
+/// 是防 200 假成功的唯一手段，也是「条目不属于本人 → 404」这条契约的唯一实现点。
+/// </para>
+/// <para>
+/// <b>路由约束 <c>{itemId:guid}</c></b>：非 GUID 段不匹配路由 → 框架直接 404（<b>不进入 handler</b>、不暴露数据）；
+/// 该 404 由路由层产生、响应体为空，<b>不是</b> <c>{"detail":"Cart item not found"}</c>。
 /// </para>
 /// <para>
 /// <b>复用既有仓储、禁止第二套实现（spec「客户端支撑端点复用既有仓储」）</b>：购物车读写一律经
@@ -40,6 +51,11 @@ internal static class AguiCartEndpoints
     private const string ProductNotFoundDetail = "Product not found";
 
     /// <summary>
+    /// 改 / 删的条目不在<b>本人</b>购物车时的错误文案（预检失败，防 <c>CartRepository</c> 静默 no-op 的 200 假成功）。
+    /// </summary>
+    private const string CartItemNotFoundDetail = "Cart item not found";
+
+    /// <summary>
     /// 映射 AguiHost 的购物车端点（根级路径——AguiHost 无 <c>/api</c> 分组，与 <c>/models</c> / <c>/products</c> 同层）。
     /// <para>
     /// 组级挂 <see cref="AguiClientRestEndpoint"/> 元数据（<c>RequireUsername</c> 缺省 <c>true</c>）是中间件
@@ -55,9 +71,14 @@ internal static class AguiCartEndpoints
         // 组级元数据用 RequireUsername 缺省值（true）= 身份必填；/products 是唯一的 false（公开可读）。
         var cart = app.MapGroup("/cart").WithMetadata(new AguiClientRestEndpoint());
 
-        // GET /cart（读）与 POST /cart/items（加购）；改量 / 移除 / 清空三个端点由 T14 在本组内追加。
+        // GET /cart（读）/ POST /cart/items（加购）/ PUT /cart/items/{itemId:guid}（改量）
+        // / DELETE /cart/items/{itemId:guid}（移除条目）/ DELETE /cart（清空）；5 端点共享同一组级标记与身份前置。
+        // 「改 / 删」两端点的预检顺序（预检在写之前）见各自 handler 注释。
         cart.MapGet("", GetCartAsync);
         cart.MapPost("/items", AddCartItemAsync);
+        cart.MapPut("/items/{itemId:guid}", UpdateCartItemQuantityAsync);
+        cart.MapDelete("/items/{itemId:guid}", RemoveCartItemAsync);
+        cart.MapDelete("", ClearCartAsync);
     }
 
     /// <summary>
@@ -122,8 +143,101 @@ internal static class AguiCartEndpoints
     }
 
     /// <summary>
+    /// <c>PUT /cart/items/{itemId:guid}</c>：把该条目数量设为请求体给出的<b>绝对数量</b>（非累加），返回操作后的购物车。
+    /// <para>
+    /// <b>预检是本节的关键</b>：<c>CartRepository.UpdateItemQuantityAsync</c> 条目不存在时静默 no-op（返回 <c>void</c>），
+    /// 故必须先 <c>GetByUserIdAsync</c> + <see cref="Cart.FindItem"/> 确认条目<b>在本人的车里</b>——
+    /// 条目属于他人 / 不存在 → 404 <c>Cart item not found</c>；否则会返回 200 假成功。
+    /// 数量非正同样拦在 <see cref="Cart.UpdateItemQuantity"/> 抛 <see cref="ArgumentOutOfRangeException"/> 之前。
+    /// </para>
+    /// </summary>
+    private static async Task<IResult> UpdateCartItemQuantityAsync(
+        Guid itemId,
+        UpdateCartItemQuantityRequest request,
+        ICurrentUserAccessor accessor,
+        IUserRepository users,
+        ICartRepository carts,
+        CancellationToken ct)
+    {
+        var username = accessor.CurrentUser;
+        if (string.IsNullOrWhiteSpace(username))
+            return Results.BadRequest(new { detail = AguiClientIdentity.UsernameRequiredDetail });
+
+        var user = await users.GetByUsernameAsync(username, ct);
+        if (user is null)
+            return Results.NotFound(new { detail = AguiClientIdentity.UserNotFoundDetail });
+
+        if (request.Quantity <= 0)
+            return Results.BadRequest(new { detail = QuantityMustBePositiveDetail });
+
+        // 预检：条目必须存在于【本人】购物车，否则仓储会静默 no-op 造出 200 假成功。
+        var cart = await carts.GetByUserIdAsync(user.Id, ct);
+        if (cart?.FindItem(itemId) is null)
+            return Results.NotFound(new { detail = CartItemNotFoundDetail });
+
+        await carts.UpdateItemQuantityAsync(user.Id, itemId, request.Quantity, ct);
+
+        return Results.Ok(ToCartResponse(await carts.GetByUserIdAsync(user.Id, ct)));
+    }
+
+    /// <summary>
+    /// <c>DELETE /cart/items/{itemId:guid}</c>：移除该条目后返回操作后的购物车。
+    /// 与改量同构——<b>先预检条目属于本人购物车</b>（<c>CartRepository.RemoveItemAsync</c> 同样静默 no-op），
+    /// 不在 → 404 <c>Cart item not found</c>。
+    /// </summary>
+    private static async Task<IResult> RemoveCartItemAsync(
+        Guid itemId,
+        ICurrentUserAccessor accessor,
+        IUserRepository users,
+        ICartRepository carts,
+        CancellationToken ct)
+    {
+        var username = accessor.CurrentUser;
+        if (string.IsNullOrWhiteSpace(username))
+            return Results.BadRequest(new { detail = AguiClientIdentity.UsernameRequiredDetail });
+
+        var user = await users.GetByUsernameAsync(username, ct);
+        if (user is null)
+            return Results.NotFound(new { detail = AguiClientIdentity.UserNotFoundDetail });
+
+        // 预检：条目不在本人购物车 → 404（防 RemoveItemAsync 静默 no-op 的 200 假成功）。
+        var cart = await carts.GetByUserIdAsync(user.Id, ct);
+        if (cart?.FindItem(itemId) is null)
+            return Results.NotFound(new { detail = CartItemNotFoundDetail });
+
+        await carts.RemoveItemAsync(user.Id, itemId, ct);
+
+        return Results.Ok(ToCartResponse(await carts.GetByUserIdAsync(user.Id, ct)));
+    }
+
+    /// <summary>
+    /// <c>DELETE /cart</c>：清空该用户购物车的全部条目，返回空车响应（复用 <see cref="ToCartResponse"/>）。
+    /// <b>幂等</b>：本就无购物车行时 <c>CartRepository.ClearAsync</c> 内部直接返回（无副作用），端点仍返回 200 空车；
+    /// 清空只作用于该 <c>userId</c> 的行，<b>不影响其他用户</b>。
+    /// </summary>
+    private static async Task<IResult> ClearCartAsync(
+        ICurrentUserAccessor accessor,
+        IUserRepository users,
+        ICartRepository carts,
+        CancellationToken ct)
+    {
+        var username = accessor.CurrentUser;
+        if (string.IsNullOrWhiteSpace(username))
+            return Results.BadRequest(new { detail = AguiClientIdentity.UsernameRequiredDetail });
+
+        var user = await users.GetByUsernameAsync(username, ct);
+        if (user is null)
+            return Results.NotFound(new { detail = AguiClientIdentity.UserNotFoundDetail });
+
+        // 无购物车行时仓储内部 no-op（不抛、不建行）——端点无需为此分支，回读即是空车结构。
+        await carts.ClearAsync(user.Id, ct);
+
+        return Results.Ok(ToCartResponse(await carts.GetByUserIdAsync(user.Id, ct)));
+    }
+
+    /// <summary>
     /// 购物车 → <see cref="CartResponse"/> 映射（camelCase 由 Web 默认序列化保证）。<paramref name="cart"/> 为
-    /// <c>null</c>（无购物车行）时返回空车结构——<b>200 而非 404</b>，与老链同义；T14 的清空端点复用同一映射。
+    /// <c>null</c>（无购物车行）时返回空车结构——<b>200 而非 404</b>，与老链同义；清空端点复用同一映射。
     /// </summary>
     private static CartResponse ToCartResponse(Cart? cart)
     {
@@ -145,7 +259,7 @@ internal static class AguiCartEndpoints
 /// <summary>加购请求体：<c>{productId, quantity}</c>。</summary>
 internal sealed record AddCartItemRequest(int ProductId, int Quantity);
 
-/// <summary>改量请求体：<c>{quantity}</c>（绝对数量，非累加）。由 T14 的 PUT 端点消费。</summary>
+/// <summary>改量请求体：<c>{quantity}</c>（绝对数量，非累加），由 <c>PUT /cart/items/{itemId:guid}</c> 消费。</summary>
 internal sealed record UpdateCartItemQuantityRequest(int Quantity);
 
 /// <summary>
