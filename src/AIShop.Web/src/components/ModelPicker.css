@@ -1,0 +1,130 @@
+/**
+ * 模型选择器样式 —— 逐项对齐原型 v3（`.mgrid` / `.mcard` / `.mwrap` / `.mbadge` / `.mdd`）。
+ *
+ * 卡片最小宽度 158px 与账户卡一致（R5 的「与模型卡对齐」即指此值）。
+ * 原型的 `.mcard .n/.d` 是 `<div>`，这里换成 `<span>`（`<button>` 内只放短语内容）+ `display:block`，视觉等价。
+ */
+.mgrid {
+  display: flex;
+  gap: 16px;
+}
+
+.mcard {
+  background: var(--card);
+  border: 2px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 26px 30px;
+  cursor: pointer;
+  text-align: center;
+  min-width: 158px;
+  transition: 0.15s;
+}
+
+.mcard:hover {
+  border-color: #c7c7dd;
+  transform: translateY(-3px);
+  box-shadow: var(--shadow);
+}
+
+.mcard.on {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.mcard .e {
+  font-size: 2rem;
+  display: block;
+  margin-bottom: 10px;
+}
+
+.mcard .n {
+  display: block;
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.mcard .d {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--ink-3);
+  margin-top: 5px;
+}
+
+.mcard .b {
+  display: inline-block;
+  margin-top: 10px;
+  font-size: 0.66rem;
+  background: var(--brand);
+  color: #fff;
+  padding: 3px 9px;
+  border-radius: 20px;
+  font-weight: 600;
+}
+
+/* 顶栏徽标 + 下拉 */
+.mwrap {
+  position: relative;
+}
+
+.mbadge {
+  background: var(--ink);
+  color: #fff;
+  border: none;
+  border-radius: 20px;
+  padding: 9px 15px;
+  font-size: 0.83rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mbadge:hover {
+  background: #26264a;
+}
+
+.mbadge .caret {
+  font-size: 0.6rem;
+  opacity: 0.7;
+}
+
+.mdd {
+  display: none;
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow);
+  min-width: 210px;
+  overflow: hidden;
+  z-index: 50;
+}
+
+.mdd.on {
+  display: block;
+}
+
+.mdd button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 12px 16px;
+  font-size: 0.86rem;
+  text-align: left;
+  color: var(--ink);
+}
+
+.mdd button:hover {
+  background: var(--bg);
+}
+
+.mdd .c {
+  margin-left: auto;
+  color: var(--ok);
+  font-weight: 700;
+}

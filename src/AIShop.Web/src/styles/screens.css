@@ -1,0 +1,114 @@
+/**
+ * 屏幕骨架样式 —— 账户屏 / 模型屏 / 主界面外壳共享的部分，对齐原型 v3。
+ *
+ * 原型用 `.screen{display:none}` + `.screen.active{display:flex}` 手动切换；这里由 React 只渲染**当前**屏幕，
+ * 故 `.screen` 直接就是 `display:flex`（`data-screen` 属性保留屏幕语义，供测试与排查使用）。
+ *
+ * 归属说明：C6 的工单文件清单只列了 `AccountPicker.css` / `ModelPicker.css`，而 `.logo` / `.sub` / `.screen`
+ * 是**账户屏与模型屏共用**的骨架，放进任一组件样式都不合适，故单列本文件（已在 tasks.md C6 补充说明）。
+ */
+.screen {
+  height: 100vh;
+  display: flex;
+}
+
+/* 账户屏 / 模型屏：纵向居中 */
+.screen--auth {
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 30px;
+}
+
+/* 主界面：顶部 header + 内容区 */
+.screen--main {
+  flex-direction: column;
+}
+
+.hd {
+  text-align: center;
+}
+
+.logo {
+  font-size: 2rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.logo span {
+  color: var(--brand);
+}
+
+.sub {
+  color: var(--ink-3);
+  font-size: 0.9rem;
+  margin-top: 8px;
+  text-align: center;
+}
+
+.note {
+  font-size: 0.78rem;
+  color: var(--ink-3);
+}
+
+.note code {
+  font-family: ui-monospace, 'Consolas', monospace;
+}
+
+/* 模型屏的加载 / 错误态（错误态含「重试」入口，spec R6 第 4 段）*/
+.gate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.spacer {
+  margin-left: auto;
+}
+
+.ghost {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 8px 15px;
+  font-size: 0.83rem;
+  font-weight: 600;
+  color: var(--ink-2);
+  transition: 0.12s;
+}
+
+.ghost:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+/* 主界面外壳（C11 会在此之上装配聊天 / 推荐 / 购物车）*/
+.appbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 22px;
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+  z-index: 40;
+}
+
+.brand {
+  font-weight: 800;
+  font-size: 1.02rem;
+  letter-spacing: -0.02em;
+  margin-right: 4px;
+}
+
+.brand span {
+  color: var(--brand);
+}
+
+.placeholder {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}

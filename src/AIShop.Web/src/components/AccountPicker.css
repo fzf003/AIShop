@@ -1,0 +1,85 @@
+/**
+ * 账户选择器样式 —— 逐项对齐原型 v3（docs/prototypes/agui-client-v3.html 的 `.lcard` / `.ubtn` / `.u-*`）。
+ *
+ * 卡片宽度由「`.lcard` 定宽 574px − 内边距 2×34 − 两个 16px 间距」÷ 3 = **158px** 得出（与模型卡对齐）。
+ * `.u-marla` / `.u-steve` / `.u-fzf` 三套配色是账户模块的公共约定：主界面的用户徽标（C11）复用同一批类名。
+ */
+.lcard {
+  background: var(--card);
+  border-radius: var(--r-lg);
+  padding: 30px 34px;
+  box-shadow: var(--shadow);
+  width: 574px;
+}
+
+.lcard h3 {
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  color: var(--ink-3);
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+
+.login-btns {
+  display: flex;
+  gap: 16px;
+}
+
+.ubtn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  border: none;
+  border-radius: var(--r-md);
+  padding: 26px 16px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  transition: 0.15s;
+}
+
+.ubtn:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 8px 20px -6px rgba(20, 20, 40, 0.22);
+}
+
+.ubtn .av {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 1.5rem;
+  flex-shrink: 0;
+}
+
+.ubtn .key {
+  font-size: 0.7rem;
+  opacity: 0.55;
+  font-weight: 400;
+}
+
+.u-marla {
+  background: #f3e8ff;
+  color: #7e22ce;
+}
+.u-marla .av {
+  background: #e9d5ff;
+}
+
+.u-steve {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+.u-steve .av {
+  background: #bfdbfe;
+}
+
+.u-fzf {
+  background: #d1fae5;
+  color: #047857;
+}
+.u-fzf .av {
+  background: #a7f3d0;
+}

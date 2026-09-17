@@ -30,17 +30,26 @@ import {
 } from './sse'
 
 describe('骨架渲染', () => {
-  it('默认停在账户选择屏，点击可切到模型屏', async () => {
-    const { container } = render(<App />)
+  it('默认停在账户选择屏，选账户后进入模型选择屏', async () => {
+    // C6 起 App 是真实的「账户 → 模型 → 主界面」切屏：选账户后模型屏会拉 `GET /models`，故此处给替身
+    const stub = installFetchStub({
+      '/models': [{ id: 'gpt-4.1', name: 'MiMo', model: 'mimo-v2.5', isDefault: true }],
+    })
 
-    expect(screen.getByRole('heading').textContent).toBe('AIShop 购物助手')
-    expect(container.querySelector('.screen')?.getAttribute('data-screen')).toBe('account')
-    expect(screen.getByText('选择一个账户开始')).toBeDefined()
+    try {
+      const { container } = render(<App />)
 
-    await userEvent.click(screen.getByRole('button', { name: '切换屏幕' }))
+      expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('AIShop 购物助手')
+      expect(container.querySelector('.screen')?.getAttribute('data-screen')).toBe('account')
+      expect(screen.getByText('选择一个账户开始')).toBeDefined()
 
-    expect(container.querySelector('.screen')?.getAttribute('data-screen')).toBe('model')
-    expect(screen.getByText('选择模型')).toBeDefined()
+      await userEvent.click(screen.getByRole('button', { name: /Marla/ }))
+
+      expect(container.querySelector('.screen')?.getAttribute('data-screen')).toBe('model')
+      expect(screen.getByText('选择模型')).toBeDefined()
+    } finally {
+      stub.restore()
+    }
   })
 })
 
