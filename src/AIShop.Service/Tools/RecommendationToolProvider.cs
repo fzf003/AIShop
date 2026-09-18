@@ -21,6 +21,15 @@ namespace AIShop.Service.Tools;
 /// <c>IMemoryService</c>（后者装配了 LlmReranker 精排）；偏好只走 <c>IMemoryStore</c> 直读
 /// （纯 SQLite 读，无 embedding / 无网络），结果进 <c>IMemoryCache</c> 压掉「每次调用全表枚举该用户记忆」。
 /// 被禁依赖由测试以「反射构造参数 + 一调用即抛异常的替身装配」双重锁定。
+///
+/// 两条对外入口共用同一个私有 builder（{身份校验 → 对话关键词 → 偏好关键词 → Build → 投影}），
+/// 因此**口径不可能分叉**：
+/// <list type="bullet">
+/// <item><see cref="RecommendProductsAsync"/> —— 工具入口，返回值/schema 逐字节不变；</item>
+/// <item><see cref="TryBuildPushPayloadAsync"/> —— 推送入口（供 AG-UI 轮末装饰器调用），带门控。</item>
+/// </list>
+/// 约束：推送入口**不得**改变工具契约（返回值、参数 schema、reason 文案），**不得**新增依赖
+/// （<c>IChatClient</c> / <c>IMemoryService</c> 仍被禁止，零大模型调用的硬约束对两条入口同时成立）。
 /// </summary>
 public sealed class RecommendationToolProvider(
     IServiceScopeFactory scopeFactory,
@@ -55,13 +64,62 @@ public sealed class RecommendationToolProvider(
         [Description("用户当前想问的内容（自然语言），可为空")] string? query = null)
     {
         // 身份缺失 → 安全降级（spec R10 场景 3）
-        var username = currentUserAccessor.CurrentUser;
-        if (username is null)
+        if (currentUserAccessor.CurrentUser is null)
             return JsonSerializer.Serialize(IdentityMissingPayload, JsonOptions);
+
+        var payload = await BuildPayloadAsync(query, CancellationToken.None);
+        return JsonSerializer.Serialize(payload ?? IdentityMissingPayload, JsonOptions);
+    }
+
+    /// <summary>
+    /// 推送入口（供 AG-UI 轮末装饰器调用）：按**同一个 builder** 算推荐负载，仅在门控通过时返回可推送的负载。
+    ///
+    /// 与工具入口的三点差异（其余逐字共用）：
+    /// <list type="number">
+    /// <item>身份缺失返回 <c>null</c> ——**不**复用 <see cref="IdentityMissingPayload"/>，
+    /// 「无法确定用户身份」是说明性文案、不是推荐，推给面板会让面板被无意义内容覆盖（spec R4 场景 2）。</item>
+    /// <item>门控（<see cref="ShouldPush"/>）不通过返回 <c>null</c>，由调用方按「不推送」处理。</item>
+    /// <item>返回 <see cref="JsonElement"/> 而非字符串——<c>CUSTOM</c> 事件的 payload 形状是**对象**。</item>
+    /// </list>
+    /// 本入口**不改变**<see cref="RecommendProductsAsync"/> 的返回值与 schema，也**不新增**任何构造依赖。
+    /// </summary>
+    /// <param name="query">推荐依据（本轮用户消息，或本轮模型调用 <c>recommend_products</c> 时传入的 query）。</param>
+    /// <param name="ct">取消令牌（透传到偏好读取的记忆存储调用）。</param>
+    public async Task<JsonElement?> TryBuildPushPayloadAsync(string? query, CancellationToken ct = default)
+    {
+        if (currentUserAccessor.CurrentUser is null) return null;
+
+        var payload = await BuildPayloadAsync(query, ct);
+        if (payload is null || !ShouldPush(MatchKeywords(query), payload)) return null;
+
+        // SerializeToElement：结果自带文档，无 JsonDocument 的释放陷阱（与 Serialize 同源同选项）
+        return JsonSerializer.SerializeToElement(payload, JsonOptions);
+    }
+
+    /// <summary>
+    /// 推送门控（纯函数，便于两条分支各自被独立验收；spec R2 口径）：
+    /// **本轮依据命中白名单关键词** 且 **推荐列表非空**。
+    ///
+    /// 后半句的存在理由：关键词命中但无商品可推时负载带 <c>hasRecommendation=false</c>，
+    /// 若照推会把面板从「上一次的卡片」改成兜底文案 —— 那就不是「保持上一次」了。
+    /// </summary>
+    internal static bool ShouldPush(IReadOnlyCollection<string> currentKeywords, RecommendationPayload payload)
+        => currentKeywords.Count > 0 && payload.Products.Count > 0;
+
+    /// <summary>
+    /// 推荐负载构建：工具入口与推送入口的**唯一**口径来源，五步原样搬移
+    /// （身份校验 → <see cref="MatchKeywords"/> → 偏好关键词 → <see cref="RecommendationService.Build"/>
+    /// → 投影 + <see cref="RecommendationReasons"/>）。关键词来源、Top-6 截断、reason 派生规则全部照旧。
+    /// 身份缺失返回 <c>null</c>，由调用方各自决定降级形态（工具入口给说明性 payload，推送入口给 null）。
+    /// </summary>
+    private async Task<RecommendationPayload?> BuildPayloadAsync(string? query, CancellationToken ct)
+    {
+        var username = currentUserAccessor.CurrentUser;
+        if (username is null) return null;
 
         var currentKeywords = MatchKeywords(query);
         // 偏好关键词（缓存命中即用，miss 才直读记忆存储；读失败降级为空，不阻断）
-        var prefKeywords = await GetPreferenceKeywordsAsync(username);
+        var prefKeywords = await GetPreferenceKeywordsAsync(username, ct);
 
         using var scope = scopeFactory.CreateScope();
         var recommendation = scope.ServiceProvider
@@ -79,13 +137,11 @@ public sealed class RecommendationToolProvider(
                 RecommendationReasons.Build(product, currentKeywords, prefKeywords)))
             .ToList();
 
-        var payload = new RecommendationPayload(
+        return new RecommendationPayload(
             recommendation.Message,
             recommendation.HasRecommendation,
             recommendation.MatchedCategories ?? [],
             products);
-
-        return JsonSerializer.Serialize(payload, JsonOptions);
     }
 
     /// <summary>
@@ -108,14 +164,14 @@ public sealed class RecommendationToolProvider(
     /// 偏好关键词（design §8.3）：<see cref="IMemoryCache"/> 命中直接返回；miss 才直读记忆存储。
     /// 读失败（返回 null）降级为空偏好且**不写缓存**——瞬时故障不占用 5 分钟 TTL，下次调用仍会重试。
     /// </summary>
-    private async Task<string[]> GetPreferenceKeywordsAsync(string username)
+    private async Task<string[]> GetPreferenceKeywordsAsync(string username, CancellationToken ct)
     {
         var cacheKey = PreferenceCacheKey(username);
 
         if (memoryCache.TryGetValue<string[]>(cacheKey, out var cached) && cached is not null)
             return cached;
 
-        var keywords = await ReadPreferenceKeywordsAsync(username);
+        var keywords = await ReadPreferenceKeywordsAsync(username, ct);
         if (keywords is null) return [];
 
         memoryCache.Set(cacheKey, keywords, new MemoryCacheEntryOptions
@@ -133,13 +189,13 @@ public sealed class RecommendationToolProvider(
     /// 必须 <c>await foreach</c> 消费完整个序列后再抽词。
     /// 关键词抽取与 <paramref name="query"/> 共用同一套 <see cref="ProductKeywordMap"/> 匹配规则，避免规则分叉。
     /// </summary>
-    private async Task<string[]?> ReadPreferenceKeywordsAsync(string username)
+    private async Task<string[]?> ReadPreferenceKeywordsAsync(string username, CancellationToken ct)
     {
         var matched = new List<string>();
 
         try
         {
-            await foreach (var memory in memoryStore.GetAllAsync(new MemoryFilter { UserId = username }))
+            await foreach (var memory in memoryStore.GetAllAsync(new MemoryFilter { UserId = username }, ct))
             {
                 matched.AddRange(MatchedKeys(memory.Text));
             }
