@@ -33,6 +33,7 @@ import {
 import {
   attachToolEvents,
   createToolTracker,
+  decodeToolResultContent,
   type ToolCallEntry,
   type ToolTracker,
 } from './agui/tools'
@@ -76,6 +77,10 @@ function initialScreen(): Screen {
  * 口径（handoff-C8 遗留 1）：**必须是该工具自己的结果**，不能把别的工具结果（`get_cart_summary`
  * 的纯文本等）喂给推荐面板；取**最新一条**（消息序最后），且**不在轮次之间清空** —— 清空会让
  * 「解析失败保留上一次内容」（R9-3）退化成闪回占位。
+ *
+ * 宿主把工具结果字符串多编码了一层（`content === JSON.stringify(result)`，design §15.1 / D1）：
+ * 在**读取侧**恰好剥一次（`decodeToolResultContent`）。这是读取边界，**不改写** `messages`
+ * —— 持久化（R2）里仍是宿主原样送达的 `content`。只调用一次，勿链式。
  */
 function lastRecommendationContent(messages: readonly Message[]): string | null {
   const callIds = new Set<string>()
@@ -88,7 +93,9 @@ function lastRecommendationContent(messages: readonly Message[]): string | null 
 
   let content: string | null = null
   for (const message of messages) {
-    if (message.role === 'tool' && callIds.has(message.toolCallId)) content = message.content
+    if (message.role === 'tool' && callIds.has(message.toolCallId)) {
+      content = decodeToolResultContent(message.content)
+    }
   }
   return content
 }

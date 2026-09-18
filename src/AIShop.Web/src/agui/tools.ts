@@ -53,7 +53,7 @@ export interface ToolCallView {
   readonly argsText: string
   /** `TOOL_CALL_END.toolCallArgs`（缺省时回退解析 `argsText`）；未到 END / 解析失败时为空对象。 */
   readonly args: Readonly<Record<string, unknown>>
-  /** `TOOL_CALL_RESULT.content`；未返回时为 `null`。 */
+  /** `TOOL_CALL_RESULT.content`（宿主多编码层已在 wire 边界剥掉，见 `decodeToolResultContent`）；未返回时为 `null`。 */
   readonly result: string | null
   readonly status: ToolStatus
   /** 客户端实测耗时（ms）；无 `TOOL_CALL_RESULT` 时为 `null`（展示「进行中」）。 */
@@ -93,7 +93,12 @@ export type ToolStreamEvent =
       /** SDK 在 `onToolCallEndEvent` 已解析好的参数对象（官方订阅回调提供）。 */
       toolCallArgs?: Readonly<Record<string, unknown>>
     }
-  | { type: 'TOOL_CALL_RESULT'; toolCallId: string; content: string }
+  | {
+      type: 'TOOL_CALL_RESULT'
+      toolCallId: string
+      /** 工具结果文本；`attachToolEvents` 传入前已剥掉宿主多编码层（`decodeToolResultContent`），故此处是**解码后**的值。 */
+      content: string
+    }
   | { type: 'RUN_FINISHED'; runId?: string; usage?: readonly TokenUsage[] }
   | { type: 'RUN_ERROR'; usage?: readonly TokenUsage[] }
 
@@ -142,6 +147,35 @@ const FAILURE_PREFIXES = ['❌', 'Error'] as const
 function isFailureResult(content: string): boolean {
   const text = content.trim()
   return FAILURE_PREFIXES.some((prefix) => text.startsWith(prefix))
+}
+
+/**
+ * 剥掉宿主对工具结果字符串的**多编码层**（收口裁决 D1，design §15.1 / spec R9 追加条款）。
+ *
+ * 真机 wire 形状：宿主把工具本次的返回字符串又 `JsonSerializer.Serialize` 了一次，于是
+ * `TOOL_CALL_RESULT.content === JSON.stringify(result)`。对 JSON 文本结果（`recommend_products`
+ * 等）表现为「`JSON.parse(content)` 得到的是 string 而非对象」。本函数即那次序列化的**逆**。
+ *
+ * 语义（精确，恰好一层）：
+ * - `raw` 是一个 JSON 文本且 `JSON.parse(raw)` 得到 **string** → 返回该 string；
+ * - 其余情况（不含外层引号的普通文本、JSON 对象/数组、非法 JSON、空串）→ **原样返回**，不抛异常。
+ *
+ * ⚠️ **只应用一次，勿链式调用**（本函数 NOT 幂等）：重复应用必然多剥一层——工具真的返回带引号
+ * 文本 `"hi"`（引号是工具原意）时宿主发 `"\"hi\""`，解一次得 `"hi"`（正确），再解一次得 `hi`
+ * （把工具本意的引号吃掉，错）。故解码**只发生在 wire 边界**（宿主值进入应用处）恰好一次：
+ * `attachToolEvents` 与 `App.tsx` 的 `lastRecommendationContent` 各调用一次；
+ * MUST NOT 在可能已是解码后的值上再调，MUST NOT 改写成「循环解析直到不是 JSON 字符串」。
+ */
+export function decodeToolResultContent(raw: string): string {
+  // 只有「JSON 字符串字面量」才可能带这个编码层；先做廉价前缀判断再去解析。
+  if (!raw.trimStart().startsWith('"')) return raw
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return typeof parsed === 'string' ? parsed : raw
+  } catch {
+    // 非法 JSON → 不是宿主编码层（宿主产出的必是合法 JSON）→ 原样返回，不抛。
+    return raw
+  }
 }
 
 /** 参数原文是否为可用的 JSON 对象（数组 / 标量 / 非法文本都不算）。 */
@@ -314,7 +348,8 @@ export function createToolTracker(options: ToolTrackerOptions = {}): ToolTracker
  * 把追踪器接到官方客户端的订阅面上（`agent.subscribe`）。
  *
  * 官方 SDK 已把 SSE 解析与事件分派做好，这里只做「事件 → `record()`」的搬运；
- * 参数对象直接用 `onToolCallEndEvent` 给到的 `toolCallArgs`（不再自行解析 `TOOL_CALL_ARGS` 原文）。
+ * 参数对象直接用 `onToolCallEndEvent` 给到的 `toolCallArgs`（不再自行解析 `TOOL_CALL_ARGS` 原文）；
+ * 工具结果在**唯一**的 wire 边界处剥一次宿主多编码层（`decodeToolResultContent`，design §15.1）。
  * 返回退订函数（`agent.subscribe` 返回的 `unsubscribe`）。
  */
 export function attachToolEvents(agent: HttpAgent, tracker: ToolTracker): () => void {
@@ -336,7 +371,13 @@ export function attachToolEvents(agent: HttpAgent, tracker: ToolTracker): () => 
       tracker.record({ type: 'TOOL_CALL_END', toolCallId: event.toolCallId, toolCallArgs })
     },
     onToolCallResultEvent: ({ event }) => {
-      tracker.record({ type: 'TOOL_CALL_RESULT', toolCallId: event.toolCallId, content: event.content })
+      tracker.record({
+        type: 'TOOL_CALL_RESULT',
+        toolCallId: event.toolCallId,
+        // 解码**只在此处（wire 边界）发生一次**：工具调用栏展示的结果、失败判据
+        // （`isFailureResult`）与 `ToolChip` 的 JSON 美化分支都消费这个解码后的值。
+        content: decodeToolResultContent(event.content),
+      })
     },
     onRunFinishedEvent: ({ event }) => {
       tracker.record({ type: 'RUN_FINISHED', runId: event.runId, usage: event.usage })

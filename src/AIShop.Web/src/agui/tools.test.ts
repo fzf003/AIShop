@@ -8,9 +8,17 @@
  *   无 RESULT → 进行中；
  * - 与官方客户端的接缝（`attachToolEvents`）：走**真实 `@ag-ui/client`** + `src/test/sse.ts` 替身。
  */
+import type { Message } from '@ag-ui/client'
+import { createElement } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
 
+import App from '../App'
+import ToolChip from '../components/ToolChip'
+import { dismissToast } from '../components/Toast'
+import { resetCart } from '../state/cart'
+import { STORAGE_KEYS } from '../state/session'
 import { installFetchStub } from '../test/fetch-stub'
+import { render, screen, userEvent, waitFor } from '../test/render'
 import {
   createSseResponse,
   runError,
@@ -22,11 +30,13 @@ import {
   toolCallArgs,
   toolCallEnd,
   toolCallResult,
+  toolCallResultEncoded,
   toolCallStart,
   type SseEvent,
 } from '../test/sse'
 import { createAgent } from './agent'
-import { attachToolEvents, createToolTracker } from './tools'
+import { endSession } from './store'
+import { attachToolEvents, createToolTracker, decodeToolResultContent } from './tools'
 
 /** 可推进的假时钟：让「开始 → 结果」的墙钟差完全确定。 */
 function fakeClock(start = 1_000) {
@@ -273,5 +283,226 @@ describe('attachToolEvents：接官方客户端订阅面（真实 @ag-ui/client�
     expect(round?.finished).toBe(true)
     expect(round?.usage?.totalTokens).toBe(7)
     expect(round?.toolCalls[0]?.status).toBe('success')
+  })
+})
+
+/**
+ * D1（design §15.1）：宿主把工具结果字符串多编码一层，读取侧恰好剥一次。
+ *
+ * ⚠️ 本组**不**断言「幂等」——「剥一层」天然不幂等（见 `decodeToolResultContent` 注释里的反例），
+ * 只断言「不误伤」（no-op）与「恰好剥一层」。
+ */
+describe('decodeToolResultContent：剥掉宿主多编码层（D1）', () => {
+  it('双编码的 JSON 对象文本 → 解出原 JSON 文本（再次 JSON.parse 得到对象）', () => {
+    const resultText = JSON.stringify({
+      message: '根据您的对话，为您推荐：',
+      hasRecommendation: true,
+      products: [],
+    })
+    const wire = JSON.stringify(resultText) // 宿主又序列化了一次
+
+    const decoded = decodeToolResultContent(wire)
+    expect(decoded).toBe(resultText)
+    // 修复的直接目的：面板那次 JSON.parse 拿到的是**对象**而不是 string
+    expect(typeof JSON.parse(decoded)).toBe('object')
+  })
+
+  it('双编码的纯文本（❌ 失败文案）→ 解出原文（外层引号被剥掉，前缀可匹配）', () => {
+    const wire = JSON.stringify('❌ 无法查询 上海的天气: 超时')
+    expect(decodeToolResultContent(wire)).toBe('❌ 无法查询 上海的天气: 超时')
+  })
+
+  it('不含外层引号的普通文本 → 原样返回（no-op，不误伤）', () => {
+    const plain = '找到 3 个商品：\n#1 专业跑鞋'
+    expect(decodeToolResultContent(plain)).toBe(plain)
+    expect(decodeToolResultContent('Error: 工具执行失败')).toBe('Error: 工具执行失败')
+  })
+
+  it('工具真的返回带引号字符串 `"hi"` → 只剥宿主那一层，得到 `"hi"`（引号是工具原意）', () => {
+    const wire = JSON.stringify('"hi"') // = '"\"hi\""'
+    expect(decodeToolResultContent(wire)).toBe('"hi"')
+  })
+
+  it('非法 JSON / 空串 / 未闭合引号 → 原样返回且不抛异常', () => {
+    expect(decodeToolResultContent('{ 这不是合法 JSON')).toBe('{ 这不是合法 JSON')
+    expect(decodeToolResultContent('')).toBe('')
+    expect(decodeToolResultContent('"未闭合')).toBe('"未闭合')
+  })
+
+  it('已解码的 JSON 对象文本再调一次 → 原样返回（该类输入 no-op，非全局「幂等」承诺）', () => {
+    const decoded = JSON.stringify({ products: [] })
+    expect(decodeToolResultContent(decoded)).toBe(decoded)
+
+    // 反例：已解码的**带引号**文本再解一次会掉引号（把工具本意的引号吃掉）——
+    // 这正是「只在 wire 边界恰好应用一次、MUST NOT 链式调用」的理由。
+    expect(decodeToolResultContent('"hi"')).toBe('hi')
+  })
+})
+
+/** 双编码帧经真实 SDK 落到追踪器（`attachToolEvents` 是唯一的 wire 边界解码点）。 */
+describe('双编码帧回放：顺带修好的两处（D1）', () => {
+  /** 一轮工具调用的 SSE；结果以**真机形态**（宿主多编码一层）发出。 */
+  function encodedToolRound(result: string, toolName = 'search_product'): SseEvent[] {
+    return [
+      runStarted('t', 'r1'),
+      textMessageStart('a1'),
+      toolCallStart('tc1', toolName, 'a1'),
+      toolCallArgs('tc1', '{"keyword":"跑鞋"}'),
+      toolCallEnd('tc1'),
+      toolCallResultEncoded('tc1', 'tr1', result),
+      textMessageContent('a1', '好的'),
+      textMessageEnd('a1'),
+      runFinished('t', 'r1'),
+    ]
+  }
+
+  async function runEncoded(result: string, toolName?: string) {
+    const stub = installFetchStub({ '/agui': () => createSseResponse(encodedToolRound(result, toolName)) })
+    restoreFetch = stub.restore
+
+    const session = createAgent({ username: 'marla', model: 'gpt-4.1', threadId: 't' })
+    const tracker = createToolTracker()
+    const detach = attachToolEvents(session.agent, tracker)
+    await session.runRound('推荐跑鞋')
+    detach()
+    return tracker.getRounds()[0]?.toolCalls[0]
+  }
+
+  it('复现基线：未解码时错误文案被判为**成功**（前缀匹配不到外层的 `"`）', () => {
+    // 直喂 tracker（等价修复前的路径）：多编码值以 `"` 开头 → `❌` 前缀匹配失败。
+    const tracker = createToolTracker()
+    tracker.record({ type: 'TOOL_CALL_START', toolCallId: 'tc1', toolCallName: 'get_weather_forecast' })
+    tracker.record({ type: 'TOOL_CALL_RESULT', toolCallId: 'tc1', content: JSON.stringify('❌ 超时') })
+
+    expect(tracker.getRounds()[0]?.toolCalls[0]?.status).toBe('success')
+  })
+
+  it('isFailureResult 恢复：双编码的 `❌ …` 被判为 failure', async () => {
+    const call = await runEncoded('❌ 无法查询 上海的天气: 超时', 'get_weather_forecast')
+
+    expect(call?.result).toBe('❌ 无法查询 上海的天气: 超时')
+    expect(call?.status).toBe('failure')
+  })
+
+  it('FICC 回填的 `Error` 前缀在双编码下同样判为 failure', async () => {
+    const call = await runEncoded('Error: 工具执行失败', 'add_to_cart')
+
+    expect(call?.status).toBe('failure')
+  })
+
+  it('ToolChip 的 JSON 美化分支命中：结果段被缩进美化（而非原样展示双编码串）', async () => {
+    const payload = JSON.stringify({
+      message: '为您精选商品',
+      hasRecommendation: false,
+      products: [],
+    })
+    const call = await runEncoded(payload)
+
+    // 解码后 = 原 JSON 文本，`resultText` 的 `{` 分支才会命中
+    expect(call?.result).toBe(payload)
+    if (call === undefined) throw new Error('未捕获到工具调用')
+
+    // 本文件是 `.ts`（非 `.tsx`），故用 `createElement` 而非 JSX。
+    const { container } = render(createElement(ToolChip, { tool: call, usage: null }))
+    await userEvent.click(screen.getByRole('button', { name: /search_product/ }))
+
+    const shown = container.querySelector('.tool-result')?.textContent ?? ''
+    expect(shown).toContain('\n  "message"') // 缩进美化（未美化时无双空格缩进）
+    expect(shown).not.toBe(JSON.stringify(payload)) // 不是那层双编码原文
+  })
+})
+
+/**
+ * D1 的端到端落点：推荐面板（`App.tsx` 的 `lastRecommendationContent` 读取侧解码）。
+ *
+ * 用**真实双编码帧**驱动完整装配（账户屏 → 模型屏 → 主界面 → 一轮），断言面板渲染卡片
+ * 而非停在占位；同时钉住「解码只在读取侧」——持久化内容未被改写。
+ */
+describe('双编码帧驱动推荐面板（D1：App 读取侧解码）', () => {
+  const MODELS = [
+    { id: 'deepseek', name: 'DeepSeek', model: 'deepseek-v4-0813', isDefault: false },
+    { id: 'gpt-4.1', name: 'MiMo', model: 'mimo-v2.5', isDefault: true },
+  ]
+
+  const RECO = {
+    message: '根据您的对话，为您推荐：',
+    hasRecommendation: true,
+    categories: ['鞋类', '配饰'],
+    products: [
+      {
+        id: 1,
+        name: '专业跑鞋',
+        category: '鞋类',
+        price: 129.99,
+        emoji: '👟',
+        reason: '因为你提到「跑步」',
+      },
+      {
+        id: 3,
+        name: '无线降噪耳机',
+        category: '配饰',
+        price: 249.99,
+        emoji: '🎧',
+        reason: '根据你的偏好「耳机」',
+      },
+    ],
+  }
+  /** 工具的**真实返回文本**（单行 JSON，camelCase）。 */
+  const RECO_TEXT = JSON.stringify(RECO)
+
+  function recommendRound(): SseEvent[] {
+    return [
+      runStarted('thread-1', 'run-1'),
+      textMessageStart('a1'),
+      toolCallStart('tc1', 'recommend_products', 'a1'),
+      toolCallArgs('tc1', '{"query":"跑步"}'),
+      toolCallEnd('tc1'),
+      toolCallResultEncoded('tc1', 'tr1', RECO_TEXT),
+      textMessageContent('a1', '为您推荐'),
+      textMessageEnd('a1'),
+      runFinished('thread-1', 'run-1'),
+    ]
+  }
+
+  afterEach(() => {
+    globalThis.localStorage.clear()
+    endSession()
+    resetCart()
+    dismissToast()
+  })
+
+  it('面板渲染推荐卡片（不再是占位），且持久化仍是宿主原样送达的 content', async () => {
+    const stub = installFetchStub({
+      '/models': MODELS,
+      '/agui': () => createSseResponse(recommendRound()),
+    })
+    restoreFetch = stub.restore
+
+    const { container } = render(createElement(App))
+    await userEvent.click(screen.getByRole('button', { name: /Marla/ }))
+    await userEvent.click(await screen.findByRole('button', { name: /MiMo/ }))
+
+    // 收到结果前：占位文案
+    expect(container.querySelector('.rhint')).not.toBeNull()
+
+    await userEvent.type(screen.getByLabelText('消息'), '推荐一下跑鞋')
+    await userEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('.rcard')).toHaveLength(2)
+    })
+    expect(
+      [...container.querySelectorAll('.rcard .pname')].map((element) => element.textContent),
+    ).toEqual(['专业跑鞋', '无线降噪耳机'])
+    // 占位文案已被替换（面板不是恒停在 `.rhint`）
+    expect(container.querySelector('.rhint')).toBeNull()
+
+    // 解码**只在读取侧**：持久化的 tool 消息 content 仍是宿主原样送达的双编码值（未被改写）。
+    const stored = JSON.parse(
+      globalThis.localStorage.getItem(STORAGE_KEYS.messages('marla')) ?? '[]',
+    ) as Message[]
+    const toolMessage = stored.find((message) => message.role === 'tool')
+    expect(toolMessage?.toolCallId).toBe('tc1')
+    expect(toolMessage?.content).toBe(JSON.stringify(RECO_TEXT))
   })
 })

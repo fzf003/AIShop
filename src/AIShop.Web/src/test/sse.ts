@@ -90,6 +90,22 @@ export function toolCallResult(toolCallId: string, messageId: string, content: s
   return { type: 'TOOL_CALL_RESULT', toolCallId, messageId, content, role: 'tool' }
 }
 
+/**
+ * **真机形态**的 `TOOL_CALL_RESULT`：宿主把工具本次的返回字符串又序列化了一次，
+ * 故 `content === JSON.stringify(result)`（多编码一层，收口裁决 D1 / design §15.1）。
+ *
+ * 入参是**工具真正的返回文本**（如 `recommend_products` 的单行 JSON、`search_product` 的纯文本），
+ * 本 helper 负责编成宿主实际发来的那个值。单测喂它才能复现真机——`toolCallResult(...)` 的
+ * 「原样写 content」是理想形态，这正是 D1 此前漏测的原因。
+ */
+export function toolCallResultEncoded(
+  toolCallId: string,
+  messageId: string,
+  result: string,
+): SseEvent {
+  return toolCallResult(toolCallId, messageId, JSON.stringify(result))
+}
+
 export function runFinished(
   threadId: string,
   runId: string,
