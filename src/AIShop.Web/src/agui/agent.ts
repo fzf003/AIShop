@@ -2,14 +2,16 @@
  * AG-UI 会话装配（tasks.md C4 + C5；spec R1 / R3 / R4 / R12 / R18-2）。
  *
  * 定位：**协议层**。与 AG-UI 的对接全部交给官方客户端 `@ag-ui/client` 的 `HttpAgent`
- * （R18-2：MUST NOT 自造「手写 SSE 逐行解析 + 自行维护 messages」），本文件只做四件事：
+ * （R18-2：MUST NOT 自造「手写 SSE 逐行解析 + 自行维护 messages」），本文件只做五件事：
  *
  * 1. **装配** `new HttpAgent({ url: '/agui', threadId, initialMessages })`；
  * 2. **每轮显式传 `{ username, model }`**（硬契约 3 / R3）：`forwardedProps` **不会自动携带**，
  *    漏传一轮服务端就回落缺省身份（`steve`）与缺省模型（`ActiveModel`）；
  * 3. **订阅状态变化**（消息变更 / 运行失败 / 运行结束）并通知上层（store 侧据此持久化 + 渲染）；
  * 4. **运行失败分派**（硬契约 2 / R4，C5）：失败经 `onRunFailed` 到达 → 复用 `api/errors.ts` 的
- *    `dispatchApiFailure`（404 清会话回账户选择页 / 5xx 只提示不破坏历史），见 `handleRunFailure`。
+ *    `dispatchApiFailure`（404 清会话回账户选择页 / 5xx 只提示不破坏历史），见 `handleRunFailure`；
+ * 5. **推理消息的排除**（C14 / spec R1 追加条款「推理（reasoning）消息的排除」）：入站事件过滤
+ *    （`dropReasoningEvents`）+ 恢复种子过滤（`filterReasoningMessages`），见下文两块注释。
  *
  * 消息数组由 SDK 的 `defaultApplyEvents` 自动维护，客户端**只订阅、不手工拼装**。
  * `agent.messages` 即「客户端持有的完整历史」——服务端 `ProvideChatHistoryAsync` 恒返回空，
@@ -18,7 +20,8 @@
  * 切换账户 = 重建本对象（`store.ts` 的 `startSession`）；`threadId` 随之重置，
  * 但客户端**不依赖 `threadId` 做隔离**：服务端按用户名归属会话（R12）。
  */
-import { HttpAgent, type Message, type RunAgentResult } from '@ag-ui/client'
+import { HttpAgent, type Message, type MiddlewareFunction, type RunAgentResult } from '@ag-ui/client'
+import { filter } from 'rxjs'
 
 import { dispatchApiFailure } from '../api/errors'
 
@@ -125,12 +128,81 @@ function handleRunFailure(error: unknown): void {
   void dispatchApiFailure(error, { toast: toastHandler })
 }
 
+/** 推理消息的角色名（AG-UI 协议里的 `ReasoningMessage.role`）。 */
+const REASONING_ROLE = 'reasoning'
+
+/**
+ * 推理事件的两类前缀：新协议的 `REASONING_*` 与**旧协议的 `THINKING_*`**（后者是前者的前身）。
+ *
+ * `THINKING_*` 必须一并丢弃，理由见 `dropReasoningEvents`。
+ */
+const REASONING_EVENT_PREFIXES = ['REASONING_', 'THINKING_']
+
+/** 该事件是否属于推理（reasoning）事件。抽成纯函数：前缀判定只有一处、可读可测。 */
+function isReasoningEvent(type: string): boolean {
+  return REASONING_EVENT_PREFIXES.some((prefix) => type.startsWith(prefix))
+}
+
+/**
+ * 入站事件过滤（C14 落点 1 / spec R1 追加条款「入站事件过滤」）。
+ *
+ * **不变量（design §15.2 D2 裁决）：`reasoning` 消息不得存在于 `agent.messages`，无论来源。**
+ * 官方 SDK 的 `defaultApplyEvents` 会把 `REASONING_*` 落成 `role:"reasoning"` 的消息塞进
+ * `agent.messages`；而客户端每轮把该序列**整体**重发（R1 硬契约），.NET AG-UI 宿主的
+ * `MapChatRole` 不识别 `reasoning` → 抛 `InvalidOperationException: Unknown chat role: reasoning`
+ * → **HTTP 500**（现象：第 1 轮正常、第 2 轮点发送后无任何回复）。服务端零改动是硬约束，
+ * 所以在**产生侧**把推理消息掐掉。
+ *
+ * **为什么丢事件、而不是事后过滤 `agent.messages` 数组**：官方 SDK 的中间件链是
+ * `middlewares.reduceRight(...).run(input)` → `pipe(transformChunks, verifyEvents, …)` →
+ * `apply(defaultApplyEvents)` → `processApplyEvents` —— 中间件**包住传输层、跑在 `applyEvents`
+ * 之前**，在这里丢事件等于「推理消息根本不产生」，是全链唯一真源。若改成事后过滤数组
+ * （出站 / 持久化双边界过滤）则是治症状：`agent.messages` 里仍留着推理消息，此后每一个新读点
+ * 都得记得再过滤一次；且 `setMessages` 在流式期间替换数组有索引失效风险。此处用官方公开 API
+ * `agent.use(...)`，**不继承 / 不覆写 `HttpAgent`**（R18-2）。
+ *
+ * **为什么 `THINKING_*` 也要丢**：`use()` 把中间件**追加**到链尾（最内层、紧贴传输层），而 SDK
+ * 自带的前向兼容中间件（`BackwardCompatibility_0_0_45`）是 `unshift` 到链首（最外层），它会把旧协议
+ * 的 `THINKING_*` 映射成 `REASONING_*`。中间件是「外层的输出喂给内层的输入」的反向包裹，故本过滤器
+ * 看到的是**未经映射的原始事件**——只丢 `REASONING_*` 的话，`THINKING_*` 会被我们放过、再被外层映射成
+ * `REASONING_*` 而照样产生消息。两个前缀一起丢才算把口子堵死。
+ * （实测：本仓安装的 0.0.59 因版本门控未挂载该兼容中间件——`new HttpAgent(...)` 后
+ * `middlewares.length === 0`——所以这条是**防御性**的：对发旧协议事件的宿主、以及任何会挂载该
+ * 兼容中间件的 SDK 版本都必需，成本为零。丢弃推理事件本身就是 spec「非目标：不消费推理事件」的
+ * 字面落地，不是范围扩张。）
+ *
+ * 本应用**未开 debug**（`new HttpAgent({url, threadId, initialMessages})`，无 `debug` 参数），
+ * 故 `verifyEvents` 默认无效，丢弃事件不会引出「缺事件」噪音。
+ */
+export const dropReasoningEvents: MiddlewareFunction = (input, next) =>
+  next.run(input).pipe(filter((event) => !isReasoningEvent(event.type)))
+
+/**
+ * 恢复种子过滤（C14 落点 2 / spec R1 追加条款「恢复种子过滤」）。
+ *
+ * **只修入站事件不够**：升级前已经写进 `localStorage` 的 `agui.messages.{username}` 里就躺着
+ * `role:"reasoning"` 消息，启动时作为 `initialMessages` 恢复回来、照样被全量重发 → 老用户升级后
+ * 首次发轮仍然 500。故 seed 入口必须再挡一道。
+ *
+ * 保持既有语义：`undefined` 进 `undefined` 出（`HttpAgentConfig.initialMessages` 可选）；
+ * 传了数组则**返回过滤后的新数组**（不改调用方的数组）。
+ */
+function filterReasoningMessages(messages: readonly Message[]): Message[] {
+  return messages.filter((message) => message.role !== REASONING_ROLE)
+}
+
 export function createAgent(config: AguiSessionConfig): AguiSession {
   const agent = new HttpAgent({
     url: AGUI_ENDPOINT,
     threadId: config.threadId,
-    initialMessages: config.initialMessages === undefined ? undefined : [...config.initialMessages],
+    // 恢复种子过滤（C14 落点 2）：挡住旧 `localStorage` 里已存在的 `role:"reasoning"` 遗留数据。
+    initialMessages:
+      config.initialMessages === undefined ? undefined : filterReasoningMessages(config.initialMessages),
   })
+
+  // 入站事件过滤（C14 落点 1）：`use()` 追加的中间件紧贴传输层、跑在 `defaultApplyEvents` 之前，
+  // 故推理消息**根本不产生**（理由与「为什么 THINKING_* 也要丢」见 `dropReasoningEvents`）。
+  agent.use(dropReasoningEvents)
 
   let model = config.model
   const listeners = new Set<() => void>()

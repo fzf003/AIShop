@@ -10,11 +10,13 @@
  * - R2-3 / R1-2「工具调用消息被完整保留」：持久化同时含 assistant 的 `toolCalls` 与配对的
  *   `role:"tool"` 结果消息（无孤儿），且新建 agent 能按持久化内容原样恢复；
  * - R12-1「threadId 存在但不承担隔离」：换 `threadId` 请求体随之变化，`forwardedProps.username` 不变。
+ * - R1 追加条款「推理（reasoning）消息的排除」（D2 / C14）：入站 `REASONING_*` / `THINKING_*` 事件被丢、
+ *   恢复种子里的 `role:"reasoning"` 被过滤，`agent.messages` 与本轮 `RunAgentInput.messages` 都不含该角色。
  *
  * 测试走**真实 `@ag-ui/client`**（`HttpAgent`）+ `src/test/sse.ts` 的 SSE 替身 ——
  * SSE 解析与事件应用全部由官方 SDK 完成（R18-2 的证据：本文件不含任何手写 SSE 解析）。
  */
-import type { Message } from '@ag-ui/client'
+import { BackwardCompatibility_0_0_45, HttpAgent, type Message } from '@ag-ui/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { withUsername } from '../api/http'
@@ -33,7 +35,7 @@ import {
   toolCallResult,
   toolCallStart,
 } from '../test/sse'
-import { createAgent } from './agent'
+import { AGUI_ENDPOINT, createAgent } from './agent'
 import { endSession, getSnapshot, runRound, setModel, startSession, subscribe } from './store'
 
 /** `GET /models` 响应项的替身（R3-2 的数据契约：`id` 是节键、`model` 是 wire 名）。 */
@@ -85,6 +87,73 @@ function scriptRounds(rounds: readonly (readonly SseEvent[])[]): RouteSpec {
     index += 1
     return createSseResponse(events)
   }
+}
+
+/**
+ * 新协议推理事件（`REASONING_*`，字段名以 `@ag-ui/core` 的 schema 为准）。
+ *
+ * 就地构造而不加进 `src/test/sse.ts`：该文件属 C15 的改动范围（约束 A：同文件不并行）。
+ */
+function reasoningEvents(messageId: string, text: string): SseEvent[] {
+  return [
+    { type: 'REASONING_START', messageId },
+    { type: 'REASONING_MESSAGE_START', messageId, role: 'reasoning' },
+    { type: 'REASONING_MESSAGE_CONTENT', messageId, delta: text },
+    { type: 'REASONING_MESSAGE_END', messageId },
+    { type: 'REASONING_END', messageId },
+  ]
+}
+
+/** 旧协议推理事件（`THINKING_*`）：SDK 的 `BackwardCompatibility_0_0_45` 会把它映射成 `REASONING_*`。 */
+function thinkingEvents(messageId: string, text: string): SseEvent[] {
+  return [
+    { type: 'THINKING_START', messageId },
+    { type: 'THINKING_TEXT_MESSAGE_START', messageId },
+    { type: 'THINKING_TEXT_MESSAGE_CONTENT', messageId, delta: text },
+    { type: 'THINKING_TEXT_MESSAGE_END', messageId },
+    { type: 'THINKING_END', messageId },
+  ]
+}
+
+/** 真机形态的一轮：助手文本**之前**先来一段推理（D2 就是这样把 `reasoning` 消息带进 messages 的）。 */
+function roundWith(prefix: readonly SseEvent[], threadId: string, runId: string, assistantId: string, reply: string) {
+  return [
+    runStarted(threadId, runId),
+    ...prefix,
+    textMessageStart(assistantId),
+    textMessageContent(assistantId, reply),
+    textMessageEnd(assistantId),
+    runFinished(threadId, runId),
+  ]
+}
+
+/** 含新协议推理事件的一轮。 */
+function reasoningRound(threadId: string, runId: string, assistantId: string, reply: string): SseEvent[] {
+  return roundWith(reasoningEvents('reason-1', '先想想'), threadId, runId, assistantId, reply)
+}
+
+/** 含旧协议 `THINKING_*` 事件的一轮。 */
+function thinkingRound(threadId: string, runId: string, assistantId: string, reply: string): SseEvent[] {
+  return roundWith(thinkingEvents('think-1', '先想想'), threadId, runId, assistantId, reply)
+}
+
+/** 含遗留 `role:"reasoning"` 的恢复种子（模拟升级前写进 `localStorage` 的旧数据）。 */
+const SEED_WITH_REASONING: readonly Message[] = [
+  { id: 'u1', role: 'user', content: '上一轮提问' },
+  { id: 'm2', role: 'reasoning', content: '先想想' },
+  { id: 'a1', role: 'assistant', content: '上一轮回复' },
+]
+
+/**
+ * 把 SDK 的前向兼容中间件塞到链首（**最外层**）——复现 design §15.2 描述的真实层级：
+ * 兼容层在外、`dropReasoningEvents`（经 `use()` 追加）在内。
+ *
+ * `middlewares` 在类型声明里标了 `private`，但运行时就是一个普通数组；测试要在**不改产品代码**的
+ * 前提下摆出这一层级，只能这样访问（本仓安装的 0.0.59 因版本门控默认不挂载它，故必须手工加）。
+ */
+function prependCompatMiddleware(agent: HttpAgent): void {
+  const internals = agent as unknown as { middlewares: unknown[] }
+  internals.middlewares.unshift(new BackwardCompatibility_0_0_45())
 }
 
 let restoreFetch: (() => void) | null = null
@@ -322,5 +391,135 @@ describe('store.ts：持久化完整性 + 恢复 + 重建（R2-3、R1-2、R12）
     expect(getSnapshot().messages).toHaveLength(2)
 
     unsubscribe()
+  })
+})
+
+describe('agent.ts：推理消息不得进入 agent.messages（R1 追加条款 / D2 / C14）', () => {
+  it('基线复现：裸 HttpAgent（未挂过滤器）回放推理事件流 → messages 出现 role:"reasoning" 且第二轮请求体带上它（D2 根因）', async () => {
+    const stub = installFetchStub({
+      '/agui': scriptRounds([
+        reasoningRound('t', 'r1', 'a1', '第一轮回复'),
+        textRound('t', 'r2', 'a2', '第二轮回复'),
+      ]),
+    })
+    restoreFetch = stub.restore
+
+    // 不经 createAgent：这就是修复前线上跑的那条路径（SDK 的 defaultApplyEvents 原样应用推理事件）
+    const bare = new HttpAgent({ url: AGUI_ENDPOINT, threadId: 't' })
+    await bare.runAgent()
+
+    // 推理事件被落成一条 role:"reasoning" 的消息，混在助手文本之前
+    expect(bare.messages.map((message) => message.role)).toEqual(['reasoning', 'assistant'])
+    expect(bare.messages[0]?.content).toBe('先想想')
+
+    // 第 2 轮的请求体是**跑之前**的 messages 快照 → 它把遗留的推理消息整条发了出去
+    // （.NET 宿主 MapChatRole 不识别 reasoning → 线上即 HTTP 500）
+    await bare.runAgent()
+    expect(bodyOf(stub.callsTo('/agui')[1]!).messages.map((message) => message.role)).toEqual([
+      'reasoning',
+      'assistant',
+    ])
+  })
+
+  it('经 createAgent 回放同一事件流 → 无 reasoning 消息，助手文本与运行完成不受影响（R1「入站事件过滤」）', async () => {
+    const stub = installFetchStub({
+      '/agui': scriptRounds([reasoningRound('t', 'r1', 'a1', '第一轮回复')]),
+    })
+    restoreFetch = stub.restore
+
+    const session = createAgent({ username: 'marla', model: MODEL_ITEM.id, threadId: 't' })
+    let runFinishedCount = 0
+    session.agent.subscribe({
+      onRunFinishedEvent: () => {
+        runFinishedCount += 1
+      },
+    })
+
+    await session.runRound('第一轮')
+
+    // 不变量：消息序列里只有对话角色（推理消息**根本不产生**）
+    expect(session.getMessages().map((message) => message.role)).toEqual(['user', 'assistant'])
+    // 过滤没有误伤：助手文本完整、RUN_FINISHED 照常到达、运行态正常收尾
+    expect(session.getMessages().map((message) => message.content)).toEqual(['第一轮', '第一轮回复'])
+    expect(runFinishedCount).toBe(1)
+    expect(session.isRunning()).toBe(false)
+  })
+
+  it('宿主发旧协议 THINKING_* 事件时同样被丢（design §15.2「为什么必须同时丢 THINKING_*」）', async () => {
+    const stub = installFetchStub({
+      '/agui': scriptRounds([thinkingRound('t', 'r1', 'a1', '第一轮回复')]),
+    })
+    restoreFetch = stub.restore
+
+    const session = createAgent({ username: 'marla', model: MODEL_ITEM.id, threadId: 't' })
+    // 兼容层（最外层）+ 本过滤器（最内层）：这是 design §15.2 描述的真实形态。
+    // **这一行是本用例的判别力来源** —— 裸 `THINKING_*` 在当前 SDK 版本下本来就不会产生消息，
+    // 没有兼容中间件时本用例会退化成「恒绿」，见下一条反证。
+    prependCompatMiddleware(session.agent)
+
+    await session.runRound('第一轮')
+
+    expect(session.getMessages().map((message) => message.role)).toEqual(['user', 'assistant'])
+    expect(session.getMessages().map((message) => message.content)).toEqual(['第一轮', '第一轮回复'])
+  })
+
+  it('反证（上一条）：只有兼容中间件、没有本过滤器时，THINKING_* 会被映射成 reasoning 消息并混进 messages', async () => {
+    const stub = installFetchStub({
+      '/agui': scriptRounds([thinkingRound('t', 'r1', 'a1', '第一轮回复')]),
+    })
+    restoreFetch = stub.restore
+
+    // 裸 agent + 兼容中间件 = 「只丢 REASONING_*、不丢 THINKING_*」的等价形态
+    const bare = new HttpAgent({ url: AGUI_ENDPOINT, threadId: 't' })
+    prependCompatMiddleware(bare)
+    await bare.runAgent()
+
+    expect(bare.messages.map((message) => message.role)).toEqual(['reasoning', 'assistant'])
+  })
+
+  it('恢复种子过滤：带 role:"reasoning" 的 initialMessages 既不进 messages，也不出现在本轮 RunAgentInput.messages（R1「恢复种子过滤」）', async () => {
+    const stub = installFetchStub({
+      '/agui': scriptRounds([textRound('t', 'r2', 'a2', '本轮回复')]),
+    })
+    restoreFetch = stub.restore
+
+    const session = createAgent({
+      username: 'marla',
+      model: MODEL_ITEM.id,
+      threadId: 't',
+      initialMessages: SEED_WITH_REASONING,
+    })
+
+    // 恢复进来的序列里遗留推理消息已被剔除（只留 user + assistant）
+    expect(session.getMessages().map((message) => message.role)).toEqual(['user', 'assistant'])
+
+    await session.runRound('本轮提问')
+
+    // 本轮真正发出去的角色序列：没有 reasoning（有的话 .NET 宿主 MapChatRole 会抛 → HTTP 500）
+    const body = bodyOf(stub.callsTo('/agui')[0]!)
+    expect(body.messages.map((message) => message.role)).toEqual(['user', 'assistant', 'user'])
+    // 反证「不存在」：其余内容原样保留（不是把种子整体丢掉换来的绿）
+    expect(body.messages.map((message) => message.content)).toEqual(['上一轮提问', '上一轮回复', '本轮提问'])
+  })
+
+  it('只修入站不够：不加种子过滤时，遗留 reasoning 消息确实会被发出去（D2 裁决的依据）', async () => {
+    const stub = installFetchStub({
+      '/agui': scriptRounds([textRound('t', 'r2', 'a2', '本轮回复')]),
+    })
+    restoreFetch = stub.restore
+
+    // 绕过 createAgent 的种子过滤（等价于「只做入站事件过滤」的半修状态）
+    const bare = new HttpAgent({
+      url: AGUI_ENDPOINT,
+      threadId: 't',
+      initialMessages: [...SEED_WITH_REASONING],
+    })
+    await bare.runAgent()
+
+    expect(bodyOf(stub.callsTo('/agui')[0]!).messages.map((message) => message.role)).toEqual([
+      'user',
+      'reasoning',
+      'assistant',
+    ])
   })
 })
