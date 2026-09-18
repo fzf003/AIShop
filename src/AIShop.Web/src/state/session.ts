@@ -2,7 +2,7 @@
  * 会话持久化（spec R2「消息持久化的键控、完整性与容错」/ design §8.2）。
  *
  * 职责边界：
- * - **键控**：消息与 threadId 一律按用户名分键，不同账户的会话与历史互不覆盖；
+ * - **键控**：消息、工具调用栏数据与 threadId 一律按用户名分键，不同账户的会话与历史互不覆盖；
  * - **完整性**：消息**整体**序列化（含 assistant 的 `toolCalls` 与配对的 `role: "tool"` 消息）——
  *   只存纯文本会让下一轮出现「有工具结果、无 tool_calls」的孤儿消息（硬契约 1）；
  * - **容错**：存储不可用 / JSON 解析失败 / 结构非法 → 降级为「以空历史开始」+ 一条告警，
@@ -15,12 +15,21 @@
  */
 import type { Message } from '@ag-ui/client'
 
-/** 四个持久化键（design §8.2）。按用户名分区的键用函数形式。 */
+import type { ToolRound } from '../agui/tools'
+
+/** 五个持久化键（design §8.2 / §15.4）。按用户名分区的键用函数形式。 */
 export const STORAGE_KEYS = {
   /** 该账户的 threadId（首次进入时 `crypto.randomUUID()` 生成）。 */
   threadId: (username: string) => `agui.threadId.${username}`,
   /** **完整** `agent.messages`（JSON；含 toolCalls 与 tool 结果消息）。 */
   messages: (username: string) => `agui.messages.${username}`,
+  /**
+   * 该账户的**工具调用栏数据**（`JSON.stringify(tracker.getRounds())`，收口裁决 D3 / design §15.4）。
+   *
+   * 与 `messages` 是同级的「某账户的会话数据」：写入 MUST 与 `messages` 同一处同一时刻、
+   * 清除 MUST 与 `messages` 同生共死（两键内容有重复，各自独立增删会出现漂移）。
+   */
+  tools: (username: string) => `agui.tools.${username}`,
   /** 当前选中模型的 `id`（配置节键，即 `forwardedProps.model` 的回传值；不存 wire 名/显示名）。 */
   model: 'agui.model',
   /** 上次选择的账户（刷新后回到同一身份）。 */
@@ -176,6 +185,56 @@ export function clearMessages(username: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// 工具调用栏数据（收口裁决 D3 / design §15.3 + §15.4）
+// ---------------------------------------------------------------------------
+
+/**
+ * 读取该账户的工具调用栏数据（`ToolRound[]` 纯数据视图）。
+ *
+ * 降级口径与 `readMessages` **完全一致**（spec R8 追加条款末段）：无数据 / 存储不可用 /
+ * JSON 解析失败 / 结构非数组 → 返回 `[]`（以空开始）并告警，绝不抛出、绝不白屏。
+ *
+ * ⚠️ 返回的 `ToolCallView.result` 是**已解码**的值（写入前 wire 边界已剥掉宿主多编码层），
+ * 调用方（`createToolTracker` 的 `initialRounds`）**MUST NOT** 再调 `decodeToolResultContent`。
+ */
+export function readToolRounds(username: string): ToolRound[] {
+  const key = STORAGE_KEYS.tools(username)
+  const raw = readRaw(key)
+  // 「没写过」不是异常（新账户 / 退出后重进），不告警。
+  if (raw === null) return []
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (error) {
+    warn(`工具调用数据 JSON 解析失败，以空开始（${key}）：${String(error)}`)
+    return []
+  }
+
+  if (!Array.isArray(parsed)) {
+    warn(`工具调用数据结构非法（期望数组），以空开始（${key}）`)
+    return []
+  }
+
+  return parsed as ToolRound[]
+}
+
+/**
+ * 写入该账户的工具调用栏数据（`tracker.getRounds()` 的原文序列化）。
+ *
+ * 与 `writeMessages` **同一处、同一时刻**调用（`agui/store.ts` 的通知链上，见 `App.tsx` 的装配），
+ * 两键因此不会漂移（design §15.4「为什么写死同一处同一时刻」）。
+ */
+export function writeToolRounds(username: string, rounds: readonly ToolRound[]): void {
+  writeRaw(STORAGE_KEYS.tools(username), JSON.stringify(rounds))
+}
+
+/** 删除该账户的工具调用栏数据（只由 `clearSession` 调用，与消息历史同生共死）。 */
+export function clearToolRounds(username: string): void {
+  removeRaw(STORAGE_KEYS.tools(username))
+}
+
+// ---------------------------------------------------------------------------
 // 全局选择态（模型 / 账户）
 // ---------------------------------------------------------------------------
 
@@ -210,10 +269,12 @@ export function clearUsername(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * 退出登录：清除**当前账户**的会话持久化（threadId + 消息历史）。
+ * 退出登录：清除**当前账户**的会话持久化（threadId + 消息历史 + 工具调用栏数据）。
  *
  * 语义边界（spec R2 第 3 段 + R12 第 3 段）：
- * - 只删该账户自己的两个键 → **其它账户的历史与 threadId 原样保留**；
+ * - 只删该账户自己的三个键 → **其它账户的历史与 threadId 原样保留**；
+ * - 工具调用栏数据与消息历史**同生共死**（spec R8 追加条款）：它里面有一部分内容（工具名 / 参数 /
+ *   结果）与 `messages` 重复，只清一个会留下「指向不存在消息」的孤儿工具数据；
  * - 全局选择态（`agui.model` / `agui.username`）不在这里动 —— 它们是「应用级」的当前选择，
  *   不是「某账户的会话数据」，由退出流程按需另行清除；
  * - 清的是**本地**会话，不等同于删除服务端会话。
@@ -221,4 +282,5 @@ export function clearUsername(): void {
 export function clearSession(username: string): void {
   clearThreadId(username)
   clearMessages(username)
+  clearToolRounds(username)
 }

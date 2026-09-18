@@ -114,6 +114,20 @@ export interface ToolTracker {
 export interface ToolTrackerOptions {
   /** 时钟（毫秒）。测试注入以得到确定的耗时；默认 `Date.now`。 */
   now?: () => number
+  /**
+   * **恢复的轮次**（已完成轮的纯数据视图），来自 `agui.tools.{username}` 持久化
+   * （收口裁决 D3 / design §15.4 / spec R8 追加条款）。
+   *
+   * 为什么单独放一个数组、而不是塞进内部 `rounds`：恢复轮**只有 `durationMs`**，
+   * 没有原始 `startedAt` / `endedAt`（耗时是上一会话客户端掐表的差值，服务端与 wire 都不带时间戳）。
+   * 塞进去就必须伪造 `startedAt` / `endedAt` 这类假值才能让 `toView` 算出同一个数 —— 那是拿假数据
+   * 换真数据。分开存放则 `durationMs` **原样保留**，且对已完成轮而言两者语义等价。
+   *
+   * ⚠️ 恢复轮里的 `result` 已是**解码后**的值（wire 边界的 `decodeToolResultContent` 在写入持久化
+   * **之前**就跑过了）：恢复路径不再经过事件流，故 **MUST NOT** 再解码一次（`design §15.1` 的
+   * 「只在边界恰好应用一次」）。
+   */
+  initialRounds?: readonly ToolRound[]
 }
 
 /** 内部可变记录：`ToolCallView` 多一个 `endedAt`（`durationMs` 由两个时间戳相减派生）。 */
@@ -229,9 +243,15 @@ function summarizeUsage(entries: readonly TokenUsage[]): UsageSummary | null {
  * 轮次边界（design §4.2）：`RUN_STARTED` 开新轮；工具事件落在**当前轮**（没有当前轮时隐式开一轮，
  * 兼容事件流从工具事件开始的情形）；`RUN_FINISHED` / `RUN_ERROR` 结束当前轮并把 `usage` 挂到
  * **该轮整体**（因此该轮所有胶囊共享同一份整轮用量）。
+ *
+ * 轮次来源有两批（`getRounds()` 的顺序 = **恢复轮在前、实时轮在后**）：
+ * 构造期传入的 `initialRounds`（刷新前已落库的历史轮）与本次会话经 `record()` 累积的轮次。
+ * 实时事件**不触碰**恢复轮（它们都是已完成轮，`RUN_STARTED` 的「就地封口」只作用于实时轮）。
  */
 export function createToolTracker(options: ToolTrackerOptions = {}): ToolTracker {
   const now = options.now ?? ((): number => Date.now())
+  /** 构造期恢复的轮次（已完成的纯数据视图，原样透出，见 `ToolTrackerOptions.initialRounds`）。 */
+  const restored: readonly ToolRound[] = options.initialRounds ?? []
   const rounds: PendingRound[] = []
 
   /** 当前轮：最后一轮未结束就用它，否则新开一轮。 */
@@ -263,6 +283,13 @@ export function createToolTracker(options: ToolTrackerOptions = {}): ToolTracker
       durationMs: call.endedAt === null ? null : call.endedAt - call.startedAt,
     }
   }
+
+  const toRoundView = (round: PendingRound): ToolRound => ({
+    runId: round.runId,
+    toolCalls: round.toolCalls.map(toView),
+    usage: round.usage,
+    finished: round.finished,
+  })
 
   return {
     record(event: ToolStreamEvent): void {
@@ -324,19 +351,25 @@ export function createToolTracker(options: ToolTrackerOptions = {}): ToolTracker
     },
 
     getRounds(): readonly ToolRound[] {
-      return rounds.map((round) => ({
-        runId: round.runId,
-        toolCalls: round.toolCalls.map(toView),
-        usage: round.usage,
-        finished: round.finished,
-      }))
+      // 恢复轮在前、实时轮在后：顺序即「历史 → 现在」，再次持久化时两批都在（`JSON.stringify` 直接可用）。
+      return [...restored, ...rounds.map(toRoundView)]
     },
 
     findToolCall(toolCallId: string): ToolCallEntry | null {
+      // 先查实时轮（更新、通常也是被问的那个），再查恢复轮 —— 两处都要查，否则刷新后历史轮次查不到
+      // （D3 的缺陷本体：`ChatPanel` 的 `findToolCall?.(call.id) ?? null` 落空即整块不渲染）。
       for (let index = rounds.length - 1; index >= 0; index -= 1) {
         const found = rounds[index].toolCalls.find((call) => call.toolCallId === toolCallId)
         if (found !== undefined) {
           return { tool: toView(found), usage: rounds[index].usage }
+        }
+      }
+      for (let index = restored.length - 1; index >= 0; index -= 1) {
+        const round = restored[index]
+        const found = round.toolCalls.find((call) => call.toolCallId === toolCallId)
+        if (found !== undefined) {
+          // 恢复轮里的 `tool` 已是视图对象（`result` 已解码），直接透出、**不再解码**。
+          return { tool: found, usage: round.usage }
         }
       }
       return null

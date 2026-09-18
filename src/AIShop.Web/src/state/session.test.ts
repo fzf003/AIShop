@@ -1,5 +1,5 @@
 /**
- * 会话持久化用例（tasks.md C2「验收 / 测试」）。
+ * 会话持久化用例（tasks.md C2 + C16「验收 / 测试」）。
  *
  * 覆盖 spec `agui-client` 的：
  * - R2 场景 1「不同账户互不覆盖」（+ 切回后历史完整）
@@ -7,12 +7,14 @@
  * - R2 场景 3「工具调用消息被完整保留」（toolCalls 与配对 tool 消息同时存回，不成孤儿）
  * - R2 第 3 段 + R12 第 3 段「退出只清当前账户的本地数据」
  * - R12 第 1 段「threadId 本地生成并持久化」
+ * - R8 追加条款「工具调用栏数据的持久化」（与 messages 同生共死 + 同口径容错降级）
  *
  * 每条断言都是对具体输入输出关系的验证；`console.warn` 的「告警」用 spy 观测。
  */
 import type { Message, ToolMessage } from '@ag-ui/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { ToolRound } from '../agui/tools'
 import {
   clearModelId,
   clearSession,
@@ -21,9 +23,11 @@ import {
   readMessages,
   readModelId,
   readThreadId,
+  readToolRounds,
   readUsername,
   writeMessages,
   writeModelId,
+  writeToolRounds,
   writeUsername,
 } from './session'
 
@@ -224,5 +228,140 @@ describe('退出只清当前账户的本地数据（R2 第 3 段 + R12 第 3 段
     clearModelId()
     expect(readUsername()).toBeNull()
     expect(readModelId()).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 工具调用栏数据的持久化（spec R8 追加条款 / design §15.4）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一份「已落库」的工具调用栏快照。
+ *
+ * 形状 = `JSON.stringify(tracker.getRounds())` 的产物（`ToolRound[]` 纯数据视图，字段全是
+ * string/number/boolean）。两条工具调用覆盖两种结果形态：纯文本与 JSON 文本。
+ */
+const TOOL_SNAPSHOT: ToolRound[] = [
+  {
+    runId: 'run-1',
+    toolCalls: [
+      {
+        toolCallId: 'tc1',
+        name: 'search_product',
+        argsText: '{"keyword":"跑鞋"}',
+        args: { keyword: '跑鞋' },
+        result: '找到 3 个商品：\n#1 专业跑鞋',
+        status: 'success',
+        durationMs: 312,
+      },
+      {
+        toolCallId: 'tc2',
+        name: 'recommend_products',
+        argsText: '{"query":"跑步"}',
+        args: { query: '跑步' },
+        result: '{"message":"为您推荐","hasRecommendation":true}',
+        status: 'success',
+        durationMs: 87,
+      },
+    ],
+    usage: { inputTokens: 120, outputTokens: 34, totalTokens: 154 },
+    finished: true,
+  },
+]
+
+describe('工具调用栏数据的持久化（R8 追加条款）', () => {
+  it('写入后逐字读回（含整轮 usage 与实测耗时），且不产生告警', () => {
+    writeToolRounds('marla', TOOL_SNAPSHOT)
+
+    // 键名与 messages 同级同构（design §15.4）
+    expect(localStorage.getItem('agui.tools.marla')).toBe(JSON.stringify(TOOL_SNAPSHOT))
+    expect(readToolRounds('marla')).toEqual(TOOL_SNAPSHOT)
+    // 未写过的账户读到空、且不是异常
+    expect(readToolRounds('nobody')).toEqual([])
+    expect(warnSpy).not.toHaveBeenCalled()
+  })
+
+  it('非法 JSON → 返回空、不抛异常、恰好一条告警（与 readMessages 同口径）', () => {
+    localStorage.setItem('agui.tools.marla', '{这不是 JSON')
+
+    let result: ToolRound[] | undefined
+    expect(() => {
+      result = readToolRounds('marla')
+    }).not.toThrow()
+
+    expect(result).toEqual([])
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(warnSpy.mock.calls[0]?.[0]).toContain('agui.tools.marla')
+  })
+
+  it('非数组结构（对象）→ 返回空、不抛异常、恰好一条告警', () => {
+    localStorage.setItem('agui.tools.marla', JSON.stringify({ rounds: [] }))
+
+    let result: ToolRound[] | undefined
+    expect(() => {
+      result = readToolRounds('marla')
+    }).not.toThrow()
+
+    expect(result).toEqual([])
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(warnSpy.mock.calls[0]?.[0]).toContain('结构非法')
+  })
+
+  it('存储读取抛异常（localStorage 不可用）→ 空 + 告警，不抛异常', () => {
+    const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('SecurityError: localStorage 不可用')
+    })
+
+    try {
+      expect(readToolRounds('marla')).toEqual([])
+      expect(warnSpy).toHaveBeenCalled()
+    } finally {
+      getItem.mockRestore()
+    }
+  })
+
+  it('存储写入抛异常（配额溢出）→ 不抛异常，只告警（当前会话可继续）', () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('QuotaExceededError')
+    })
+
+    try {
+      expect(() => writeToolRounds('marla', TOOL_SNAPSHOT)).not.toThrow()
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      expect(warnSpy.mock.calls[0]?.[0]).toContain('写入')
+    } finally {
+      setItem.mockRestore()
+    }
+  })
+
+  it('clearSession(username) 后 tools 与 messages **同时**消失，其它账户的两键都仍在', () => {
+    // marla：三个键齐全（threadId / messages / tools）
+    ensureThreadId('marla')
+    writeMessages('marla', MARLA_HISTORY)
+    writeToolRounds('marla', TOOL_SNAPSHOT)
+
+    // steve：同样齐全，作为「不该被牵连」的对照
+    const steveThread = ensureThreadId('steve')
+    const steveHistory: Message[] = [{ id: 's-u1', role: 'user', content: '嘿嘿' }]
+    const steveTools: ToolRound[] = [
+      { runId: 'run-s', toolCalls: [], usage: null, finished: true },
+    ]
+    writeMessages('steve', steveHistory)
+    writeToolRounds('steve', steveTools)
+
+    clearSession('marla')
+
+    // 同生共死：当前账户的两键**同时**不存在（绑定用于消除「消息已清、工具数据未清」的漂移）
+    expect(localStorage.getItem('agui.messages.marla')).toBeNull()
+    expect(localStorage.getItem('agui.tools.marla')).toBeNull()
+    expect(readMessages('marla')).toEqual([])
+    expect(readToolRounds('marla')).toEqual([])
+
+    // 其它账户的两键都原样保留
+    expect(localStorage.getItem('agui.messages.steve')).toBe(JSON.stringify(steveHistory))
+    expect(localStorage.getItem('agui.tools.steve')).toBe(JSON.stringify(steveTools))
+    expect(readMessages('steve')).toEqual(steveHistory)
+    expect(readToolRounds('steve')).toEqual(steveTools)
+    expect(readThreadId('steve')).toBe(steveThread)
   })
 })

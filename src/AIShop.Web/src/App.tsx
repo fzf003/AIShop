@@ -11,6 +11,8 @@
  * C11 装配（本工单新增的四条接线，漏一处即功能静默失效）：
  * 1. **会话生命周期**：进入主界面即 `startSession({ model })`（用户名由 store 内部从 `currentUsername()`
  *    取，单一来源），并同步创建/挂载工具胶囊追踪器（`attachToolEvents`，handoff-C7 遗留 1）；
+ *    追踪器初值 = 该账户持久化的轮次，且在同一次 store 通知里把工具调用栏数据一并落库
+ *    （D3 / design §15.4，见下方会话 effect）；
  * 2. **Toast 出口**：`setToastHandler(showToast)` —— 不接的话 404 / 5xx 的提示只落到控制台
  *    （handoff-C5 遗留 2）；
  * 3. **会话失效订阅**：`onSessionInvalid` → 清该账户持久化 + 清应用级身份 + 回账户选择页
@@ -19,7 +21,7 @@
  *    MUST NOT 退化为「只弹一个 Toast」）。
  */
 import type { Message } from '@ag-ui/client'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { setToastHandler } from './agui/agent'
 import {
@@ -28,6 +30,7 @@ import {
   runRound,
   setModel,
   startSession,
+  subscribe,
   useSession,
 } from './agui/store'
 import {
@@ -35,6 +38,7 @@ import {
   createToolTracker,
   decodeToolResultContent,
   type ToolCallEntry,
+  type ToolRound,
   type ToolTracker,
 } from './agui/tools'
 import { dispatchApiFailure, onSessionInvalid } from './api/errors'
@@ -52,8 +56,10 @@ import {
   clearSession,
   clearUsername,
   readModelId,
+  readToolRounds,
   readUsername,
   writeModelId,
+  writeToolRounds,
   writeUsername,
 } from './state/session'
 
@@ -69,6 +75,18 @@ export type Screen = 'account' | 'model' | 'main'
 function initialScreen(): Screen {
   if (readUsername() === null) return 'account'
   return readModelId() === null ? 'model' : 'main'
+}
+
+/**
+ * 启动时按持久化身份读回**工具调用栏数据**（收口裁决 D3 / design §15.4）。
+ *
+ * 这只是「首次渲染就有数据」的初值：真正的初值在进入主界面的那个 effect 里按当前账户再读一次
+ * （那时账户一定已确定）。未选定账户时以空开始 —— 账户屏不渲染任何工具调用栏，读它没有意义。
+ * 容错（读不到 / 非法 JSON / 非数组 → 空 + 告警）全部收敛在 `readToolRounds` 内。
+ */
+function initialToolRounds(): readonly ToolRound[] {
+  const username = readUsername()
+  return username === null ? [] : readToolRounds(username)
 }
 
 /**
@@ -107,7 +125,15 @@ export default function App() {
   const [modelId, setModelId] = useState<string | null>(readModelId)
   const [cartOpen, setCartOpen] = useState(false)
   const [productsOpen, setProductsOpen] = useState(false)
-  const [tracker, setTracker] = useState<ToolTracker>(() => createToolTracker())
+  const [tracker, setTracker] = useState<ToolTracker>(() =>
+    createToolTracker({ initialRounds: initialToolRounds() }),
+  )
+
+  /**
+   * 当前追踪器的引用：持久化订阅在 effect 外存活期内读它，避免闭包捕获到过期的 tracker 实例
+   * （切账户/重建时 `setTracker` 换新实例，订阅却还挂着上一次的引用）。
+   */
+  const trackerRef = useRef<ToolTracker | null>(null)
 
   const { messages, isRunning } = useSession()
   const { cart } = useCart()
@@ -152,21 +178,43 @@ export default function App() {
    * 在途轮次一并抹掉。因此模型值在进入主界面时读一次（`readModelId()`），之后的切换走 `setModel`。
    *
    * 追踪器与 agent 成对重建：`attachToolEvents` 订阅的是**当期** `HttpAgent`，切账户后旧订阅
-   * 随旧 agent 失效（handoff-C7 遗留 1），因此这里必须随 `startSession` 一起换新实例。
+   * 随旧 agent 失效（handoff-C7 遗留 1），因此这里必须随 `startSession` 一起换新实例；
+   * 初值取该账户持久化的轮次，刷新后工具调用栏据此恢复（D3 / design §15.4）。
+   *
+   * 工具调用栏数据的**持久化**也挂在这里（design §15.4「与 messages 同一处、同一时刻」）：
+   * `subscribe` 订阅的是 store 的通知链，而 store 正在**同一次通知**里写 `agui.messages.{username}`
+   * （`store.ts` 的 `handleSessionChange`）——两键因此同批次落库，不会出现「消息清了、工具数据没清」。
+   * 不把写入口放进 `store.ts` 的理由：tracker 是 App 的 React state，store 拿不到它；在这里订阅
+   * 是「不动 store 行为」的最小接缝。
    */
   useEffect(() => {
-    if (screen !== 'main' || readUsername() === null) return
+    const username = readUsername()
+    if (screen !== 'main' || username === null) return
     const model = readModelId()
     if (model === null) return
 
     startSession({ model })
 
-    const next = createToolTracker()
+    const next = createToolTracker({ initialRounds: readToolRounds(username) })
+    trackerRef.current = next
     setTracker(next)
 
     const agent = getAgent()
     if (agent === null) return
-    return attachToolEvents(agent, next)
+
+    const detachTools = attachToolEvents(agent, next)
+    const detachPersist = subscribe(() => {
+      // 会话已结束（退出登录 / 切账户）→ 不再回写：`closeToAccount` 的顺序是「先 `clearSession`
+      // 再 `endSession`」，而 `endSession` 也会发一次通知；若在这里照写，刚被清掉的两个键（消息由
+      // store 的同款守卫挡住）会被工具数据这一路**重新创建**（C5「404 之后历史还在」是同类事故）。
+      if (getAgent() === null) return
+      writeToolRounds(username, trackerRef.current?.getRounds() ?? [])
+    })
+
+    return () => {
+      detachTools()
+      detachPersist()
+    }
   }, [screen])
 
   /**

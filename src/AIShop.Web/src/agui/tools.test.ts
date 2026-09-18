@@ -10,13 +10,13 @@
  */
 import type { Message } from '@ag-ui/client'
 import { createElement } from 'react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import App from '../App'
 import ToolChip from '../components/ToolChip'
 import { dismissToast } from '../components/Toast'
 import { resetCart } from '../state/cart'
-import { STORAGE_KEYS } from '../state/session'
+import { STORAGE_KEYS, writeModelId, writeUsername } from '../state/session'
 import { installFetchStub } from '../test/fetch-stub'
 import { render, screen, userEvent, waitFor } from '../test/render'
 import {
@@ -36,7 +36,12 @@ import {
 } from '../test/sse'
 import { createAgent } from './agent'
 import { endSession } from './store'
-import { attachToolEvents, createToolTracker, decodeToolResultContent } from './tools'
+import {
+  attachToolEvents,
+  createToolTracker,
+  decodeToolResultContent,
+  type ToolRound,
+} from './tools'
 
 /** 可推进的假时钟：让「开始 → 结果」的墙钟差完全确定。 */
 function fakeClock(start = 1_000) {
@@ -504,5 +509,355 @@ describe('双编码帧驱动推荐面板（D1：App 读取侧解码）', () => {
     const toolMessage = stored.find((message) => message.role === 'tool')
     expect(toolMessage?.toolCallId).toBe('tc1')
     expect(toolMessage?.content).toBe(JSON.stringify(RECO_TEXT))
+  })
+})
+
+/**
+ * D3（design §15.3 + §15.4）：刷新后工具调用栏消失 —— 数据面。
+ *
+ * 恢复的轮次是**已完成**轮，只有 `durationMs`、没有原始 `startedAt` / `endedAt`，故单独存放、
+ * `getRounds()` 按「恢复轮在前、实时轮在后」拼接；`result` 已是**解码后**的值，
+ * 恢复路径 MUST NOT 再解码一次（design §15.1「只在边界恰好应用一次」）。
+ */
+describe('createToolTracker({ initialRounds })：以持久化轮次为初值（D3）', () => {
+  /** 一份「上次会话已落库」的轮次快照（形状 = `JSON.stringify(tracker.getRounds())`）。 */
+  function restoredRounds(): ToolRound[] {
+    return [
+      {
+        runId: 'run-old',
+        toolCalls: [
+          {
+            toolCallId: 'old-1',
+            name: 'search_product',
+            argsText: '{"keyword":"跑鞋"}',
+            args: { keyword: '跑鞋' },
+            result: '找到 3 个商品：\n#1 专业跑鞋',
+            status: 'success',
+            durationMs: 312,
+          },
+          {
+            toolCallId: 'old-2',
+            name: 'recommend_products',
+            argsText: '{"query":"跑步"}',
+            args: { query: '跑步' },
+            // 工具真的返回带引号文本（引号是工具原意）。若恢复路径再解码一次，本值会掉引号。
+            result: '"hi"',
+            status: 'success',
+            durationMs: 87,
+          },
+        ],
+        usage: { inputTokens: 120, outputTokens: 34, totalTokens: 154 },
+        finished: true,
+      },
+    ]
+  }
+
+  it('未收到任何事件时恢复轮已可见；实时轮追加在后，findToolCall 两处都查得到', () => {
+    const clock = fakeClock(1_000)
+    const tracker = createToolTracker({ initialRounds: restoredRounds(), now: clock.now })
+
+    // 这正是刷新后「整块不消失」的机制：不依赖任何新事件
+    expect(tracker.getRounds()).toEqual(restoredRounds())
+    expect(tracker.findToolCall('old-1')?.tool.durationMs).toBe(312)
+
+    tracker.record({ type: 'RUN_STARTED', runId: 'run-new' })
+    tracker.record({ type: 'TOOL_CALL_START', toolCallId: 'new-1', toolCallName: 'add_to_cart' })
+    clock.advance(45)
+    tracker.record({ type: 'TOOL_CALL_RESULT', toolCallId: 'new-1', content: '已加入购物车' })
+
+    const rounds = tracker.getRounds()
+    expect(rounds.map((round) => round.runId)).toEqual(['run-old', 'run-new'])
+    // 实时轮照常参与「两处都查」
+    expect(tracker.findToolCall('new-1')?.tool.durationMs).toBe(45)
+    // 实时事件不触碰恢复轮（已完成轮不被新的 RUN_STARTED 改写）
+    expect(rounds[0]).toEqual(restoredRounds()[0])
+  })
+
+  it('恢复轮的 durationMs 逐字来自快照（不是重建后重新掐表）', () => {
+    // 时钟从无关的起点起步并推进：若实现是「重建后重新计时」，绝无可能恰好得到 312 / 87。
+    const clock = fakeClock(500_000)
+    const tracker = createToolTracker({ initialRounds: restoredRounds(), now: clock.now })
+    clock.advance(9_999)
+
+    expect(tracker.getRounds()[0]?.toolCalls.map((call) => call.durationMs)).toEqual([312, 87])
+  })
+
+  it('恢复路径不重复解码：result 与快照逐字相同（含「本就带引号」的结果）', () => {
+    const tracker = createToolTracker({ initialRounds: restoredRounds() })
+    const calls = tracker.getRounds()[0]?.toolCalls ?? []
+
+    expect(calls[0]?.result).toBe('找到 3 个商品：\n#1 专业跑鞋')
+    // 若这里再调一次 `decodeToolResultContent`，`"hi"` 会变成 `hi`（把工具本意的引号吃掉）
+    expect(calls[1]?.result).toBe('"hi"')
+    expect(tracker.findToolCall('old-2')?.tool.result).toBe('"hi"')
+  })
+
+  it('再次持久化时两批轮次都在（getRounds 的结果可直接 JSON 往返）', () => {
+    const tracker = createToolTracker({ initialRounds: restoredRounds() })
+    tracker.record({ type: 'TOOL_CALL_START', toolCallId: 'new-1', toolCallName: 'add_to_cart' })
+
+    const roundTripped = JSON.parse(JSON.stringify(tracker.getRounds())) as ToolRound[]
+    expect(roundTripped).toHaveLength(2)
+    expect(roundTripped[0]).toEqual(restoredRounds()[0])
+    expect(roundTripped[1]?.toolCalls[0]?.toolCallId).toBe('new-1')
+  })
+
+  it('未传 initialRounds 时行为不变（既有调用点零影响）', () => {
+    const tracker = createToolTracker()
+    expect(tracker.getRounds()).toEqual([])
+
+    tracker.record({ type: 'TOOL_CALL_START', toolCallId: 'x', toolCallName: 'search_product' })
+    expect(tracker.getRounds()).toHaveLength(1)
+  })
+})
+
+/**
+ * D3 的端到端落点（App 装配）：一轮工具调用后落库、刷新（卸载重挂）后原样恢复、
+ * 持久化损坏时降级为空而不白屏。
+ */
+describe('工具调用栏数据持久化（D3：App 写入与刷新恢复）', () => {
+  const MODELS = [
+    { id: 'deepseek', name: 'DeepSeek', model: 'deepseek-v4-0813', isDefault: false },
+    { id: 'gpt-4.1', name: 'MiMo', model: 'mimo-v2.5', isDefault: true },
+  ]
+  const RECO_TEXT = JSON.stringify({ message: '为您推荐', hasRecommendation: true, products: [] })
+  const SEARCH_RESULT = '找到 3 个商品：\n#1 专业跑鞋'
+
+  /** 一轮含 `search_product` 与 `recommend_products` 的 SSE（结果以真机形态发出）。 */
+  function toolRound(threadId = 'thread-1'): SseEvent[] {
+    return [
+      runStarted(threadId, 'run-1'),
+      textMessageStart('a1'),
+      toolCallStart('tc1', 'search_product', 'a1'),
+      toolCallArgs('tc1', '{"keyword":"跑鞋"}'),
+      toolCallEnd('tc1'),
+      toolCallResultEncoded('tc1', 'tr1', SEARCH_RESULT),
+      toolCallStart('tc2', 'recommend_products', 'a1'),
+      toolCallArgs('tc2', '{"query":"跑步"}'),
+      toolCallEnd('tc2'),
+      toolCallResultEncoded('tc2', 'tr2', RECO_TEXT),
+      textMessageContent('a1', '为您推荐'),
+      textMessageEnd('a1'),
+      runFinished(threadId, 'run-1', [{ inputTokens: 120, outputTokens: 34, totalTokens: 154 }]),
+    ]
+  }
+
+  afterEach(() => {
+    globalThis.localStorage.clear()
+    endSession()
+    resetCart()
+    dismissToast()
+  })
+
+  /** 渲染并等主界面就绪（用于「身份已持久化」的刷新 / 预置场景：App 直接落到主界面）。 */
+  async function mountMain(): Promise<HTMLElement> {
+    const { container } = render(createElement(App))
+    await waitFor(() => expect(container.querySelector('.chat')).not.toBeNull())
+    return container
+  }
+
+  /** 走完「账户屏 → 模型屏 → 主界面」（用于首次进入场景）。 */
+  async function pickAccountAndModel(): Promise<HTMLElement> {
+    const { container } = render(createElement(App))
+    await userEvent.click(screen.getByRole('button', { name: /Marla/ }))
+    await userEvent.click(await screen.findByRole('button', { name: /MiMo/ }))
+    await waitFor(() => expect(container.querySelector('.chat')).not.toBeNull())
+    return container
+  }
+
+  it('一轮工具调用后：工具数据与消息**同批次**落库（无漂移），含工具名 / 参数 / 结果 / 实测耗时', async () => {
+    const stub = installFetchStub({
+      '/models': MODELS,
+      '/agui': () => createSseResponse(toolRound()),
+    })
+    restoreFetch = stub.restore
+
+    // 观测落库批次：记录每次 `setItem` 的键（仍调用原实现，不改变行为）。
+    const writtenKeys: string[] = []
+    const originalSetItem = Storage.prototype.setItem
+    const setItemSpy = vi
+      .spyOn(Storage.prototype, 'setItem')
+      .mockImplementation(function (this: Storage, key: string, value: string): void {
+        writtenKeys.push(key)
+        originalSetItem.call(this, key, value)
+      })
+
+    try {
+      const container = await pickAccountAndModel()
+      await userEvent.type(screen.getByLabelText('消息'), '推荐跑鞋')
+      await userEvent.click(screen.getByRole('button', { name: '发送' }))
+      await waitFor(() => expect(container.querySelectorAll('.tool')).toHaveLength(2))
+
+      // 同批次：每条通知里 messages 与 tools 各写一次（计数相同 → 不存在「只落了一个」的漂移）
+      const messagesWrites = writtenKeys.filter((key) => key === STORAGE_KEYS.messages('marla')).length
+      const toolsWrites = writtenKeys.filter((key) => key === STORAGE_KEYS.tools('marla')).length
+      expect(messagesWrites).toBeGreaterThan(0)
+      expect(toolsWrites).toBe(messagesWrites)
+
+      const rounds = JSON.parse(
+        globalThis.localStorage.getItem(STORAGE_KEYS.tools('marla')) ?? '[]',
+      ) as ToolRound[]
+      expect(rounds).toHaveLength(1)
+      expect(rounds[0]?.runId).toBe('run-1')
+      expect(rounds[0]?.toolCalls.map((call) => call.name)).toEqual([
+        'search_product',
+        'recommend_products',
+      ])
+      expect(rounds[0]?.toolCalls[0]?.args).toEqual({ keyword: '跑鞋' })
+      // 落库的是**解码后**的结果（wire 边界剥过一层），不是宿主发送的双编码原文
+      expect(rounds[0]?.toolCalls[0]?.result).toBe(SEARCH_RESULT)
+      expect(rounds[0]?.toolCalls[0]?.result).not.toBe(JSON.stringify(SEARCH_RESULT))
+      // 实测耗时：真实时钟 → 断言是有限数（精确值由「恢复」用例覆盖）
+      expect(typeof rounds[0]?.toolCalls[0]?.durationMs).toBe('number')
+    } finally {
+      setItemSpy.mockRestore()
+    }
+  })
+
+  it('刷新（卸载重挂）后工具调用栏原样恢复：工具名 / 耗时一致，数据未被改写', async () => {
+    const stub = installFetchStub({
+      '/models': MODELS,
+      '/agui': () => createSseResponse(toolRound()),
+    })
+    restoreFetch = stub.restore
+
+    const first = render(createElement(App))
+    await userEvent.click(screen.getByRole('button', { name: /Marla/ }))
+    await userEvent.click(await screen.findByRole('button', { name: /MiMo/ }))
+    await userEvent.type(screen.getByLabelText('消息'), '推荐跑鞋')
+    await userEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(first.container.querySelectorAll('.tool')).toHaveLength(2))
+
+    const beforeRounds = JSON.parse(
+      globalThis.localStorage.getItem(STORAGE_KEYS.tools('marla')) ?? '[]',
+    ) as ToolRound[]
+    const beforeDurations = [...first.container.querySelectorAll('.tool .t')].map(
+      (element) => element.textContent,
+    )
+
+    // 模拟刷新：卸载（订阅随 effect 清理）→ 重新挂载（tracker 以持久化值为初值）
+    first.unmount()
+    endSession()
+
+    const container = await mountMain()
+
+    await waitFor(() => expect(container.querySelectorAll('.tool')).toHaveLength(2))
+    expect(
+      [...container.querySelectorAll('.tool .nm')].map((element) => element.textContent),
+    ).toEqual(['search_product', 'recommend_products'])
+    // 耗时与刷新前**逐字一致**：来自持久化，而不是重建后重新掐表
+    expect([...container.querySelectorAll('.tool .t')].map((element) => element.textContent)).toEqual(
+      beforeDurations,
+    )
+    // 重挂后落库的仍是同一份数据（恢复路径没有解码 / 重算）
+    const afterRounds = JSON.parse(
+      globalThis.localStorage.getItem(STORAGE_KEYS.tools('marla')) ?? '[]',
+    ) as ToolRound[]
+    expect(afterRounds).toEqual(beforeRounds)
+
+    // 展开后参数与结果仍在（结果不被再次解码）
+    await userEvent.click(screen.getByRole('button', { name: /search_product/ }))
+    expect(container.querySelector('.tool-result')?.textContent).toBe(SEARCH_RESULT)
+    expect(
+      [...container.querySelectorAll('.tool-sec code')].map((element) => element.textContent),
+    ).toContain('keyword: "跑鞋"')
+  })
+
+  it('恢复的 durationMs 与 usage 逐字来自持久化（固定 777ms / 合计 13），且结果不再解码', async () => {
+    const stub = installFetchStub({
+      '/models': MODELS,
+      '/agui': () => createSseResponse(toolRound()),
+    })
+    restoreFetch = stub.restore
+
+    // 预置「上次会话留下的」两键：消息里带 assistant.toolCalls + 配对的 tool 结果消息，
+    // 工具数据里是固定耗时（任何「重新掐表」都不可能得到 777）。
+    writeUsername('marla')
+    writeModelId('gpt-4.1')
+    globalThis.localStorage.setItem(
+      STORAGE_KEYS.messages('marla'),
+      JSON.stringify([
+        { id: 'u-1', role: 'user', content: '找跑鞋' },
+        {
+          id: 'a-1',
+          role: 'assistant',
+          content: '为您找到',
+          toolCalls: [
+            {
+              id: 'seed-1',
+              type: 'function',
+              function: { name: 'search_product', arguments: '{"keyword":"跑鞋"}' },
+            },
+          ],
+        },
+        { id: 't-1', role: 'tool', content: '"找到 3 个商品"', toolCallId: 'seed-1' },
+      ] satisfies Message[]),
+    )
+    globalThis.localStorage.setItem(
+      STORAGE_KEYS.tools('marla'),
+      JSON.stringify([
+        {
+          runId: 'run-seed',
+          toolCalls: [
+            {
+              toolCallId: 'seed-1',
+              name: 'search_product',
+              argsText: '{"keyword":"跑鞋"}',
+              args: { keyword: '跑鞋' },
+              // 已解码的值，且「本就带引号」——再解码一次会掉引号
+              result: '"hi"',
+              status: 'success',
+              durationMs: 777,
+            },
+          ],
+          usage: { inputTokens: 9, outputTokens: 4, totalTokens: 13 },
+          finished: true,
+        },
+      ] satisfies ToolRound[]),
+    )
+
+    const container = await mountMain()
+
+    await waitFor(() => expect(container.querySelectorAll('.tool')).toHaveLength(1))
+    expect(container.querySelector('.tool .nm')?.textContent).toBe('search_product')
+    expect(container.querySelector('.tool .t')?.textContent).toBe('777ms')
+
+    await userEvent.click(screen.getByRole('button', { name: /search_product/ }))
+    expect(container.querySelector('.tool-result')?.textContent).toBe('"hi"')
+    expect(container.querySelector('.tool-meta')?.textContent).toContain('合计 13')
+  })
+
+  it('损坏的工具数据（非法 JSON）→ 以空开始 + 告警；不抛出、不白屏', async () => {
+    const stub = installFetchStub({
+      '/models': MODELS,
+      '/agui': () => createSseResponse(toolRound()),
+    })
+    restoreFetch = stub.restore
+
+    writeUsername('marla')
+    writeModelId('gpt-4.1')
+    globalThis.localStorage.setItem(
+      STORAGE_KEYS.messages('marla'),
+      JSON.stringify([{ id: 'u-1', role: 'user', content: '找跑鞋' }] satisfies Message[]),
+    )
+    globalThis.localStorage.setItem(STORAGE_KEYS.tools('marla'), '{这不是 JSON')
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const container = await mountMain()
+
+      // 应用照常渲染到主界面（气泡在），只是工具调用栏降级为「不渲染」
+      await waitFor(() =>
+        expect([...container.querySelectorAll('.bub')].map((el) => el.textContent)).toContain(
+          '找跑鞋',
+        ),
+      )
+      expect(container.querySelectorAll('.tool')).toHaveLength(0)
+      expect(
+        warnSpy.mock.calls.some((call) => String(call[0]).includes('agui.tools.marla')),
+      ).toBe(true)
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 })
