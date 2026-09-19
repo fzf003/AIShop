@@ -25,13 +25,14 @@
  * **工具结果**（本文件对 `lastRecommendationContent(messages)` 的变化做 effect）、
  * **恢复初值**（会话 effect 内以 `readReco(username)` 优先、历史工具结果兜底）。
  * 面板组件与 props 形状零改动，`lastRecommendationContent` 函数保留（既是工具结果来源，
- * 也是刷新恢复的兜底来源）。负载的**持久化回写**属 F5，不在本处。
+ * 也是刷新恢复的兜底来源）。负载的**持久化回写**（`writeReco`）由 F5 挂进会话 effect 的
+ * 既有一致性通知链（与 `writeToolRounds` 同一次通知、同一批次）。
  */
 import type { Message } from '@ag-ui/client'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { setToastHandler } from './agui/agent'
-import { resetRecoContent, setRecoFromToolResult, useRecoContent } from './agui/reco'
+import { getRecoSnapshot, resetRecoContent, setRecoFromToolResult, useRecoContent } from './agui/reco'
 import {
   endSession,
   getAgent,
@@ -69,6 +70,7 @@ import {
   readToolRounds,
   readUsername,
   writeModelId,
+  writeReco,
   writeToolRounds,
   writeUsername,
 } from './state/session'
@@ -206,8 +208,9 @@ export default function App() {
    * 工具调用栏数据的**持久化**也挂在这里（design §15.4「与 messages 同一处、同一时刻」）：
    * `subscribe` 订阅的是 store 的通知链，而 store 正在**同一次通知**里写 `agui.messages.{username}`
    * （`store.ts` 的 `handleSessionChange`）——两键因此同批次落库，不会出现「消息清了、工具数据没清」。
-   * 不把写入口放进 `store.ts` 的理由：tracker 是 App 的 React state，store 拿不到它；在这里订阅
-   * 是「不动 store 行为」的最小接缝。
+   * 不把写入口放进 `store.ts` 的理由：tracker 是 App 的 React state、推荐 store 是另一个模块级
+   * 单例，store 里都拿不到；在这里订阅是「不动任何 store 行为」的最小接缝。**推荐负载**
+   * （`agui.reco.{username}`，F5）共用这一条订阅 —— 三键同批次落库、同生共死。
    *
    * **推荐内容的初值**（agui-reco-realtime F4 / design §4.5 D）也在这里注入：优先用该账户持久化的
    * `agui.reco.{username}`（刷新后面板原样恢复），读不到才回退「历史里最后一条 `recommend_products`
@@ -237,10 +240,20 @@ export default function App() {
     const detachTools = attachToolEvents(agent, next)
     const detachPersist = subscribe(() => {
       // 会话已结束（退出登录 / 切账户）→ 不再回写：`closeToAccount` 的顺序是「先 `clearSession`
-      // 再 `endSession`」，而 `endSession` 也会发一次通知；若在这里照写，刚被清掉的两个键（消息由
-      // store 的同款守卫挡住）会被工具数据这一路**重新创建**（C5「404 之后历史还在」是同类事故）。
+      // 再 `endSession`」，而 `endSession` 也会发一次通知；若在这里照写，刚被清掉的三个键（消息由
+      // store 的同款守卫挡住）会被工具数据 / 推荐负载这两路**重新创建**（C5「404 之后历史还在」
+      // 是同类事故；C16 的 `agui.tools.{username}` 同款守卫）。
       if (getAgent() === null) return
       writeToolRounds(username, trackerRef.current?.getRounds() ?? [])
+      // 推荐负载的第二条写入口（spec R8 第 2 段「与 `agui.messages.{username}` 同一处、同一时刻」）：
+      // 这里与 `writeToolRounds` 处于**同一次通知、同一批次** —— store 的 `handleSessionChange` 正在
+      // 同一次通知里写 `agui.messages.{username}`，三键因此不会漂移（design §4.5 D）。
+      //
+      // 只在**已有内容**时写：`null` 表示「该账户从未收到过推荐」，此时**不建键** ——
+      // 写空串会让刷新时的 `readReco` 走「JSON 解析失败」告警分支，把「从未写过」误报成「数据损坏」；
+      // 保持「无内容 = 无键」才与 `readReco` 的「读不到不是异常、不告警」口径一致（也不伪造内容）。
+      const reco = getRecoSnapshot()
+      if (reco !== null) writeReco(username, reco)
     })
 
     return () => {
