@@ -64,6 +64,9 @@ public sealed class AguiRecommendationPushTests : IDisposable
     /// <summary>AG-UI wire 事件类型（<c>AGUI.Abstractions</c> 的实际字符串）。</summary>
     private const string CustomType = "CUSTOM";
 
+    /// <summary>文本内容增量帧类型（R1 场景 2：<c>CUSTOM</c> MUST 位于本轮**全部**此类帧之后）。</summary>
+    private const string TextMessageContentType = "TEXT_MESSAGE_CONTENT";
+
     /// <summary>轮次终点帧类型。</summary>
     private const string RunFinishedType = "RUN_FINISHED";
 
@@ -141,6 +144,22 @@ public sealed class AguiRecommendationPushTests : IDisposable
         Assert.True(
             customIndex < finishedIndex,
             $"CUSTOM 必须早于 RUN_FINISHED（实际 CUSTOM@{customIndex}、RUN_FINISHED@{finishedIndex}）。帧序：{Describe(frames)}");
+
+        // R1 场景 2（Z3 措辞澄清）：CUSTOM 必须位于本轮【全部】文本内容帧之后。
+        // 注意该场景 **不** 要求 CUSTOM 在协议帧 `TEXT_MESSAGE_END` 之后 —— 真机实测 CUSTOM 在该帧之前
+        // （全部内容帧之后、`TEXT_MESSAGE_END` 之前），spec 已注明「两者相对顺序不作要求」。
+        // 正锚点先行：本轮确实产出过内容帧 —— 否则「CUSTOM 之后无内容帧」在「压根没产出文本」时也会绿，属空转断言。
+        var contentIndices = frames
+            .Select((frame, index) => (index, isContent: IsFrame(frame, TextMessageContentType, name: null)))
+            .Where(pair => pair.isContent)
+            .Select(pair => pair.index)
+            .ToList();
+        Assert.True(
+            contentIndices.Count > 0,
+            $"正锚点：本轮应产出 {TextMessageContentType} 帧。帧序：{Describe(frames)}");
+        Assert.True(
+            contentIndices[^1] < customIndex,
+            $"CUSTOM 必须位于本轮全部 {TextMessageContentType} 帧之后（实际最后一个内容帧 @{contentIndices[^1]}、CUSTOM@{customIndex}）。帧序：{Describe(frames)}");
 
         // R1-3：一轮至多一条
         Assert.Equal(1, CountFrames(frames, CustomType, RecommendationEvent));
