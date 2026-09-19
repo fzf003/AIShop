@@ -1,7 +1,8 @@
 /**
- * 右侧推荐面板（spec R9「推荐面板由 recommend_products 工具结果驱动」/ design §7、§9.5）。
+ * 右侧推荐面板（spec R9 / design §7、§9.5）。
  *
- * - 数据**唯一**来源 = 服务端 `recommend_products` 工具的 `TOOL_CALL_RESULT.content`
+ * - 主来源 = 服务端 AG-UI `CUSTOM` 事件（`name: "recommendation"`）；`recommend_products`
+ *   工具的 `TOOL_CALL_RESULT.content` 为**兼源**，两者在 store 层归一为同一字符串后交给本组件
  *   （单行 JSON，camelCase：`message` / `hasRecommendation` / `categories` / `products[]`）；
  * - **不**为推荐面板发起任何 HTTP 请求、**不**轮询（spec R9 第 2 段）；
  * - 每次收到新结果**整体替换**，不做增量合并（design §9.5）；
@@ -15,7 +16,7 @@ import { useEffect, useState } from 'react'
 import { formatPrice } from '../api/products'
 import './RecoPanel.css'
 
-/** 推荐项 = `recommend_products` 结果里 `products[]` 的单项（本组件只消费这五个字段）。 */
+/** 推荐项 = 归一后的推荐结果里 `products[]` 的单项（本组件只消费这五个字段）。 */
 export interface RecoProduct {
   id: number
   name: string
@@ -37,7 +38,7 @@ export interface RecoView {
  * 只提示数据来源，**不**承诺任何接口——服务端没有推荐 HTTP 接口（spec R9 第 2 段）。
  */
 const PLACEHOLDER =
-  '💡 面板数据来自 recommend_products 工具的一次调用——不额外请求接口，不额外等一次大模型生成。'
+  '💡 面板会结合对话内容为您推荐商品——不额外请求接口，不额外等一次大模型生成。'
 
 function isRecoProduct(value: unknown): value is RecoProduct {
   if (typeof value !== 'object' || value === null) return false
@@ -54,7 +55,7 @@ function isRecoProduct(value: unknown): value is RecoProduct {
 }
 
 /**
- * 解析 `recommend_products` 的工具结果文本。
+ * 解析归一后的推荐结果文本（主来源 = CUSTOM 事件负载；`recommend_products` 工具结果为兼源）。
  *
  * 结构不符（非 JSON / 根非对象 / `products` 非数组 / 任一条目缺 `id`/`name`/`price`/`emoji`/`reason`）
  * 一律返回 `null` —— 由调用方据此**保留上一次内容**，而不是抛错（spec R9-3）。
@@ -89,7 +90,7 @@ export function parseRecommendation(content: string | null | undefined): RecoVie
 
 export interface RecoPanelProps {
   /**
-   * 最近一次 `recommend_products` 的 `TOOL_CALL_RESULT.content` 原文
+   * 最近一次推荐结果原文（主来源 = CUSTOM 事件负载；工具结果为兼源，store 层归一）
    * （`undefined` / `null` / 空串 = 尚未收到结果）。
    */
   content?: string | null
@@ -112,7 +113,7 @@ export default function RecoPanel({ content, onAdd }: RecoPanelProps) {
       <div className="reco-hd">
         <h4>为你推荐</h4>
         <p>
-          来自 <code>recommend_products</code> · 结合对话与偏好
+          结合对话与偏好 · 每轮自动更新
         </p>
       </div>
 

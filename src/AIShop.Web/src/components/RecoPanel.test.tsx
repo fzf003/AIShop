@@ -216,7 +216,7 @@ describe('R9-3 结果非法不崩', () => {
     const { container, rerender } = renderPanel('{ 坏 JSON')
 
     expect(container.querySelectorAll('.rcard')).toHaveLength(0)
-    expect(container.querySelector('.rhint')?.textContent).toContain('recommend_products')
+    expect(container.querySelector('.rhint')?.textContent).toContain('结合对话内容')
 
     rerender(<RecoPanel content="" onAdd={vi.fn()} />)
     expect(container.querySelector('.rhint')).not.toBeNull()
