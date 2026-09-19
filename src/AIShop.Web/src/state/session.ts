@@ -2,7 +2,7 @@
  * 会话持久化（spec R2「消息持久化的键控、完整性与容错」/ design §8.2）。
  *
  * 职责边界：
- * - **键控**：消息、工具调用栏数据与 threadId 一律按用户名分键，不同账户的会话与历史互不覆盖；
+ * - **键控**：消息、工具调用栏数据、推荐负载与 threadId 一律按用户名分键，不同账户的会话与历史互不覆盖；
  * - **完整性**：消息**整体**序列化（含 assistant 的 `toolCalls` 与配对的 `role: "tool"` 消息）——
  *   只存纯文本会让下一轮出现「有工具结果、无 tool_calls」的孤儿消息（硬契约 1）；
  * - **容错**：存储不可用 / JSON 解析失败 / 结构非法 → 降级为「以空历史开始」+ 一条告警，
@@ -17,7 +17,7 @@ import type { Message } from '@ag-ui/client'
 
 import type { ToolRound } from '../agui/tools'
 
-/** 五个持久化键（design §8.2 / §15.4）。按用户名分区的键用函数形式。 */
+/** 六个持久化键（design §8.2 / §15.4 / agui-reco-realtime design §4.5 D）。按用户名分区的键用函数形式。 */
 export const STORAGE_KEYS = {
   /** 该账户的 threadId（首次进入时 `crypto.randomUUID()` 生成）。 */
   threadId: (username: string) => `agui.threadId.${username}`,
@@ -30,6 +30,13 @@ export const STORAGE_KEYS = {
    * 清除 MUST 与 `messages` 同生共死（两键内容有重复，各自独立增删会出现漂移）。
    */
   tools: (username: string) => `agui.tools.${username}`,
+  /**
+   * 该账户的**最近一次推荐负载**（`agui-reco-realtime` spec R8；与 CUSTOM 事件的 `value` 同形状）。
+   *
+   * 与 `messages` / `tools` 同为「某账户的会话数据」：写入 MUST 与 `messages` 同一处同一时刻、
+   * 清除 MUST 与 `messages` 同生共死 —— 否则会出现「消息已清、推荐数据未清」（或反向）的漂移。
+   */
+  reco: (username: string) => `agui.reco.${username}`,
   /** 当前选中模型的 `id`（配置节键，即 `forwardedProps.model` 的回传值；不存 wire 名/显示名）。 */
   model: 'agui.model',
   /** 上次选择的账户（刷新后回到同一身份）。 */
@@ -235,6 +242,61 @@ export function clearToolRounds(username: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// 推荐负载（agui-reco-realtime spec R8 / design §4.5 D）
+// ---------------------------------------------------------------------------
+
+/**
+ * 读取该账户的最近一次推荐负载（**原文文本**，直接喂 `parseRecommendation`，不做二次解析分叉）。
+ *
+ * 降级口径与 `readToolRounds` **完全一致**（spec R8 第 4 段）：无数据（从未写过）/ 存储不可用 /
+ * JSON 解析失败 / 结构既非对象也非字符串 / 是对象但 `products` 非数组 → 返回 `null`
+ * （面板走占位或历史工具结果回退）并告警，绝不抛出、绝不白屏。
+ *
+ * 合法值原样返回**原文**（不 `JSON.parse` 后再 `stringify`）：面板需要的是可以直接
+ * `parseRecommendation` 的 JSON 文本，回写时也必须逐字节可逆（刷新前后面板内容一致）。
+ */
+export function readReco(username: string): string | null {
+  const key = STORAGE_KEYS.reco(username)
+  const raw = readRaw(key)
+  // 「没写过」不是异常（新账户 / 退出后重进），不告警。
+  if (raw === null) return null
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (error) {
+    warn(`推荐数据 JSON 解析失败，以空开始（${key}）：${String(error)}`)
+    return null
+  }
+
+  // 字符串（JSON 字符串字面量）与「带 products 数组的对象」是两种合法结构。
+  if (typeof parsed !== 'string') {
+    const isPlainObject = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+    if (!isPlainObject || !Array.isArray((parsed as { products?: unknown }).products)) {
+      warn(`推荐数据结构非法（期望推荐负载对象或字符串），以空开始（${key}）`)
+      return null
+    }
+  }
+
+  return raw
+}
+
+/**
+ * 写入该账户的最近一次推荐负载（归一化后的推荐结果 JSON 文本）。
+ *
+ * 与 `writeMessages` / `writeToolRounds` **同一处、同一时刻**调用（见 `App.tsx` 的通知链），
+ * 三键因此不会漂移（agui-reco-realtime design §4.5 D）。
+ */
+export function writeReco(username: string, value: string): void {
+  writeRaw(STORAGE_KEYS.reco(username), value)
+}
+
+/** 删除该账户的推荐负载（只由 `clearSession` 调用，与消息历史同生共死）。 */
+export function clearReco(username: string): void {
+  removeRaw(STORAGE_KEYS.reco(username))
+}
+
+// ---------------------------------------------------------------------------
 // 全局选择态（模型 / 账户）
 // ---------------------------------------------------------------------------
 
@@ -269,12 +331,15 @@ export function clearUsername(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * 退出登录：清除**当前账户**的会话持久化（threadId + 消息历史 + 工具调用栏数据）。
+ * 退出登录：清除**当前账户**的会话持久化（threadId + 消息历史 + 工具调用栏数据 + 推荐负载）。
  *
- * 语义边界（spec R2 第 3 段 + R12 第 3 段）：
- * - 只删该账户自己的三个键 → **其它账户的历史与 threadId 原样保留**；
+ * 语义边界（spec R2 第 3 段 + R12 第 3 段 + agui-reco-realtime R8 第 4 段）：
+ * - 只删该账户自己的四个键 → **其它账户的历史与 threadId 原样保留**；
  * - 工具调用栏数据与消息历史**同生共死**（spec R8 追加条款）：它里面有一部分内容（工具名 / 参数 /
  *   结果）与 `messages` 重复，只清一个会留下「指向不存在消息」的孤儿工具数据；
+ * - 推荐负载同样与消息历史**同生共死**（agui-reco-realtime R8）：推荐面板的内容是「上一轮会话」
+ *   的产物，只清消息不清推荐会留下「消息已清、推荐数据未清」的漂移（下次进入该账户时面板会
+ *   显示上一个会话残留的推荐）；反向漏清 `messages` 也同理 —— 四键必须一起消失；
  * - 全局选择态（`agui.model` / `agui.username`）不在这里动 —— 它们是「应用级」的当前选择，
  *   不是「某账户的会话数据」，由退出流程按需另行清除；
  * - 清的是**本地**会话，不等同于删除服务端会话。
@@ -283,4 +348,5 @@ export function clearSession(username: string): void {
   clearThreadId(username)
   clearMessages(username)
   clearToolRounds(username)
+  clearReco(username)
 }

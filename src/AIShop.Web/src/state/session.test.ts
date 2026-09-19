@@ -16,17 +16,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ToolRound } from '../agui/tools'
 import {
+  STORAGE_KEYS,
   clearModelId,
   clearSession,
   clearUsername,
   ensureThreadId,
   readMessages,
   readModelId,
+  readReco,
   readThreadId,
   readToolRounds,
   readUsername,
   writeMessages,
   writeModelId,
+  writeReco,
   writeToolRounds,
   writeUsername,
 } from './session'
@@ -363,5 +366,131 @@ describe('工具调用栏数据的持久化（R8 追加条款）', () => {
     expect(readMessages('steve')).toEqual(steveHistory)
     expect(readToolRounds('steve')).toEqual(steveTools)
     expect(readThreadId('steve')).toBe(steveThread)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 推荐负载的持久化（agui-reco-realtime spec R8 / design §4.5 D）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一份「已落库」的推荐负载原文 —— 形状与 CUSTOM 事件的 `value` 同构（design §5）。
+ * 直接写字符串字面量（不经 `JSON.stringify` 构造）以便断言「逐字节相同」有确切参照。
+ */
+const RECO_PAYLOAD =
+  '{"message":"根据您的对话，为您推荐：","hasRecommendation":true,"categories":["运动"],' +
+  '"products":[{"id":3,"name":"专业跑鞋","category":"运动","price":129.99,"emoji":"👟",' +
+  '"reason":"因为你提到「跑步」"},{"id":7,"name":"速干跑步袜","category":"运动","price":29.9,' +
+  '"emoji":"🧦","reason":""}]}'
+
+describe('推荐负载的持久化（R8）', () => {
+  it('写入后逐字节读回；从未写过读回 null 且**不**告警（没写过不是异常）', () => {
+    // 键名与 messages / tools 同级同构（design §4.5 D）
+    expect(STORAGE_KEYS.reco('marla')).toBe('agui.reco.marla')
+
+    writeReco('marla', RECO_PAYLOAD)
+
+    expect(localStorage.getItem('agui.reco.marla')).toBe(RECO_PAYLOAD)
+    expect(readReco('marla')).toBe(RECO_PAYLOAD)
+
+    // 从未写过 → null，且「没写过」不产生告警
+    expect(readReco('nobody')).toBeNull()
+    expect(warnSpy).not.toHaveBeenCalled()
+
+    // JSON 字符串字面量也是合法结构（原文返回，不改写）
+    writeReco('steve', '"为您精选商品"')
+    expect(readReco('steve')).toBe('"为您精选商品"')
+    expect(warnSpy).not.toHaveBeenCalled()
+  })
+
+  it('非法 JSON → 返回 null、不抛异常、恰好一条告警（与 readToolRounds 同口径）', () => {
+    localStorage.setItem('agui.reco.marla', '{这不是 JSON')
+
+    let result: string | null | undefined
+    expect(() => {
+      result = readReco('marla')
+    }).not.toThrow()
+
+    expect(result).toBeNull()
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(warnSpy.mock.calls[0]?.[0]).toContain('agui.reco.marla')
+  })
+
+  it('结构非法（数字 / 数组 / 缺 products 的对象）→ 均为 null + 恰一条告警、不抛', () => {
+    const invalidStructures = ['42', '[{"id":3}]', '{"message":"为您推荐"}']
+
+    for (const invalid of invalidStructures) {
+      localStorage.setItem('agui.reco.marla', invalid)
+      warnSpy.mockClear()
+
+      let result: string | null | undefined
+      expect(() => {
+        result = readReco('marla')
+      }).not.toThrow()
+
+      expect(result).toBeNull()
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      expect(warnSpy.mock.calls[0]?.[0]).toContain('结构非法')
+    }
+  })
+
+  it('存储读取抛异常（localStorage 不可用）→ null + 告警，不抛异常', () => {
+    const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('SecurityError: localStorage 不可用')
+    })
+
+    try {
+      expect(readReco('marla')).toBeNull()
+      expect(warnSpy).toHaveBeenCalled()
+    } finally {
+      getItem.mockRestore()
+    }
+  })
+
+  it('存储写入抛异常（配额溢出）→ 不抛异常，只告警（当前会话可继续）', () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('QuotaExceededError')
+    })
+
+    try {
+      expect(() => writeReco('marla', RECO_PAYLOAD)).not.toThrow()
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      expect(warnSpy.mock.calls[0]?.[0]).toContain('写入')
+    } finally {
+      setItem.mockRestore()
+    }
+  })
+
+  it('clearSession(username) 后四键**同时**消失，其它账户的四键原样保留（R8-4）', () => {
+    // marla：四个键齐全（threadId / messages / tools / reco）
+    ensureThreadId('marla')
+    writeMessages('marla', MARLA_HISTORY)
+    writeToolRounds('marla', TOOL_SNAPSHOT)
+    writeReco('marla', RECO_PAYLOAD)
+
+    // steve：同样齐全，作为「不该被牵连」的对照
+    const steveThread = ensureThreadId('steve')
+    const steveHistory: Message[] = [{ id: 's-u1', role: 'user', content: '嘿嘿' }]
+    const steveTools: ToolRound[] = [{ runId: 'run-s', toolCalls: [], usage: null, finished: true }]
+    const steveReco = '{"message":"为您精选商品","products":[]}'
+    writeMessages('steve', steveHistory)
+    writeToolRounds('steve', steveTools)
+    writeReco('steve', steveReco)
+
+    clearSession('marla')
+
+    // 同生共死：当前账户的四键**同时**不存在（消除「消息已清、推荐数据未清」的漂移）
+    expect(localStorage.getItem('agui.threadId.marla')).toBeNull()
+    expect(localStorage.getItem('agui.messages.marla')).toBeNull()
+    expect(localStorage.getItem('agui.tools.marla')).toBeNull()
+    expect(localStorage.getItem('agui.reco.marla')).toBeNull()
+    expect(readReco('marla')).toBeNull()
+
+    // 其它账户的四键都原样保留
+    expect(readThreadId('steve')).toBe(steveThread)
+    expect(localStorage.getItem('agui.messages.steve')).toBe(JSON.stringify(steveHistory))
+    expect(localStorage.getItem('agui.tools.steve')).toBe(JSON.stringify(steveTools))
+    expect(localStorage.getItem('agui.reco.steve')).toBe(steveReco)
+    expect(readReco('steve')).toBe(steveReco)
   })
 })
