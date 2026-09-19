@@ -19,11 +19,19 @@
  *    （R4 第 1 段；`agui.username` 必须一并清，否则刷新会被 `initialScreen()` 带回已不存在的账户）；
  * 4. **错误分派复用**：`ProductModal.onFailure` 走 `dispatchApiFailure`（R4 末段：REST 面的 404
  *    MUST NOT 退化为「只弹一个 Toast」）。
+ *
+ * 推荐面板接线（agui-reco-realtime F4 / design §4.5 B、C、D）：面板数据源 = 推荐内容 store
+ * （`agui/reco.ts`），三个来源分别是 —— `CUSTOM` 事件（协议层已在 `agent.ts` 接好）、
+ * **工具结果**（本文件对 `lastRecommendationContent(messages)` 的变化做 effect）、
+ * **恢复初值**（会话 effect 内以 `readReco(username)` 优先、历史工具结果兜底）。
+ * 面板组件与 props 形状零改动，`lastRecommendationContent` 函数保留（既是工具结果来源，
+ * 也是刷新恢复的兜底来源）。负载的**持久化回写**属 F5，不在本处。
  */
 import type { Message } from '@ag-ui/client'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { setToastHandler } from './agui/agent'
+import { resetRecoContent, setRecoFromToolResult, useRecoContent } from './agui/reco'
 import {
   endSession,
   getAgent,
@@ -55,7 +63,9 @@ import { addToCart, refreshCart, resetCart, useCart } from './state/cart'
 import {
   clearSession,
   clearUsername,
+  readMessages,
   readModelId,
+  readReco,
   readToolRounds,
   readUsername,
   writeModelId,
@@ -135,6 +145,18 @@ export default function App() {
    */
   const trackerRef = useRef<ToolTracker | null>(null)
 
+  /**
+   * 工具结果来源的「已见值」：`lastRecommendationContent(messages)` 上一次被写进推荐 store 的原文。
+   *
+   * 两个用途（agui-reco-realtime F4）：
+   * 1. **变化判定** —— 该 effect 的依赖是 `messages`（每次 store 通知都换新引用），若不做值比较，
+   *    每一轮纯文本对话都会把同一条旧工具结果重写一遍（对 store 是无谓广播，对面板是无谓覆盖：
+   *    会把更晚到达的 `CUSTOM` 内容顶掉）；
+   * 2. **会话启动基线** —— 进入主界面时由会话 effect 置为「历史里最后一条工具结果」，使恢复期
+   *    不把历史旧值当成新变化（否则 `agui.reco.{username}` 的恢复优先级失效）。
+   */
+  const toolRecoRef = useRef<string | null>(null)
+
   const { messages, isRunning } = useSession()
   const { cart } = useCart()
 
@@ -186,6 +208,12 @@ export default function App() {
    * （`store.ts` 的 `handleSessionChange`）——两键因此同批次落库，不会出现「消息清了、工具数据没清」。
    * 不把写入口放进 `store.ts` 的理由：tracker 是 App 的 React state，store 拿不到它；在这里订阅
    * 是「不动 store 行为」的最小接缝。
+   *
+   * **推荐内容的初值**（agui-reco-realtime F4 / design §4.5 D）也在这里注入：优先用该账户持久化的
+   * `agui.reco.{username}`（刷新后面板原样恢复），读不到才回退「历史里最后一条 `recommend_products`
+   * 工具结果」，两者都没有则以 `null` 开始（面板显示占位）。同时把这份**回退值**记为工具结果来源的
+   * 基线（`toolRecoRef`）——否则紧随其后的工具结果 effect 会立刻用历史里的旧工具结果把刚恢复的
+   * `agui.reco.{username}` 盖掉，恢复优先级就形同虚设。
    */
   useEffect(() => {
     const username = readUsername()
@@ -194,6 +222,10 @@ export default function App() {
     if (model === null) return
 
     startSession({ model })
+
+    const restoredToolReco = lastRecommendationContent(readMessages(username))
+    resetRecoContent(readReco(username) ?? restoredToolReco)
+    toolRecoRef.current = restoredToolReco
 
     const next = createToolTracker({ initialRounds: readToolRounds(username) })
     trackerRef.current = next
@@ -218,6 +250,29 @@ export default function App() {
   }, [screen])
 
   /**
+   * 推荐内容的**工具结果来源**（agui-reco-realtime F4 / design §4.5 C）：`messages` 里
+   * `lastRecommendationContent` 的**变化**写进推荐 store。
+   *
+   * 三条口径：
+   * - **只在非 `null` 时写**：没有推荐工具结果的轮次（闲聊、纯加购）不得把面板清空 ——
+   *   「不在轮次之间清空」是既有口径（`reco.ts#setRecoFromToolResult` 同样忽略 `null`），
+   *   面板的「解析失败保留上一次」也依赖它；
+   * - **只在值变化时写**：与 `toolRecoRef` 比较（`messages` 每次通知都换新引用，不做值比较会对
+   *   同一条旧结果反复广播，见该 ref 的注释）；
+   * - **解码在读取侧恰好一次**：`lastRecommendationContent` 内的 `decodeToolResultContent` 是
+   *   唯一的 wire 边界解码点，store 侧不再解码（`CUSTOM` 路径的硬约束 2）。
+   *
+   * 到达顺序即覆盖顺序（后到者胜，spec R9-1）：本 effect 写的是**早于** `CUSTOM` 到达的那一路，
+   * 因此同轮「先工具结果、后 `CUSTOM`」时面板最终显示 `CUSTOM` 的内容。
+   */
+  useEffect(() => {
+    const content = lastRecommendationContent(messages)
+    if (content === null || content === toolRecoRef.current) return
+    toolRecoRef.current = content
+    setRecoFromToolResult(content)
+  }, [messages])
+
+  /**
    * 会话失效（服务端判定该账户不存在）→ 清该账户本地数据 + 回账户选择页（spec R4 第 1 段）。
    *
    * `dispatchApiFailure` 已清过该账户的 threadId / 消息（幂等，这里再清一次无害），并已给出提示；
@@ -230,7 +285,12 @@ export default function App() {
     })
   }, [])
 
-  /** 退出到账户选择屏的公共善后：清当前账户 + 清身份 + 断会话 + 丢购物车投影 + 关浮层。 */
+  /**
+   * 退出到账户选择屏的公共善后：清当前账户 + 清身份 + 断会话 + 丢购物车投影 + 丢推荐投影 + 关浮层。
+   *
+   * `resetRecoContent()` 与 `resetCart()` **同款时机**：推荐面板的内容是「上一轮会话」的产物，
+   * 换账户后旧投影必须丢弃（否则面板会显示上一个账户残留的推荐）。@see reco.ts#resetRecoContent
+   */
   function closeToAccount(): void {
     const username = readUsername()
     if (username !== null) clearSession(username)
@@ -238,6 +298,7 @@ export default function App() {
     endSession()
     // 购物车是服务端权威态且按用户名归属：换账户后旧投影必须丢弃（handoff-C10 遗留 2）。
     resetCart()
+    resetRecoContent()
     setCartOpen(false)
     setProductsOpen(false)
     setScreen('account')
@@ -283,7 +344,9 @@ export default function App() {
   const modelsPending = models === null || modelsError !== null
   const account = accountOf(currentUsername())
   const cartCount = cart?.totalItems ?? 0
-  const recoContent = useMemo(() => lastRecommendationContent(messages), [messages])
+  // 推荐面板的数据源 = 推荐内容 store（三个来源：工具结果 / `CUSTOM` 事件 / 恢复初值，
+  // 见 `agui/reco.ts`）。面板 props 形状不变，仍是 `content?: string | null`。
+  const recoContent = useRecoContent()
 
   return (
     <div
