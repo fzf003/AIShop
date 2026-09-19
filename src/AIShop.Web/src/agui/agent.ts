@@ -29,8 +29,12 @@ import { setRecoFromCustomEvent } from './reco'
 /**
  * 顶部提示（Toast）出口。
  *
- * 协议层不依赖 React：真实实现由 App 层（C11 装配）经 `setToastHandler` 注入；
+ * 用「注入」而非直接依赖 UI 组件：真实实现由 App 层（C11 装配）经 `setToastHandler` 注入；
  * 默认实现只写控制台 —— 目的是「失败不静默」，而不是替代 UI。
+ *
+ * 注：**这不等于本文件整体 React-free** —— 本文件经 `./reco` 间接依赖 React（推荐 store 走直连，
+ * 见 `design.md` §4.4 B「协议层只做事件 → store 的搬运」）。此处用注入是为「默认不静默」这一语义，
+ * 并非对协议层作依赖承诺。
  */
 export type ToastHandler = (message: string) => void
 
@@ -173,8 +177,14 @@ function isReasoningEvent(type: string): boolean {
  * 兼容中间件的 SDK 版本都必需，成本为零。丢弃推理事件本身就是 spec「非目标：不消费推理事件」的
  * 字面落地，不是范围扩张。）
  *
- * 本应用**未开 debug**（`new HttpAgent({url, threadId, initialMessages})`，无 `debug` 参数），
- * 故 `verifyEvents` 默认无效，丢弃事件不会引出「缺事件」噪音。
+ * 本应用**未开 debug**（`new HttpAgent({url, threadId, initialMessages})`，无 `debug` 参数）。
+ *
+ * ⚠️ **更正（agui-reco-realtime F3 实测，2026-09-19）**：**`verifyEvents` 并不被 debug 门控** ——
+ * 它**无条件**挂在组合链上（实读 SDK 0.0.59 `index.mjs`：`RUN_FINISHED` 分支内直接做配平检查，
+ * 外层没有任何 debug 条件包裹），对「`RUN_FINISHED` 时仍有未闭合的 text message / tool call / subagent」
+ * 这类非法流**会抛错**。此前本注释写的「默认无效」是**错的**（当时据 `.d.ts` 注释推断，未实测）。
+ * 本过滤器只丢 `REASONING_*` / `THINKING_*`，**不触碰文本与工具调用的配平**，故不受影响；
+ * 但**不要再把这层当「无效」** —— 今后改事件流时必须顾及 `verifyEvents` 的配平约束。
  */
 export const dropReasoningEvents: MiddlewareFunction = (input, next) =>
   next.run(input).pipe(filter((event) => !isReasoningEvent(event.type)))
