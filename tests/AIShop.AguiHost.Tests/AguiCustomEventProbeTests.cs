@@ -126,9 +126,13 @@ public sealed class AguiCustomEventProbeTests
         var frames = ParseSseFrames(sse);
         Assert.True(IndexOfFrame(frames, "RUN_FINISHED", name: null) >= 0, $"本轮应正常收尾。帧序：{Describe(frames)}");
 
-        // 反证断言：无 mapper 注册 → 自定义内容被静默丢弃，SSE 里没有 CUSTOM 帧
+        // 反证断言：无 mapper 注册 → 探针的自定义内容被静默丢弃，流里没有 name="probe" 的 CUSTOM 帧。
+        // 【口径修正（S5）】不得再断言「SSE 里一个 CUSTOM 帧都没有」——本探针的 keyed AIAgent 是外层再包一层探针的
+        // 【生产 keyed factory 产物】，而 S5 起该产物最外层是 RecommendationPushAgent（design §4.4 D 第 1 条）；
+        // 本用例的 user 消息含白名单关键词（跑步鞋）→ 生产链路会正常产出 name="recommendation" 的 CUSTOM 帧（R1，
+        // 该共存本身即「装配生效」的旁证）。该帧与本反证无关，故按事件名精确排除，而非全局禁 CUSTOM。
         Assert.Equal(-1, IndexOfFrame(frames, "CUSTOM", ProbeEventName));
-        Assert.DoesNotContain("\"CUSTOM\"", sse);
+        Assert.DoesNotContain($"\"name\":\"{ProbeEventName}\"", sse);
     }
 
     /// <summary>

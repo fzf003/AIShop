@@ -3,6 +3,7 @@ using AIShop.AgentTelemetry;
 using AIShop.AguiHost;
 using AIShop.Core.Interfaces;
 using AIShop.AguiHost.Model;
+using AIShop.AguiHost.Recommendation;
 using AIShop.Service.Agui;
 using AIShop.Service.Tools;
 using AIShop.ServiceDefaults;
@@ -41,6 +42,12 @@ try
 
     // AG-UI 服务端装配（注册 AG-UI 宿主基础设施与 JSON 序列化上下文；MapAGUIServer 归 T5）
     builder.Services.AddAGUIServer();
+
+    // agui-reco-realtime S5（design §4.4 D 第 2 / 第 4 条）：注册推荐 CUSTOM 事件的流选项映射
+    // （content → CustomEvent）与 RecommendationPushContent 的 AIContent JSON 多态派生类型。
+    // 【两者缺一不可】漏多态注册会让整条 SSE 流在到达 mapper 之前抛 NotSupportedException 断开。
+    // Options 为懒解析、装配顺序不敏感，集中放在 AddAGUIServer 之后便于阅读。
+    builder.Services.AddAguiRecommendationStreamOptions();
 
     // T7 DevUI 开发面板 + OpenAI wire（responses/conversations）IsDevelopment 门：
     // 仅 Development 注册/映射（设计 §4.6、spec 验收 6）——生产不暴露 /devui、/v1/entities 与 OpenAI 会话端点；
@@ -94,19 +101,27 @@ try
     // AG-UI "/" 端点在所有环境都按名解析）。这是 DevUI /v1/entities 能发现该实体、且 AG-UI 端点不因 keyed 化丢失的前提
     // （实体枚举 = GetKeyedServices<AIAgent>(KeyedService.AnyKey)，见镜像 DevUI EntitiesApiExtensions）。
     builder.Services.AddAIAgent(AGUIShoppingAgent.AgentName, (sp, name) =>
-        AGUIShoppingAgent.Create(
-             new ReplySanitizingChatClient(sp.GetRequiredService<RouterChatClient>()),
-            sp.GetRequiredService<CartToolProvider>(),
-            sp.GetRequiredService<AgentTelemetryOptions>(),
-            memoryService: ResolveMemoryService(sp),
-            currentUser: sp.GetRequiredService<ICurrentUserAccessor>(),
-            compactionStrategy: sp.GetRequiredService<ContextWindowCompactionStrategy>(),
-            chatHistoryProvider: sp.GetService<SqlChatHistoryProvider>(),
-            // agui-client-support T7：推荐工具 provider 必须显式传入——本 keyed factory 是 Create 的【唯一生产装配点】，
-            // 漏传则该可选参为 null、recommend_products 静默不挂载（编译通过、工具集退化为 8）。用【具名实参】避免与
-            // 上方其它可选参按位置错位；由宿主级 RecommendationToolMountingTests（解析 keyed AIAgent 读工具集）锁定。
-            recommendationTools: sp.GetRequiredService<RecommendationToolProvider>())
-        );
+        // agui-reco-realtime S5（design §4.4 D 第 1 条）：装饰器套在 Create 产物的【最外层】（= OpenTelemetryAgent 之外）——
+        // 合成更新因此从不进入 MEAI/OTel 的序列化/还原路径（内层会让自定义 AIContent 被拒绝或还原时丢弃）。
+        // 【硬要求】AGUIShoppingAgent.Create 的实参、签名、返回语义逐条零改动（可用 `git diff -w` 核对），故既有
+        // Create 层装配断言（AGUIShoppingAgentTests / AguiCompactionTests / AguiMemoryTests / AguiToolLoopGuardTests /
+        // SqlChatHistoryProviderTests）全部零改动。DelegatingAIAgent 原样转发 Name / GetService / 会话读写 →
+        // MapAGUIServer 的 keyed AgentSessionStore 解析与 GetService(typeof(ChatOptions)) 工具集读面不变
+        // （由 RecommendationPushMountingTests 在真实宿主上锁定）。
+        new RecommendationPushAgent(
+            AGUIShoppingAgent.Create(
+                new ReplySanitizingChatClient(sp.GetRequiredService<RouterChatClient>()),
+                sp.GetRequiredService<CartToolProvider>(),
+                sp.GetRequiredService<AgentTelemetryOptions>(),
+                memoryService: ResolveMemoryService(sp),
+                currentUser: sp.GetRequiredService<ICurrentUserAccessor>(),
+                compactionStrategy: sp.GetRequiredService<ContextWindowCompactionStrategy>(),
+                chatHistoryProvider: sp.GetService<SqlChatHistoryProvider>(),
+                // agui-client-support T7：推荐工具 provider 必须显式传入——本 keyed factory 是 Create 的【唯一生产装配点】，
+                // 漏传则该可选参为 null、recommend_products 静默不挂载（编译通过、工具集退化为 8）。用【具名实参】避免与
+                // 上方其它可选参按位置错位；由宿主级 RecommendationToolMountingTests（解析 keyed AIAgent 读工具集）锁定。
+                recommendationTools: sp.GetRequiredService<RecommendationToolProvider>()),
+            sp.GetRequiredService<RecommendationToolProvider>()));
 
      // 解析 Mem0 记忆服务（IMemoryService）。IMemoryService 单例构造会 new LocalBgeEmbeddingGenerator(modelDir)
     // ——构造即 new InferenceSession(model.onnx) 加载本地 bge ONNX 模型（~94MB，Models/bge-small-zh-v1.5）；

@@ -125,10 +125,13 @@ public sealed class AguiDevUITests
         Assert.NotNull(agent);
         Assert.Equal(AGUIShoppingAgent.AgentName, agent.Name);
 
-        // T11（agent 遥测埋点）：Program keyed factory 把 appsettings AgentTelemetry:Level(MetadataAndContent)
-        // 传入 Create → 返回前经 AgentTelemetry.Instrument 包装为 OpenTelemetryAgent（不再裸 ChatClientAgent）。
-        // 仍是 AIAgent，Name/GetService(转发内层 ChatOptions) 保持——AG-UI/DevUI 会话链路不受影响。
-        Assert.Contains("OpenTelemetryAgent", agent.GetType().Name);
+        // S5（agui-reco-realtime）：Program keyed factory 在 Create 产物之外又加了最外层装饰器
+        // RecommendationPushAgent（推荐 CUSTOM 事件，design §4.4 D 第 1 条），故最外层类型名**不再**是
+        // OpenTelemetryAgent（它仍是次外层）。仍是 AIAgent，Name / GetService(转发内层 ChatOptions) 保持——
+        // AG-UI/DevUI 会话链路不受影响。OTel 包装本身的覆盖由 AGUIShoppingAgentTests 的
+        // Create_WithTelemetryMetadataLevel_ReturnsOpenTelemetryAgent 与 AgentTelemetryTests 保留
+        // （两者盯的是 Create 的返回值，本变更零改动）。
+        Assert.Equal("RecommendationPushAgent", agent.GetType().Name);
     }
 
     [Fact]
