@@ -24,6 +24,7 @@ import { HttpAgent, type Message, type MiddlewareFunction, type RunAgentResult }
 import { filter } from 'rxjs'
 
 import { dispatchApiFailure } from '../api/errors'
+import { setRecoFromCustomEvent } from './reco'
 
 /**
  * 顶部提示（Toast）出口。
@@ -87,11 +88,12 @@ export interface AguiSession {
 /**
  * 装配一个 AG-UI 会话。
  *
- * 订阅钩子说明（为什么四个都挂）：
+ * 订阅钩子说明（为什么五个都挂）：
  * - `onMessagesChanged`：流式增量与工具结果消息都会触发 → 上层据此持久化「完整」消息（R2-3 / 硬契约 1）；
  * - `onNewMessage`：本地 `addMessage`（用户消息）**不触发** `onMessagesChanged`，须单独接；
  * - `onRunFinalized`：刷新 `isRunning`（运行态退出）；
- * - `onRunFailed`：**失败处理的唯一入口**（SDK 把非 2xx 转成此回调，见下）。
+ * - `onRunFailed`：**失败处理的唯一入口**（SDK 把非 2xx 转成此回调，见下）；
+ * - `onCustomEvent`：推荐推送（spec R6 / R7）→ 把事件的 `value` 搬进推荐 store（本层只搬运不解析，见下）。
  *
  * ⚠️ **硬契约 2**：失败**不**以 `RUN_ERROR` 事件帧到达（服务端 username 校验短路在 `MapAGUIServer`
  * 之前，返回的是**普通 HTTP 响应** `404 + {"detail":"User not found"}`）；`@ag-ui/client` 的
@@ -227,6 +229,24 @@ export function createAgent(config: AguiSessionConfig): AguiSession {
     onNewMessage: notify,
     onRunFinalized: () => {
       if (failed) return
+      notify()
+    },
+    // `CUSTOM` 事件（推荐推送的载体，spec R6 / R7）：**只搬运、不解析**。
+    //
+    // 为什么它不会污染消息与工具调用栏（R6）：
+    // 1. **不进 `agent.messages`**：SDK 的 `applyEvents` 里 `EventType.CUSTOM` 分支**只**派发
+    //    `onCustomEvent` 订阅者，`messages` 原样透传（实测见 `agent.test.ts` 的 R6-1 用例及其反证）。
+    //    故下一轮全量重发历史时，请求体里不含任何推荐负载（R2-1「推荐负载不进历史」）。
+    // 2. **不产生工具调用栏条目**：它不是 `TOOL_CALL_START` / `TOOL_CALL_RESULT`，订阅这两个事件的
+    //    工具调用栏组件看不到它。
+    // 3. **不计入整轮 usage**：整轮用量只由 `RUN_FINISHED` / `RUN_ERROR` 的 `usage` 数组承载（协议里
+    //    是整轮级字段），`CUSTOM` 没有 usage 字段，天然不在汇总口径内。
+    //
+    // **value 不在这里解析**：归一化（对象 → JSON 文本 / 字符串原样保留 / 非法形状不崩）归
+    // `reco.ts#setRecoFromCustomEvent`，真正的渲染语义归面板的 `parseRecommendation`。协议层多解析
+    // 一次就会变成第二份解析器（F2 的硬约束），也会把「结构不符保留上一次」的口径提前固化在这里。
+    onCustomEvent: (params) => {
+      setRecoFromCustomEvent(params.event.value)
       notify()
     },
     // 失败**不**走 `RUN_ERROR` 事件帧（硬契约 2 / R4）：服务端 username 校验短路在 `MapAGUIServer`

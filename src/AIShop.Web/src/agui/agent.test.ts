@@ -24,6 +24,7 @@ import { readMessages, writeUsername } from '../state/session'
 import { installFetchStub, type FetchCall, type RouteSpec } from '../test/fetch-stub'
 import {
   createSseResponse,
+  customEvent,
   runFinished,
   runStarted,
   type SseEvent,
@@ -36,6 +37,7 @@ import {
   toolCallStart,
 } from '../test/sse'
 import { AGUI_ENDPOINT, createAgent } from './agent'
+import { getRecoSnapshot, resetRecoContent } from './reco'
 import { endSession, getSnapshot, runRound, setModel, startSession, subscribe } from './store'
 
 /** `GET /models` 响应项的替身（R3-2 的数据契约：`id` 是节键、`model` 是 wire 名）。 */
@@ -75,6 +77,27 @@ function toolRound(threadId: string, runId: string, assistantId: string) {
     toolCallResult('tc1', 'tr1', '找到 1 个商品'),
     textMessageContent(assistantId, '已为您找到'),
     textMessageEnd(assistantId),
+    runFinished(threadId, runId),
+  ]
+}
+
+/**
+ * 真机形态的一轮：助手文本结束后、`RUN_FINISHED` 之前推一条 `CUSTOM` 推荐事件
+ * （宿主 `RecommendationPushAgent` 的次序；`name` 恒为 `recommendation`，见 `RecommendationPushContent.EventName`）。
+ */
+function recoRound(
+  threadId: string,
+  runId: string,
+  assistantId: string,
+  reply: string,
+  value: unknown,
+): SseEvent[] {
+  return [
+    runStarted(threadId, runId),
+    textMessageStart(assistantId),
+    textMessageContent(assistantId, reply),
+    textMessageEnd(assistantId),
+    customEvent('recommendation', value),
     runFinished(threadId, runId),
   ]
 }
@@ -521,5 +544,102 @@ describe('agent.ts：推理消息不得进入 agent.messages（R1 追加条款 /
       'reasoning',
       'assistant',
     ])
+  })
+})
+
+/**
+ * spec R6「CUSTOM 推荐事件不产生消息与工具调用栏条目」+ R7 的**协议层搬运**（tasks.md F3）。
+ *
+ * 本层只验证「`CUSTOM` 事件 → 推荐 store」的搬运：`value` 的归一化、非法形状不崩、不套多编码解码
+ * 已在 `reco.test.ts`（F2）钉死，此处不重复。
+ *
+ * 依旧回放**真实 `@ag-ui/client`**（R18-2）：事件应用逻辑不在这里重写。
+ */
+describe('agent.ts：CUSTOM 事件 → 推荐 store（R6-1、R7）', () => {
+  // 推荐 store 是模块级单例：每个用例后清空，避免与用例内预置的原值串味到后续文件级用例。
+  afterEach(() => {
+    resetRecoContent()
+  })
+
+  /** 宿主推的 `value` 形状：推荐结果**对象**（与持久化 `agui.reco.{username}` 同形）。 */
+  const RECO = {
+    message: '为你推荐',
+    products: [
+      { id: 1, name: '跑步鞋 A', reason: '适合日常跑步' },
+      { id: 2, name: '跑步鞋 B', reason: '缓震更好' },
+    ],
+  }
+
+  it('回放含 CUSTOM 的一轮 → store 快照为该 value 的归一化文本（正向锚点：无 CUSTOM 的一轮一字不写）', async () => {
+    const stub = installFetchStub({
+      '/agui': scriptRounds([
+        textRound('t', 'r1', 'a1', '第一轮回复'),
+        recoRound('t', 'r2', 'a2', '第二轮回复', RECO),
+      ]),
+    })
+    restoreFetch = stub.restore
+
+    const session = createAgent({ username: 'marla', model: MODEL_ITEM.id, threadId: 't' })
+    resetRecoContent()
+
+    // 正向锚点：本轮**没有** CUSTOM 帧 → 一个字都不写（主断言因此不可能靠空转变绿）
+    await session.runRound('第一轮')
+    expect(getRecoSnapshot()).toBeNull()
+
+    await session.runRound('第二轮')
+
+    // 主断言：`value` 经 `setRecoFromCustomEvent` 归一化后落在 store 上（对象 → JSON 文本）
+    const snapshot = getRecoSnapshot()
+    expect(snapshot).toBe(JSON.stringify(RECO))
+    expect(JSON.parse(snapshot as string)).toEqual(RECO)
+  })
+
+  it('CUSTOM 不产生消息：本轮增量只有自身的 user + assistant，消息内容不含推荐负载（R6-1）', async () => {
+    const stub = installFetchStub({
+      '/agui': scriptRounds([
+        textRound('t', 'r1', 'a1', '第一轮回复'),
+        recoRound('t', 'r2', 'a2', '第二轮回复', RECO),
+      ]),
+    })
+    restoreFetch = stub.restore
+
+    const session = createAgent({ username: 'marla', model: MODEL_ITEM.id, threadId: 't' })
+
+    await session.runRound('第一轮')
+    // `getMessages()` 返回的就是 SDK 持有的那个数组（会被后续轮次原地追加）——先取**数值**快照。
+    const beforeCount = session.getMessages().length
+    expect(session.getMessages().map((message) => message.role)).toEqual(['user', 'assistant'])
+
+    await session.runRound('第二轮')
+
+    // 长度与角色序列：第二轮只多了本轮自己的 user + assistant —— CUSTOM 一帧都没进来
+    const after = session.getMessages()
+    expect(after.map((message) => message.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
+    expect(after).toHaveLength(beforeCount + 2)
+    expect(after.map((message) => message.content)).toEqual([
+      '第一轮',
+      '第一轮回复',
+      '第二轮',
+      '第二轮回复',
+    ])
+    // 反证「不存在」（不只靠长度，长度可能被等量替换骗过）：推荐负载的任何片段都不在消息里
+    const serialized = JSON.stringify(after)
+    expect(serialized).not.toContain('为你推荐')
+    expect(serialized).not.toContain('跑步鞋 A')
+    expect(serialized).not.toContain('recommendation')
+  })
+
+  it('本轮无 CUSTOM 帧 → store 保持原值（不被清零，沿用「不在轮次之间清空」口径）', async () => {
+    const stub = installFetchStub({
+      '/agui': scriptRounds([textRound('t', 'r1', 'a1', '闲聊回复')]),
+    })
+    restoreFetch = stub.restore
+
+    const session = createAgent({ username: 'marla', model: MODEL_ITEM.id, threadId: 't' })
+    resetRecoContent('上一次推送的推荐')
+
+    await session.runRound('你好')
+
+    expect(getRecoSnapshot()).toBe('上一次推送的推荐')
   })
 })

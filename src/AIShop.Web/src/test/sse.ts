@@ -106,6 +106,18 @@ export function toolCallResultEncoded(
   return toolCallResult(toolCallId, messageId, JSON.stringify(result))
 }
 
+/**
+ * `CUSTOM` 事件（推荐推送的载体；spec R6 / R7，宿主侧 `name` 恒为 `"recommendation"`）。
+ *
+ * `value` 形状由 `@ag-ui/core` 的 `CustomEventSchema` 声明为 `z.any()` —— 协议不校验内部结构，
+ * 服务端推的是推荐结果**对象**（与持久化 `agui.reco.{username}` 同形）。
+ *
+ * SDK 的 `CUSTOM` 分支**只派发 `onCustomEvent`**、不产生消息（R6-1；实测见 `agent.test.ts`）。
+ */
+export function customEvent(name: string, value: unknown): SseEvent {
+  return { type: 'CUSTOM', name, value }
+}
+
 export function runFinished(
   threadId: string,
   runId: string,
