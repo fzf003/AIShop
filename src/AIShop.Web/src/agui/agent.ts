@@ -59,17 +59,19 @@ export function setToastHandler(handler: ToastHandler | null): void {
 export const AGUI_ENDPOINT = '/agui'
 
 /**
- * C2：本轮**静默**（一个事件都收不到）超过此时长，判定为「挂起」并中止本轮。
+ * C2：挂起兜底 —— **首字节超时**：本轮发出后多久仍收不到**第一个事件**，即判定为挂起并中止。
  *
- * 取值依据：真机实测单轮 6–11s，本值留足余量、不会误杀长回复；而挂起 30s 后能自动恢复，
- * 远好于「发送按钮永久禁用、只能刷新页面」（真机 Mimo 事故的表现）。
+ * 取值依据（2026-09-20 真机实测）：一轮正常对话服务端约 28 秒，但其中 **19.5 秒是记忆提取**，
+ * 那段后处理期间服务端**一个事件都不发**。所以「静默」绝不能当作挂起信号 —— 后处理慢是常态。
+ * 真正的挂起是**连响应都起不来**（连接建立后毫无动静），故只对「首字节」计时。
  *
- * 为什么用「静默超时」而不是「整轮超时」：挂起的本质是**长时间收不到任何事件**，
- * 而非「这一轮太慢」。整轮超时会误杀那些持续产出内容、只是总时长较长的正常回复。
+ * **已知取舍**：本方案不覆盖「服务端发了几帧之后才卡死」——那种情况要中段静默检测，
+ * 而中段静默与后处理静默在当前链路上无法区分，强行区分会重新引入误杀。宁可少兜一种，
+ * 不要误杀正常请求（误杀的表现与真实故障一模一样，只会更难排查）。
  *
  * 导出仅供测试引用（避免用例硬编码一个会与实现漂移的阈值）。
  */
-export const IDLE_TIMEOUT_MS = 30_000
+export const FIRST_BYTE_TIMEOUT_MS = 60_000
 
 export interface AguiSessionConfig {
   /** 当前选定账户；决定服务端会话归属（`store_id = AGUIShopping:{username}`）。 */
@@ -233,40 +235,40 @@ export function createAgent(config: AguiSessionConfig): AguiSession {
   const listeners = new Set<() => void>()
 
   /**
-   * C2：挂起兜底 —— idle watchdog 的计时器句柄（`undefined` = 当前不在计时）。
+   * C2：挂起兜底 —— **首字节**计时器的句柄（`undefined` = 当前不在计时）。
    *
-   * **要解的形态**：服务端建立了 SSE 连接后**既不产出事件、也不结束、也不报错**。此时
+   * **要解的形态**：服务端建立 SSE 连接后**既不产出事件、也不结束、也不报错**。此时
    * `@ag-ui/client` 的 `fromFetch` 会一直挂着 → `agent.isRunning` 恒为 `true` → `ChatPanel`
    * 的发送按钮（`disabled={isRunning}`）永久禁用。SDK 在「正常收尾」与「报错」两条出口都会
    * 复位运行态，**唯一不能自愈的就是挂起**；浏览器 `fetch` 也没有默认超时。
    *
-   * 故这里自建一层兜底：**每收到一个事件就续期**（见下方 `agent.use`），静默超过
-   * {@link IDLE_TIMEOUT_MS} 就 `abortRun()` 中止本轮 —— 中止会让 `runAgent` 以错误收尾，
-   * 经 SDK 的 `onError` → `onRunFailed` 走到本文件的失败处理，`isRunning` 随之复位。
+   * 故这里自建一层兜底：只对**首字节**计时（见 {@link FIRST_BYTE_TIMEOUT_MS}），
+   * 一旦收到任意事件就撤表 —— 那已证明服务端活着，此后无论多慢都不再干预。
+   * 超时则 `abortRun()` 中止本轮，让 `runAgent` 以错误收尾、`isRunning` 得以复位。
    */
   let watchdog: ReturnType<typeof setTimeout> | undefined
 
-  /** 装表 / 续期：先清旧表，避免同一轮里堆叠多个计时器。 */
-  const armWatchdog = (): void => {
-    if (watchdog !== undefined) clearTimeout(watchdog)
+  /** 装表：本轮发出后起算。已在计时则不动（首字节只等一次）。 */
+  const armFirstByteWatchdog = (): void => {
+    if (watchdog !== undefined) return
     watchdog = setTimeout(() => {
       watchdog = undefined
       agent.abortRun()
-    }, IDLE_TIMEOUT_MS)
+    }, FIRST_BYTE_TIMEOUT_MS)
   }
 
-  /** 撤表：本轮已收尾（成功或失败）后不再需要兜底。 */
-  const disarmWatchdog = (): void => {
+  /** 撤表：已收到事件（服务端活着），或本轮已收尾 —— 两种情况都不再需要兜底。 */
+  const disarmFirstByteWatchdog = (): void => {
     if (watchdog !== undefined) {
       clearTimeout(watchdog)
       watchdog = undefined
     }
   }
 
-  // 静默判定的事件源：`use()` 追加的中间件紧贴传输层，**每个**入站事件都会经过它
+  // 首字节的观测点：`use()` 追加的中间件紧贴传输层，**每个**入站事件都会经过它
   // （比挂在 `onMessagesChanged` 上准 —— 后者只在消息内容变化时触发，会漏掉
   // `RUN_STARTED`、`TEXT_MESSAGE_START` 这类不产生消息的事件，造成误判挂起）。
-  agent.use((input, next) => next.run(input).pipe(tap(() => armWatchdog())))
+  agent.use((input, next) => next.run(input).pipe(tap(() => disarmFirstByteWatchdog())))
   /**
    * 本轮是否已失败（`onRunFailed` 派发过）。
    *
@@ -345,12 +347,12 @@ export function createAgent(config: AguiSessionConfig): AguiSession {
       agent.addMessage({ id: crypto.randomUUID(), role: 'user', content: text })
 
       // 每轮都显式传**全量** `{ username, model }`：`forwardedProps` 不会自动携带（硬契约 3 / R3）。
-      // C2：本轮装表 → 收到事件自动续期 → 无论成败都在 finally 撤表（下一轮重新装）。
-      armWatchdog()
+      // C2：本轮装「首字节」表 → 收到首个事件自动撤表 → 无论成败都在 finally 再撤一次（下一轮重新装）。
+      armFirstByteWatchdog()
       try {
         return await agent.runAgent({ forwardedProps: { username: config.username, model } })
       } finally {
-        disarmWatchdog()
+        disarmFirstByteWatchdog()
       }
     },
   }

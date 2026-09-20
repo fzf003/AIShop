@@ -18,7 +18,7 @@ import type { Message } from '@ag-ui/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import App from './App'
-import { IDLE_TIMEOUT_MS } from './agui/agent'
+import { FIRST_BYTE_TIMEOUT_MS } from './agui/agent'
 import { endSession } from './agui/store'
 import { dismissToast } from './components/Toast'
 import { resetCart } from './state/cart'
@@ -206,7 +206,19 @@ describe('流式渲染与单轮运行约束（R7）', () => {
    *
    * 反证导向：撤销 `agent.ts` 的 watchdog 后本用例会**挂死超时**（流程永不收尾）。
    */
-  it('C2：服务端挂起（不发终止帧、也不关闭流）→ 静默兜底中止本轮，发送入口恢复可用', async () => {
+  /**
+   * C2：**挂起**形态下的发送入口恢复（与上一条 R7-2 互补）。
+   *
+   * R7-2 覆盖的是「服务端正常收尾 → 入口恢复」；本用例覆盖 SDK 唯一不能自愈的那条出口 ——
+   * 服务端**连首字节都不发**（连接建立、但一个事件都不产出，也不结束、也不报错）。
+   * 此时若没有兜底，`isRunning` 恒真、发送入口永久禁用，用户只能刷新页面。
+   *
+   * 注：不用「发若干帧后静默」构造 —— 真机实测那是正常行为（记忆提取期间服务端静默约 20 秒），
+   * 详见 `agent.ts` 里 `FIRST_BYTE_TIMEOUT_MS` 的说明与 `agent.test.ts` 中不误杀用例。
+   *
+   * 反证导向：撤销 `agent.ts` 的首字节兜底后本用例会**挂死超时**（流程永不收尾）。
+   */
+  it('C2：服务端连首字节都不发 → 首字节超时中止本轮，发送入口恢复可用', async () => {
     const stream = openSseStream()
     stubFetch({ '/models': MODELS, '/agui': () => stream.response })
 
@@ -216,23 +228,20 @@ describe('流式渲染与单轮运行约束（R7）', () => {
     await enterMain(/Marla/, /MiMo/)
 
     // 这一段**只用同步的 `fireEvent`**：`userEvent` 内部走计时器，在 fake timers 下会卡住。
-    // 只 fake watchdog 用到的两个计时器，避免 React 调度依赖的 microtask / performance 被替换。
+    // 只 fake 兜底用到的两个计时器，避免 React 调度依赖的 microtask / performance 被替换。
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
       fireEvent.change(screen.getByLabelText('消息'), { target: { value: '你好' } })
       fireEvent.click(sendButton())
 
-      // 挂起：只发部分帧，既不发 TEXT_MESSAGE_END / RUN_FINISHED，也不 close
-      await act(async () => {
-        stream.send([runStarted('thread-1', 'run-1'), textMessageStart('assistant-1')])
-      })
+      // 点击后的「进入运行态」是异步的，先 flush 一轮再断言（否则会误判为未禁用）
+      await act(async () => undefined)
 
-      // 尚无终止帧 → 入口保持禁用
+      // 刻意一个事件都不发 —— 真正的挂起；本轮应处于运行中，入口禁用
       expect(sendButton().disabled).toBe(true)
 
-      // 静默超过阈值 → 兜底中止本轮 → 入口恢复
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(IDLE_TIMEOUT_MS + 1_000)
+        await vi.advanceTimersByTimeAsync(FIRST_BYTE_TIMEOUT_MS + 1_000)
       })
 
       expect(sendButton().disabled).toBe(false)

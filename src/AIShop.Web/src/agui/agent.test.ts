@@ -37,7 +37,7 @@ import {
   toolCallResult,
   toolCallStart,
 } from '../test/sse'
-import { AGUI_ENDPOINT, createAgent, IDLE_TIMEOUT_MS } from './agent'
+import { AGUI_ENDPOINT, createAgent, FIRST_BYTE_TIMEOUT_MS } from './agent'
 import { getRecoSnapshot, resetRecoContent } from './reco'
 import { endSession, getSnapshot, runRound, setModel, startSession, subscribe } from './store'
 
@@ -646,30 +646,28 @@ describe('agent.ts：CUSTOM 事件 → 推荐 store（R6-1、R7）', () => {
 })
 
 /**
- * C2：挂起兜底（idle watchdog）。
+ * C2：挂起兜底（首字节超时）。
  *
  * **要解的形态**：服务端建立 SSE 连接后**既不产出事件、也不结束、也不报错**。此时
  * `@ag-ui/client` 的读流会一直挂着 → `agent.isRunning` 恒为 `true` → `ChatPanel` 的发送按钮
  * （`disabled={isRunning}`）永久禁用，用户只能刷新页面（真机 Mimo 事故的表现之一）。
  *
- * SDK 在「正常收尾」与「报错」两条出口都会复位运行态，**唯一不能自愈的就是挂起**；
- * 浏览器 `fetch` 也没有默认超时。故由 `createAgent` 自建一层静默兜底。
+ * **⚠️ 这里与工单原文有一处偏离，理由是真机实测**：C2 工单要求的验证构造是「只发部分帧、
+ * 不发 RUN_FINISHED、也不 close」。但实测表明「发出若干帧后长时间静默」**正是正常行为** ——
+ * 一轮对话服务端约 28 秒，其中 19.5 秒是记忆提取，那段期间一个事件都不发。若把这种形态判为
+ * 挂起，就会误杀正常请求（误杀的表现与真实故障一模一样，只会更难排查）。
+ * 故兜底改为只对**首字节**计时，本用例也相应构造「**一个帧都不发**」的替身 —— 那才是真正的挂起。
  *
- * 本用例是**反证导向**的：撤销 `agent.ts` 的 watchdog 后，本用例必须变红
+ * 本用例是**反证导向**的：撤销 `agent.ts` 的首字节兜底后，本用例必须变红
  * （`isRunning()` 恒 `true`）。
  */
-describe('agent.ts：C2 挂起兜底（服务端既不结束也不报错时 isRunning 必须复位）', () => {
-  it('静默超过阈值 → 自动中止本轮、isRunning 复位且通知订阅者', async () => {
+describe('agent.ts：C2 挂起兜底（服务端连首字节都不发时 isRunning 必须复位）', () => {
+  it('首字节超时 → 自动中止本轮、isRunning 复位且通知订阅者', async () => {
     vi.useFakeTimers()
     try {
       const stub = installFetchStub({
-        [AGUI_ENDPOINT]: () =>
-          createHangingSseResponse([
-            runStarted('t-hang', 'r-hang'),
-            textMessageStart('a-hang'),
-            textMessageContent('a-hang', '部分回复'),
-            // 故意不发 TEXT_MESSAGE_END / RUN_FINISHED，且流不关闭 —— 这就是「挂起」
-          ]),
+        // 空事件数组 + 不关闭流 = 连接建立了但一个字节都不发（真正的挂起）
+        [AGUI_ENDPOINT]: () => createHangingSseResponse([]),
       })
       restoreFetch = stub.restore
 
@@ -683,12 +681,41 @@ describe('agent.ts：C2 挂起兜底（服务端既不结束也不报错时 isRu
       // 先前置一个 catch：中止会让本轮以 AbortError 收尾，避免被 vitest 记为 unhandled rejection
       const settled = session.runRound('你好').catch((error: unknown) => error)
 
-      await vi.advanceTimersByTimeAsync(IDLE_TIMEOUT_MS + 1_000)
+      await vi.advanceTimersByTimeAsync(FIRST_BYTE_TIMEOUT_MS + 1_000)
       await settled
 
       // 停止兜底后才可能置 false —— 这正是「按钮恢复可用」的数据面
       expect(session.isRunning()).toBe(false)
       expect(notified).toBeGreaterThan(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('首字节及时到达 → 兜底撤表，后续长时间静默也不中止本轮（不误杀后处理慢的正常请求）', async () => {
+    vi.useFakeTimers()
+    try {
+      // 发出首帧后一直静默、也不关闭 —— 这正是真机上「记忆提取 19.5 秒」的形态
+      const stub = installFetchStub({
+        [AGUI_ENDPOINT]: () =>
+          createHangingSseResponse([
+            runStarted('t-slow', 'r-slow'),
+            textMessageStart('a-slow'),
+            textMessageContent('a-slow', '部分回复'),
+          ]),
+      })
+      restoreFetch = stub.restore
+
+      const session = createAgent({ username: 'marla', model: MODEL_ITEM.id, threadId: 't-slow' })
+
+      // 刻意不等本轮收尾（替身本就不收尾），只挂一个 catch 防 unhandled rejection
+      session.runRound('你好').catch(() => undefined)
+
+      // 首字节已到 → 撤表；此后推进远超阈值的时长也不应中止
+      await vi.advanceTimersByTimeAsync(FIRST_BYTE_TIMEOUT_MS * 3)
+
+      // 关键断言：本轮**没有**被兜底误杀 —— 流未收尾，故仍处于运行中
+      expect(session.isRunning()).toBe(true)
     } finally {
       vi.useRealTimers()
     }
