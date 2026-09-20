@@ -15,9 +15,10 @@
  * 任一失效都会在这里（或下游用例）变红。
  */
 import type { Message } from '@ag-ui/client'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import App from './App'
+import { IDLE_TIMEOUT_MS } from './agui/agent'
 import { endSession } from './agui/store'
 import { dismissToast } from './components/Toast'
 import { resetCart } from './state/cart'
@@ -28,7 +29,7 @@ import {
   type RouteHandler,
   type RouteSpec,
 } from './test/fetch-stub'
-import { act, render, screen, userEvent, waitFor } from './test/render'
+import { act, fireEvent, render, screen, userEvent, waitFor } from './test/render'
 import {
   type SseEvent,
   createSseResponse,
@@ -194,6 +195,50 @@ describe('流式渲染与单轮运行约束（R7）', () => {
     await waitFor(() => {
       expect(sendButton().disabled).toBe(false)
     })
+  })
+
+  /**
+   * C2：**挂起**形态下的发送入口恢复（与上一条 R7-2 互补）。
+   *
+   * R7-2 覆盖的是「服务端正常收尾 → 入口恢复」；本用例覆盖 SDK 唯一不能自愈的那条出口 ——
+   * 服务端**既不产出事件、也不结束、也不报错**（`openSseStream` 只 send 部分帧、不 close）。
+   * 此时若没有静默兜底，`isRunning` 恒真、发送入口永久禁用，用户只能刷新页面。
+   *
+   * 反证导向：撤销 `agent.ts` 的 watchdog 后本用例会**挂死超时**（流程永不收尾）。
+   */
+  it('C2：服务端挂起（不发终止帧、也不关闭流）→ 静默兜底中止本轮，发送入口恢复可用', async () => {
+    const stream = openSseStream()
+    stubFetch({ '/models': MODELS, '/agui': () => stream.response })
+
+    render(<App />)
+    // 进主界面在**真实计时器**下完成：`findBy*` / `waitFor` 在 vitest 的 fake timers 下不会
+    // 自动推进定时器（那套自动检测只认 jest），提前切换会挂到超时。
+    await enterMain(/Marla/, /MiMo/)
+
+    // 这一段**只用同步的 `fireEvent`**：`userEvent` 内部走计时器，在 fake timers 下会卡住。
+    // 只 fake watchdog 用到的两个计时器，避免 React 调度依赖的 microtask / performance 被替换。
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      fireEvent.change(screen.getByLabelText('消息'), { target: { value: '你好' } })
+      fireEvent.click(sendButton())
+
+      // 挂起：只发部分帧，既不发 TEXT_MESSAGE_END / RUN_FINISHED，也不 close
+      await act(async () => {
+        stream.send([runStarted('thread-1', 'run-1'), textMessageStart('assistant-1')])
+      })
+
+      // 尚无终止帧 → 入口保持禁用
+      expect(sendButton().disabled).toBe(true)
+
+      // 静默超过阈值 → 兜底中止本轮 → 入口恢复
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(IDLE_TIMEOUT_MS + 1_000)
+      })
+
+      expect(sendButton().disabled).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

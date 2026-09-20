@@ -54,6 +54,28 @@ export function createSseResponse(events: readonly SseEvent[], status = 200): Re
   })
 }
 
+/**
+ * 「挂起」形态的 `Response`（C2 用）：发完给定帧后**既不关闭流、也不报错**——
+ * 模拟服务端仍持有连接却不产出任何事件的形态（真机 Mimo 事故的另一种表现：
+ * 客户端 `isRunning` 因此永不复位，发送按钮永久禁用，只能刷新页面）。
+ *
+ * 刻意**不** `controller.close()`：一旦关闭，SDK 会正常收尾，就测不出「挂起」了。
+ * 测试结束后由悬空流自行被 GC（vitest 不等待未关闭的 body），必要时调用方持引用手动取消。
+ */
+export function createHangingSseResponse(events: readonly SseEvent[]): Response {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(textEncoder.encode(encodeSseBody(events)))
+      // 故意不 close()：这正是「挂起」的定义
+    },
+  })
+
+  return new Response(body, {
+    status: 200,
+    headers: { 'Content-Type': SSE_CONTENT_TYPE },
+  })
+}
+
 // ---------------------------------------------------------------------------
 // 事件构造器（字段名以 @ag-ui/core 的事件 schema 为准）
 // ---------------------------------------------------------------------------

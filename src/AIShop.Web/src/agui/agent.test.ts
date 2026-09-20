@@ -23,6 +23,7 @@ import { withUsername } from '../api/http'
 import { readMessages, writeUsername } from '../state/session'
 import { installFetchStub, type FetchCall, type RouteSpec } from '../test/fetch-stub'
 import {
+  createHangingSseResponse,
   createSseResponse,
   customEvent,
   runFinished,
@@ -36,7 +37,7 @@ import {
   toolCallResult,
   toolCallStart,
 } from '../test/sse'
-import { AGUI_ENDPOINT, createAgent } from './agent'
+import { AGUI_ENDPOINT, createAgent, IDLE_TIMEOUT_MS } from './agent'
 import { getRecoSnapshot, resetRecoContent } from './reco'
 import { endSession, getSnapshot, runRound, setModel, startSession, subscribe } from './store'
 
@@ -641,5 +642,55 @@ describe('agent.ts：CUSTOM 事件 → 推荐 store（R6-1、R7）', () => {
     await session.runRound('你好')
 
     expect(getRecoSnapshot()).toBe('上一次推送的推荐')
+  })
+})
+
+/**
+ * C2：挂起兜底（idle watchdog）。
+ *
+ * **要解的形态**：服务端建立 SSE 连接后**既不产出事件、也不结束、也不报错**。此时
+ * `@ag-ui/client` 的读流会一直挂着 → `agent.isRunning` 恒为 `true` → `ChatPanel` 的发送按钮
+ * （`disabled={isRunning}`）永久禁用，用户只能刷新页面（真机 Mimo 事故的表现之一）。
+ *
+ * SDK 在「正常收尾」与「报错」两条出口都会复位运行态，**唯一不能自愈的就是挂起**；
+ * 浏览器 `fetch` 也没有默认超时。故由 `createAgent` 自建一层静默兜底。
+ *
+ * 本用例是**反证导向**的：撤销 `agent.ts` 的 watchdog 后，本用例必须变红
+ * （`isRunning()` 恒 `true`）。
+ */
+describe('agent.ts：C2 挂起兜底（服务端既不结束也不报错时 isRunning 必须复位）', () => {
+  it('静默超过阈值 → 自动中止本轮、isRunning 复位且通知订阅者', async () => {
+    vi.useFakeTimers()
+    try {
+      const stub = installFetchStub({
+        [AGUI_ENDPOINT]: () =>
+          createHangingSseResponse([
+            runStarted('t-hang', 'r-hang'),
+            textMessageStart('a-hang'),
+            textMessageContent('a-hang', '部分回复'),
+            // 故意不发 TEXT_MESSAGE_END / RUN_FINISHED，且流不关闭 —— 这就是「挂起」
+          ]),
+      })
+      restoreFetch = stub.restore
+
+      const session = createAgent({ username: 'marla', model: MODEL_ITEM.id, threadId: 't-hang' })
+
+      let notified = 0
+      session.subscribe(() => {
+        notified += 1
+      })
+
+      // 先前置一个 catch：中止会让本轮以 AbortError 收尾，避免被 vitest 记为 unhandled rejection
+      const settled = session.runRound('你好').catch((error: unknown) => error)
+
+      await vi.advanceTimersByTimeAsync(IDLE_TIMEOUT_MS + 1_000)
+      await settled
+
+      // 停止兜底后才可能置 false —— 这正是「按钮恢复可用」的数据面
+      expect(session.isRunning()).toBe(false)
+      expect(notified).toBeGreaterThan(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

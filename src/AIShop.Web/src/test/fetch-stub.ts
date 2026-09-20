@@ -105,6 +105,58 @@ export function textResponse(body: string, status = 200): Response {
   return new Response(body, { status, headers: { 'Content-Type': 'text/plain' } })
 }
 
+/**
+ * 让返回的 `Response` 与调用方的 `AbortSignal` 联动 —— 复刻真实 `fetch` 的语义：
+ * **中止会打断流式读取**（body 的读取方收到 `AbortError`），而不是静默地把流当正常结束。
+ *
+ * 为什么替身需要它：`@ag-ui/client` 的 `HttpAgent` 把 `abortController.signal` 传给 fetch，
+ * `abortRun()` 正是经它生效。替身若无视该 signal，中止就静默失效——依赖「中止能收尾」的
+ * 用例（C2 的挂起兜底）会测不出来；更糟的是它会给出「中止成功」的假象。
+ */
+function linkAbort(response: Response, signal: AbortSignal): Response {
+  if (response.body === null) return response
+
+  const reader = response.body.getReader()
+  let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined
+
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      bodyController = controller
+    },
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read()
+        if (done) {
+          controller.close()
+          return
+        }
+
+        controller.enqueue(value)
+      } catch (error) {
+        controller.error(error)
+      }
+    },
+    cancel(reason) {
+      return reader.cancel(reason)
+    },
+  })
+
+  const onAbort = (): void => {
+    // 关键：用 error（而非 close）终结流——close 会被读方当作「正常收尾」，那样就不是中止了。
+    bodyController?.error(new DOMException('The operation was aborted.', 'AbortError'))
+    void reader.cancel().catch(() => {})
+  }
+
+  if (signal.aborted) onAbort()
+  else signal.addEventListener('abort', onAbort, { once: true })
+
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  })
+}
+
 export function installFetchStub(routes: Record<string, RouteSpec>): FetchStub {
   const table = new Map(Object.entries(routes))
   const original = globalThis.fetch
@@ -133,7 +185,12 @@ export function installFetchStub(routes: Record<string, RouteSpec>): FetchStub {
     }
 
     if (typeof spec === 'function') {
-      return await (spec as RouteHandler)({ call, params: parsed.searchParams, body: call.body })
+      const response = await (spec as RouteHandler)({
+        call,
+        params: parsed.searchParams,
+        body: call.body,
+      })
+      return init?.signal ? linkAbort(response, init.signal) : response
     }
 
     return jsonResponse(spec)
