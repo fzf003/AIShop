@@ -38,9 +38,10 @@ namespace AIShop.AguiHost.Tests;
 /// <para><b>实测硬约束（本套用例最重要的发现）</b>：<c>AGUI.Server</c> 的转换器在遍历每个更新时会<b>先无条件</b>执行
 /// <c>JsonSerializer.SerializeToElement(chatResponse, typeof(ChatResponseUpdate))</c>（原始更新快照，用于事件上的
 /// <c>RawEvent</c>），再走内容映射。该序列化经 MEAI <c>AIContent</c> 的 <b>JSON 多态</b>配置解析派生类型——
-/// 自定义 <c>AIContent</c> 子类<b>未注册为 <c>JsonDerivedType</c> 时整个流在到达 mapper 之前就抛
-/// <c>NotSupportedException</c></b>。故 <see cref="ProbeSetup.MapperWithoutJsonType"/> 专测这一失败形态，
-/// 其余 mapper 用例都先注册多态派生类型。</para>
+/// 自定义 <c>AIContent</c> 子类<b>未注册为 <c>JsonDerivedType</c> 时该内容永远到不了 mapper</b>。故
+/// <see cref="ProbeSetup.MapperWithoutJsonType"/> 专测这一形态，其余 mapper 用例都先注册多态派生类型。
+/// （0.0.5 下该 <c>NotSupportedException</c> 会冲出转换器、整条流断连；0.0.6 起被捕获并转成
+/// <c>RUN_ERROR{code:"StreamingError"}</c> 终止事件——见本文件 H2 用例。）</para>
 /// </summary>
 /// <remarks>
 /// 挂 <see cref="AguiRequestTestsCollection"/> 串行集合：WAF 真实宿主会 MigrateAsync/播种独立 agui.db，
@@ -136,28 +137,47 @@ public sealed class AguiCustomEventProbeTests
     }
 
     /// <summary>
-    /// 硬约束刻画（H2）：自定义 <c>AIContent</c> 子类<b>未</b>注册进 MEAI <c>AIContent</c> 的 JSON 多态派生类型时，
-    /// 转换器在遍历更新时的<b>无条件原始快照序列化</b>（<c>SerializeToElement(chatResponse, typeof(ChatResponseUpdate))</c>）
-    /// 直接抛 <c>NotSupportedException</c>——流在到达 <c>MapContent</c> 之前就断，SSE 里连 <c>RUN_FINISHED</c> 都不会出现。
-    /// 本用例把该失败形态钉住：将来上游修掉（或我们误删注册）都会立刻变红。
+    /// 硬约束刻画（H2，2026-09-20 随 <c>AGUI.Server 0.0.5 → 0.0.6</c> 更新）：自定义 <c>AIContent</c> 子类
+    /// <b>未</b>注册进 MEAI <c>AIContent</c> 的 JSON 多态派生类型时，转换器遍历更新时的<b>无条件原始快照序列化</b>
+    /// （<c>SerializeToElement(chatResponse, typeof(ChatResponseUpdate))</c>）仍会抛 <c>NotSupportedException</c>，
+    /// 该内容因此<b>永远走不到 <c>MapContent</c></b>；但 0.0.6 起转换器捕获该异常并转成终止事件
+    /// <c>RUN_ERROR</c>（<c>code = "StreamingError"</c>）—— 流不再断连（0.0.5 会直接断，客户端表现为
+    /// <c>HttpRequestException</c>）。本用例把新形态钉住：将来上游再改（或我们误删注册）都会立刻变红。
     /// </summary>
     [Fact]
-    public async Task PostRoot_CustomContentWithoutJsonDerivedType_StreamBreaksBeforeAnyEvent()
+    public async Task PostRoot_CustomContentWithoutJsonDerivedType_EndsWithRunError()
     {
         var runState = new ProbeRunState();
         using var factory = CreateProbeFactory(ProbeSetup.MapperWithoutJsonType, runState);
         using var client = factory.CreateClient();
 
-        // 流在序列化探针更新时中断 → 响应体拷贝失败（PostAsync 默认读完响应体，故在此抛出）
-        var exception = await Assert.ThrowsAsync<HttpRequestException>(() => client.PostAsync(
+        using var response = await client.PostAsync(
             "/",
-            new StringContent(RunAgentBody("s1-probe-no-json-type"), Encoding.UTF8, "application/json")));
+            new StringContent(RunAgentBody("s1-probe-no-json-type"), Encoding.UTF8, "application/json"));
 
-        var chain = Flatten(exception);
-        Assert.Contains(nameof(NotSupportedException), chain);
-        Assert.Contains("polymorphic type", chain);
+        // 0.0.6：序列化失败不再断连——响应正常建立且可完整读取
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var sse = await response.Content.ReadAsStringAsync();
+
         // 探针确实跑到了「合成更新」这一步（失败点在它之后，而非流程根本没走到）
         Assert.Equal(1, runState.SynthesizedUpdateCount);
+
+        var frames = ParseSseFrames(sse);
+
+        // 终止事件是 RUN_ERROR 而非 RUN_FINISHED（未注册类型的快照序列化失败被转换器捕获）
+        var errorIndex = IndexOfFrame(frames, "RUN_ERROR", name: null);
+        Assert.True(
+            errorIndex >= 0,
+            $"未注册多态类型时本轮应以 RUN_ERROR 收尾。实际帧序：{Describe(frames)}");
+        Assert.True(
+            IndexOfFrame(frames, "RUN_FINISHED", name: null) < 0,
+            $"RUN_ERROR 已是终止事件，其后不应再出现 RUN_FINISHED。实际帧序：{Describe(frames)}");
+
+        // 归因：错误来自转换器内置的流式失败出口，不是我们的 mapper 产出的
+        Assert.Equal("StreamingError", frames[errorIndex].GetProperty("code").GetString());
+
+        // 该内容从未走到 MapContent → 不会有 name="probe" 的 CUSTOM 帧
+        Assert.Equal(-1, IndexOfFrame(frames, "CUSTOM", ProbeEventName));
     }
 
     /// <summary>
@@ -196,18 +216,6 @@ public sealed class AguiCustomEventProbeTests
         var value = frames[customIndex].GetProperty("value");
         Assert.True(value.GetProperty("probe").GetBoolean());
         Assert.Equal(ProbePayloadText, value.GetProperty("text").GetString());
-    }
-
-    /// <summary>把异常链上的类型名与消息拼成一串（供 NotSupportedException 断言，避免依赖具体抛出层级）。</summary>
-    private static string Flatten(Exception exception)
-    {
-        var builder = new StringBuilder();
-        for (Exception? current = exception; current is not null; current = current.InnerException)
-        {
-            builder.Append(current.GetType().Name).Append(':').Append(current.Message).Append('\n');
-        }
-
-        return builder.ToString();
     }
 
     /// <summary>探针装配形态（决定注册什么、探针合成哪种更新）。</summary>

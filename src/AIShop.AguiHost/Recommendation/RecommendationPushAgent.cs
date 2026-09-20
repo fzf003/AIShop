@@ -62,12 +62,32 @@ internal sealed class RecommendationPushAgent : DelegatingAIAgent
 
     /// <summary>
     /// 流式路径：逐条转发内层更新（不改对象、不加延迟），流末按门控追加**至多一条**推荐更新。
+    /// <b>无论内层流正常结束还是中途抛异常</b>，本方法都保证给出一个确定的收尾信号（C1）。
     /// </summary>
     /// <remarks>
-    /// 依据解析（design §4.3）：本轮模型调过 <c>recommend_products</c> → 取其 <c>query</c> 实参
+    /// <para>依据解析（design §4.3）：本轮模型调过 <c>recommend_products</c> → 取其 <c>query</c> 实参
     /// （多次调用取最后一次有效值）；否则取本轮输入里最后一条 <see cref="ChatRole.User"/> 消息的文本。
     /// 门控（是否推送）不在本类：<see cref="RecommendationToolProvider.TryBuildPushPayloadAsync"/>
-    /// 只在「依据命中白名单关键词 且 推荐列表非空」时返回非 <c>null</c>，故「非 null 才追加」即门控本身。
+    /// 只在「依据命中白名单关键词 且 推荐列表非空」时返回非 <c>null</c>，故「非 null 才追加」即门控本身。</para>
+    ///
+    /// <para><b>C1 异常路径（为什么这样写）</b>：宿主在 net10.0 走 <c>TypedResults.ServerSentEvents</c>，
+    /// 其错误兜底只存在于 <c>#if !NET10_0_OR_GREATER</c> 分支（安装包 net10.0 DLL 内 <c>RunErrorEvent</c> /
+    /// <c>StreamingError</c> 字符串命中数为 0）。内层异常若直接冲出本迭代器，整条 SSE 流会静默断在半途：
+    /// 既无 <c>CUSTOM</c> 推荐帧、也无终止帧，客户端 <c>isRunning</c> 可能永不复位。故本方法：</para>
+    /// <list type="number">
+    /// <item>把「取下一帧」放进 <c>try/catch</c>（<c>await foreach</c> 的循环体里有 <c>yield</c>，
+    /// C# 禁止在带 <c>catch</c> 的 <c>try</c> 内 <c>yield</c>，故改用 <c>GetAsyncEnumerator</c> 手工迭代）；</item>
+    /// <item>异常只**记录不吞**：循环外继续算推荐（推送与异常解耦）→ 有则照常补发 <c>CUSTOM</c>；</item>
+    /// <item>失败时再补发一条终止内容 <see cref="AguiStreamFailureContent"/>（→ AG-UI <c>RUN_ERROR</c> 帧），
+    /// 随后<b>让迭代器正常结束</b>——2026-09-20 起不再重抛，理由见下。</item>
+    /// </list>
+    ///
+    /// <para><b>为什么不再重抛（2026-09-20 实测修正）</b>：原实现「补发终止帧后原样重抛」看似两全，
+    /// 但重抛会让异常冲出本迭代器，宿主在响应已开始的情况下只能<b>中止连接</b>；中止是同步的，
+    /// 而响应数据的送达是异步的，两者赛跑。整仓并行实测 4 轮：异常轮<b>每轮</b>都以 <c>IOException</c> 收尾，
+    /// 区别只在「中止前送达了多少字节」——0 字节（败，约 1/3）或 1713 字节（成），即约 1/3 的运行里
+    /// 连中断之前的正常帧都送不出去。不重抛后连接正常关闭，帧不再受此竞态影响。故障仍完整可见：
+    /// Serilog Error（含原始堆栈）+ 终止帧的 <c>code</c>/<c>message</c>。</para>
     /// </remarks>
     protected override async IAsyncEnumerable<AgentResponseUpdate> RunCoreStreamingAsync(
         IEnumerable<ChatMessage> messages,
@@ -80,43 +100,81 @@ internal sealed class RecommendationPushAgent : DelegatingAIAgent
         var input = messages as IReadOnlyList<ChatMessage> ?? messages.ToList();
 
         string? toolQuery = null;
+        Exception? streamingFailure = null;
 
-        await foreach (var update in InnerAgent.RunStreamingAsync(input, session, options, cancellationToken))
+        var innerStream = InnerAgent.RunStreamingAsync(input, session, options, cancellationToken);
+        await using (var enumerator = innerStream.GetAsyncEnumerator(cancellationToken))
         {
-            // 扫描工具调用：只为「以本轮模型实际用的 query 为依据」——不修改更新本身（引用保持不变，逐条原样吐给调用方）。
-            foreach (var content in update.Contents)
+            while (true)
             {
-                if (content is FunctionCallContent call
-                    && string.Equals(call.Name, ToolName, StringComparison.Ordinal)
-                    && ReadQuery(call) is { } query)
+                bool hasNext;
+                try
                 {
-                    // 取最后一次**有效**值：缺失 / 非字符串 / 空白不覆盖已有的有效值（回退本轮用户消息）
-                    toolQuery = query;
+                    hasNext = await enumerator.MoveNextAsync();
                 }
-            }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // 模型/网关故障：只记录，不在此处吞——循环外补发终止帧 + 记 Error 日志（见方法注释）。
+                    streamingFailure = ex;
+                    break;
+                }
 
-            yield return update;
+                if (!hasNext)
+                    break;
+
+                var update = enumerator.Current;
+
+                // 扫描工具调用：只为「以本轮模型实际用的 query 为依据」——不修改更新本身（引用保持不变，逐条原样吐给调用方）。
+                // 注意：本段在所有 try/catch 之外，`yield` 因此合法。
+                foreach (var content in update.Contents)
+                {
+                    if (content is FunctionCallContent call
+                        && string.Equals(call.Name, ToolName, StringComparison.Ordinal)
+                        && ReadQuery(call) is { } query)
+                    {
+                        // 取最后一次**有效**值：缺失 / 非字符串 / 空白不覆盖已有的有效值（回退本轮用户消息）
+                        toolQuery = query;
+                    }
+                }
+
+                yield return update;
+            }
         }
 
         JsonElement? payload = null;
         try
         {
             // 依据：模型调用工具时的 query 优先，否则本轮最后一条 User 消息文本（两者皆无 → null，provider 自会不推）
+            // C1：本段与内层流的成败无关——内层异常同样要尝试算推荐，推荐不因模型故障而静默丢失。
             payload = await _recommendationTools.TryBuildPushPayloadAsync(
                 toolQuery ?? LastUserText(input),
                 cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // 尽力而为的旁路（spec R4）：此刻本轮回复已完整吐出，推荐算不出来就放弃推送（面板保持上一次），
-            // 绝不能让异常冲出迭代器把已经建立的流打断——那会连 RUN_FINISHED 都发不出去。
+            // 尽力而为的旁路（spec R4）：推荐算不出来就放弃推送（面板保持上一次），
+            // 绝不能让异常冲出迭代器把已经建立的流打断——那会连终止帧都发不出去。
             Log.Warning(ex, "推荐推送计算失败，本轮跳过推送（面板保持上一次）");
         }
 
         // 非 null 才追加 = 门控落地：闲聊轮 / 身份缺失 / 关键词命中但无可推商品都不会产生事件，面板因此天然保持上一次。
+        // 顺序约束（spec R1）：CUSTOM 必须在终止帧之前。
         if (payload is { } pushPayload)
         {
             yield return new AgentResponseUpdate(ChatRole.Assistant, [new RecommendationPushContent(pushPayload)]);
+        }
+
+        if (streamingFailure is not null)
+        {
+            // 补发确定的终止信号（→ RUN_ERROR 帧），随后让迭代器正常结束。
+            // 这里**不再**原样重抛：重抛会让异常冲出迭代器，宿主在响应已开始的情况下只能中止连接；
+            // 中止是同步的、数据送达是异步的，两者赛跑——实测整仓并行时约 1/3 的运行里中止先到，
+            // 客户端收到 0 字节（连中断之前的正常帧一并丢失），恰好使「确定收尾」落空。
+            // 故障不隐藏：记 Error 日志（含原始堆栈），并经终止帧的 code/message 告知客户端。
+            Log.Error(streamingFailure, "本轮模型流中断，已向客户端补发终止帧（RUN_ERROR）");
+            yield return new AgentResponseUpdate(
+                ChatRole.Assistant,
+                [new AguiStreamFailureContent(AguiStreamFailureContent.DefaultMessage)]);
         }
     }
 

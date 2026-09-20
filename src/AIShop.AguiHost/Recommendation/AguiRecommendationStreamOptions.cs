@@ -8,8 +8,9 @@ using HttpJsonOptions = Microsoft.AspNetCore.Http.Json.JsonOptions;
 namespace AIShop.AguiHost.Recommendation;
 
 /// <summary>
-/// AG-UI 流选项装配（agui-reco-realtime S3，design §4.4 D 第 2 / 第 4 条）：把
-/// <see cref="RecommendationPushContent"/> 映射为 <c>CUSTOM</c> 事件，并把该内容类型登记进
+/// AG-UI 流选项装配（agui-reco-realtime S3 + C1，design §4.4 D 第 2 / 第 4 条）：把
+/// <see cref="RecommendationPushContent"/> 映射为 <c>CUSTOM</c> 事件、把
+/// <see cref="AguiStreamFailureContent"/> 映射为 <c>RUN_ERROR</c> 终止事件，并把这两个内容类型都登记进
 /// <see cref="AIContent"/> 的 JSON 多态派生类型表。
 ///
 /// <para><b>两件事缺一不可</b>（S1 探针实测，design §4.4 D 第 4 条）：</para>
@@ -40,20 +41,33 @@ internal static class AguiRecommendationStreamOptions
     ///
     /// <para><see cref="RecommendationPushContent"/> → 单元素 <see cref="CustomEvent"/> 序列
     /// （<c>name</c> = <see cref="RecommendationPushContent.EventName"/>、<c>value</c> = 原样 payload）；
+    /// <see cref="AguiStreamFailureContent"/> → 单元素 <see cref="RunErrorEvent"/>（<c>code</c> =
+    /// <see cref="AguiStreamFailureContent.ErrorCode"/>、<c>message</c> = 原样说明）；
     /// 其它任何内容（<see cref="TextContent"/> / <see cref="FunctionCallContent"/> / <see cref="FunctionResultContent"/>
     /// 等）→ <c>null</c>。</para>
     /// </summary>
     internal static IEnumerable<BaseEvent>? MapContent(AIContent content) =>
-        content is RecommendationPushContent push
-            ?
+        content switch
+        {
+            RecommendationPushContent push =>
             [
                 new CustomEvent
                 {
                     Name = RecommendationPushContent.EventName,
                     Value = push.Payload,
                 }
-            ]
-            : null;
+            ],
+            // C1：内层流失败时的确定收尾——映射成错误出口（RUN_ERROR），不得伪装成 RUN_FINISHED。
+            AguiStreamFailureContent failure =>
+            [
+                new RunErrorEvent
+                {
+                    Message = failure.Message,
+                    Code = AguiStreamFailureContent.ErrorCode,
+                }
+            ],
+            _ => null,
+        };
 
     /// <summary>
     /// 注册推荐事件的流选项与内容多态派生类型（见类型注释的「两件事缺一不可」）。
@@ -76,7 +90,16 @@ internal static class AguiRecommendationStreamOptions
                     return;
 
                 // 幂等：重复装配（或上游已登记）时不重复追加，避免出现重复判别符。
-                if (polymorphism.DerivedTypes.Any(derived => derived.DerivedType == typeof(RecommendationPushContent)))
+                // ⚠️ 必须【按类型逐个判断】，不能「只要看到 RecommendationPushContent 就整体 return」——
+                // 那会让后登记的类型（如 AguiStreamFailureContent）被这次 early-return 直接跳过，
+                // 结果是转换器在无条件快照序列化处抛 NotSupportedException，整条流在到达 mapper 之前就断
+                //（比不注册更糟：失败路径一触发反而连 CUSTOM 帧都保不住）。
+                var missing = new List<JsonDerivedType>();
+                if (!polymorphism.DerivedTypes.Any(derived => derived.DerivedType == typeof(RecommendationPushContent)))
+                    missing.Add(new JsonDerivedType(typeof(RecommendationPushContent), "recommendationPush"));
+                if (!polymorphism.DerivedTypes.Any(derived => derived.DerivedType == typeof(AguiStreamFailureContent)))
+                    missing.Add(new JsonDerivedType(typeof(AguiStreamFailureContent), "aguiStreamFailure"));
+                if (missing.Count == 0)
                     return;
 
                 var merged = new JsonPolymorphismOptions
@@ -87,7 +110,8 @@ internal static class AguiRecommendationStreamOptions
                 };
                 foreach (var derived in polymorphism.DerivedTypes)
                     merged.DerivedTypes.Add(derived);
-                merged.DerivedTypes.Add(new JsonDerivedType(typeof(RecommendationPushContent), "recommendationPush"));
+                foreach (var derived in missing)
+                    merged.DerivedTypes.Add(derived);
                 typeInfo.PolymorphismOptions = merged;
             });
         });

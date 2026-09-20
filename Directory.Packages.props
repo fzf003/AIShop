@@ -5,6 +5,8 @@
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
   <ItemGroup>
+    <PackageVersion Include="AGUI.Abstractions" Version="0.0.6" />
+    <PackageVersion Include="AGUI.Server" Version="0.0.6" />
     <PackageVersion Include="Aspire.Hosting.AgentFramework.DevUI" Version="1.20.0-preview.260831.1" />
     <PackageVersion Include="CommunityToolkit.VectorData.InMemory" Version="1.0.1" />
     <PackageVersion Include="CommunityToolkit.VectorData.SqliteVec" Version="1.0.1-preview" />

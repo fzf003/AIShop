@@ -19,6 +19,12 @@
          （AGUI/Hosting.AspNetCore/DevUI = 1.20.0-preview.260831.1，Hosting.OpenAI = 1.20.0-alpha.260831.1），此处仅补引用。
          AddAGUIServer/MapAGUIServer/AsAIAgent 等 AG-UI 装配 API 与 AddDevUI/MapDevUI/AddOpenAI*/MapOpenAI*
          以本地镜像 preview 源码为准（设计 §4.1/§4.6；Hosting.OpenAI 为 alpha 非 preview） -->
+    <!-- AGUI.Server / AGUI.Abstractions 显式提升到 0.0.6：AGUI.AspNetCore preview 传递依赖带来的是 0.0.5，
+         而 0.0.5 的 ChatResponseUpdateAGUIExtensions 在映射出 RunErrorEvent 后**不终止流**，会继续补
+         TEXT_MESSAGE_END + RUN_FINISHED —— 违反 AG-UI 协议（客户端校验器：RUN_ERROR 之后不得再发任何事件）。
+         0.0.6 在该处 yield break（见 RecommendationPushAgent 的方法注释）。 -->
+    <PackageReference Include="AGUI.Abstractions" />
+    <PackageReference Include="AGUI.Server" />
     <PackageReference Include="Microsoft.Agents.AI.Hosting.AGUI.AspNetCore" />
     <PackageReference Include="Microsoft.Agents.AI.Hosting.AspNetCore" />
     <PackageReference Include="Microsoft.Agents.AI.DevUI" />
