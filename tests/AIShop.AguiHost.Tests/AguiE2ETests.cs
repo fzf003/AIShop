@@ -1,8 +1,10 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json.Nodes;
 using AIShop.AguiHost;
 using AIShop.AguiHost.Model;
+using AIShop.Core.StaticData;
 using AIShop.Service;
 using AIShop.Service.Agui;
 using Mem0Sharp;
@@ -44,6 +46,8 @@ public sealed class AguiE2ETests : IDisposable
 {
     private const string SearchTool = "search_product";
     private const string AddToCartTool = "add_to_cart";
+    /** 购物车汇总工具（G1 端到端用例用；与 `CartToolProvider` 注册的工具名一致）。 */
+    private const string CartSummaryTool = "get_cart_summary";
 
     private readonly List<string> _cleanupPaths = [];
     private readonly List<(string Key, string? Prev)> _envRestore = [];
@@ -176,6 +180,59 @@ public sealed class AguiE2ETests : IDisposable
         await factory.DisposeAsync();
         SqliteConnection.ClearAllPools();
         await AssertCartRowAsync(_businessConnection, username: "fzf003", productId: 3, quantity: 1);
+    }
+
+    [Fact]
+    public async Task RestAddToCart_ThenAguiGetCartSummary_SeesSameItemFromSameRepository()
+    {
+        // spec〈客户端支撑端点复用既有仓储〉场景 2「与 AI 工具写同一份数据」——本变更的核心承诺：
+        // 购物车只有一份数据（同一 ICartRepository + 同一张 Carts/CartItems 表）。流程 = 先经 REST 加购，
+        // 再以【同一用户名】经 AG-UI 让模型调 get_cart_summary（真实 CartToolProvider 读同一仓储），
+        // 断言工具结果里能看到刚才 REST 加的那件商品。REST 面与工具面共享仓储、不共享工具层包装。
+        var product = ProductSeedData.Products[0];
+        const string username = "marla";
+
+        var mock = new MockToolChatClient(
+            new MockToolChatClient.ToolScript(
+                ToolName: CartSummaryTool,
+                Arguments: new Dictionary<string, object?>(),
+                FinalText: "这是您的购物车 E2E-MARKER-C"));
+
+        using var factory = StartFactory(mock);
+        using var client = factory.CreateClient();
+
+        // ① REST 加购（正向锚点：真的写成功——200 且返回体已含新条目，否则后续断言无意义）
+        using (var added = await client.PostAsJsonAsync(
+                   $"/cart/items?username={username}",
+                   new { productId = product.Id, quantity = 2 }))
+        {
+            Assert.Equal(HttpStatusCode.OK, added.StatusCode);
+            var addBody = await added.Content.ReadAsStringAsync();
+            Assert.Contains($"\"productId\":{product.Id}", addBody);
+            Assert.Contains(product.Name, addBody);
+        }
+
+        // ② 同一用户名经 AG-UI 触发 get_cart_summary（脚本化模型产 FCC → FICC 执行真实工具 → 回填结果）
+        using var response = await client.PostAsync(
+            "/",
+            new StringContent(
+                RunAgentBody("e2e-rest-thread", username: username, userMessage: "我的购物车里有什么？"),
+                Encoding.UTF8,
+                "application/json"));
+
+        // 正向锚点：整条链真的跑通（SSE 收到脚本最终文本）
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("E2E-MARKER-C", await response.Content.ReadAsStringAsync());
+
+        // ③ 工具结果 = 真实 CartToolProvider.GetCartSummaryAsync 文本 → 必须含 REST 加购的那件商品
+        //    （名称 + 条目行里的 ProductId 段 + 数量；证明 AI 工具读到的是同一份数据，而非空车）
+        var toolResultInput = Assert.Single(mock.ToolResultInputs);
+        Assert.Contains(CartSummaryTool, FunctionCallNames(toolResultInput));
+        var summary = JoinedToolResults(toolResultInput);
+        Assert.Contains(product.Name, summary);
+        Assert.Contains($"-{product.Id}-", summary);
+        Assert.Contains("x2", summary);
+        Assert.Contains("共 2 件商品", summary);
     }
 
     /// <summary>从输入消息快照收集 FunctionCallContent 的工具名（FRC 前的 assistant FCC 承载工具名）。</summary>
