@@ -51,8 +51,8 @@ public sealed class AguiModelsEndpointTests
     [Fact]
     public async Task GetModels_ReturnsConfiguredModelList_MatchingAguiHostAppSettings()
     {
-        // spec R1 场景 1：Models 节含 qwen/deepseek/gpt-4.1（ActiveModel=gpt-4.1）→ 200 + 长度 3 的 JSON 数组，
-        // 每项 id/name/model 与该节配置一致，且仅 gpt-4.1 项 isDefault = true。
+        // spec R1 场景 1：Models 节含 qwen/deepseek/gpt-4.1（ActiveModel=qwen —— C4 起默认模型由 Mimo 改为 qwen）→
+        // 200 + 长度 3 的 JSON 数组，每项 id/name/model 与该节配置一致，且仅 qwen 项 isDefault = true。
         // 期望值按 src/AIShop.AguiHost/appsettings.json 硬编码（不读 IConfiguration 反推——否则断言自证）。
         using var factory = new WebApplicationFactory<Program>();
         using var client = factory.CreateClient();
@@ -68,8 +68,10 @@ public sealed class AguiModelsEndpointTests
         Assert.Equal(3, items.Count);
         // 期望序 = 子键序数升序（deepseek < gpt-4.1 < qwen），非 appsettings 书写序（spec R1 第 4 段）
         AssertModel(items[0], expectedId: "deepseek", expectedName: "DeepSeek", expectedModel: "deepseek-v4-flash", expectedDefault: false);
-        AssertModel(items[1], expectedId: "gpt-4.1", expectedName: "Mimo", expectedModel: "mimo-v2.5", expectedDefault: true);
-        AssertModel(items[2], expectedId: "qwen", expectedName: "Qwen 3.7", expectedModel: "kimi-k3", expectedDefault: false);
+        AssertModel(items[1], expectedId: "gpt-4.1", expectedName: "Mimo", expectedModel: "mimo-v2.5", expectedDefault: false);
+        // ActiveModel = qwen，而 qwen 槽位当前 Model 值为 kimi-k3（不是 qwen3.8-flash —— 后者免费额度已耗尽）。
+        // 故默认模型实际是 kimi-k3：这是配置的字面结果，非遗漏。
+        AssertModel(items[2], expectedId: "qwen", expectedName: "Qwen 3.7", expectedModel: "kimi-k3", expectedDefault: true);
 
         // 响应不含敏感信息（spec R1 第 5 段：模型密钥与端点地址不在响应中）
         Assert.DoesNotContain("Endpoint", body);
