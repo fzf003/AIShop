@@ -43,6 +43,17 @@ try
     // AG-UI 服务端装配（注册 AG-UI 宿主基础设施与 JSON 序列化上下文；MapAGUIServer 归 T5）
     builder.Services.AddAGUIServer();
 
+    // AG-UI wire 兼容（AGUI.Server 0.0.6 ↔ @ag-ui/client 0.0.59）：0.0.6 把可选字段**显式序列化成 null**，
+    // 而前端 Zod schema 用 `.optional()`（接受「字段缺失」、**不接受 null**）→ 每轮在首个 RUN_STARTED
+    // 就被拒收（现象：UI 提示「网络/服务失败」且无任何回复，与对话内容无关；ZodError 落在
+    // parentRunId / input / timestamp / metadata 四个字段上）。
+    // net10.0 的 SSE 结果走宿主 JsonOptions 序列化（框架注释：flows through the configured
+    // ASP.NET Core JsonSerializerOptions），故在此忽略 null 字段即可对齐两侧协议。
+    // 注：这是**全局**设置，同时作用于 /models、/products、/cart 等端点的响应。
+    builder.Services.Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(options =>
+        options.SerializerOptions.DefaultIgnoreCondition =
+            System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull);
+
     // agui-reco-realtime S5（design §4.4 D 第 2 / 第 4 条）：注册推荐 CUSTOM 事件的流选项映射
     // （content → CustomEvent）与 RecommendationPushContent 的 AIContent JSON 多态派生类型。
     // 【两者缺一不可】漏多态注册会让整条 SSE 流在到达 mapper 之前抛 NotSupportedException 断开。
