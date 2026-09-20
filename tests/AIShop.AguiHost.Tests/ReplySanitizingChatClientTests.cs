@@ -114,6 +114,61 @@ public sealed class ReplySanitizingChatClientTests
         Assert.Contains(result.Contents, c => c is Meai.FunctionCallContent { Name: "add_to_cart" });
     }
 
+    /// <summary>
+    /// C3（agui-reco-realtime）：非法的工具调用实参（wire 上非 JSON 对象 → MEAI 侧 <c>Arguments</c> 为
+    /// <c>null</c>）必须被规范化为空对象 <c>{}</c>，且**两条内容路径都要覆盖**：
+    /// 纯工具调用的 update（无文本，走「无文本」分支）与带文本的 update（走主分支）。
+    /// 漏掉前者等于整条绕过规范化 —— 而工具调用通常正是无文本的独立 update。
+    /// </summary>
+    [Fact]
+    public async Task GetStreamingResponseAsync_NullToolArguments_AreNormalizedToEmptyObjectOnBothPaths()
+    {
+        var inner = Substitute.For<Meai.IChatClient>();
+        inner.GetStreamingResponseAsync(
+                Arg.Any<IEnumerable<Meai.ChatMessage>>(),
+                Arg.Any<Meai.ChatOptions?>(),
+                Arg.Any<CancellationToken>())
+            .Returns(NullArgumentsStreamAsync());
+        using var wrapper = BuildWrapper(inner);
+
+        var updates = new List<Meai.ChatResponseUpdate>();
+        await foreach (var update in wrapper.GetStreamingResponseAsync(Array.Empty<Meai.ChatMessage>()))
+            updates.Add(update);
+
+        var calls = updates.SelectMany(u => u.Contents).OfType<Meai.FunctionCallContent>().ToList();
+        Assert.Equal(2, calls.Count);
+
+        foreach (var call in calls)
+        {
+            Assert.NotNull(call.Arguments);      // 不再是 null
+            Assert.Empty(call.Arguments!);       // 规范化为空对象（无任何键）
+        }
+
+        // 规范化是「补实参」而不是「丢调用」：调用标识与名称原样保留
+        Assert.Contains(calls, c => c.CallId == "call_no_text" && c.Name == "search_product");
+        Assert.Contains(calls, c => c.CallId == "call_with_text" && c.Name == "add_to_cart");
+
+        // 文本清洗不受影响
+        Assert.Contains(updates, u => u.Contents.OfType<Meai.TextContent>().Any(t => t.Text.Contains("已为您查询")));
+    }
+
+    /// <summary>两个 update：先纯工具调用（无文本），再「文本 + 工具调用」。</summary>
+    private static async IAsyncEnumerable<Meai.ChatResponseUpdate> NullArgumentsStreamAsync()
+    {
+        yield return new Meai.ChatResponseUpdate(
+            Meai.ChatRole.Assistant,
+            [new Meai.FunctionCallContent("call_no_text", "search_product", null)]);
+
+        yield return new Meai.ChatResponseUpdate(
+            Meai.ChatRole.Assistant,
+            [
+                new Meai.TextContent("已为您查询"),
+                new Meai.FunctionCallContent("call_with_text", "add_to_cart", null),
+            ]);
+
+        await Task.Yield();
+    }
+
     [Fact]
     public async Task GetStreamingResponseAsync_SplitPatternAcrossChunks_IsSanitized_OnFlush()
     {

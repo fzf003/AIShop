@@ -64,7 +64,10 @@ public sealed class ReplySanitizingChatClient : DelegatingChatClient
             var textContents = update.Contents.OfType<TextContent>().ToList();
             if (textContents.Count == 0)
             {
-                // 无文本内容（角色标记/工具调用增量/FinishReason）原样透传
+                // 无文本内容（角色标记/工具调用增量/FinishReason）：不做文本清洗，原样透传；
+                // 但**工具调用的非法实参仍须规范化**（C3）——纯工具调用的 update 正是走这一支，
+                // 若在此直接透传，规范化就被整条绕过（工具调用通常不带文本，是常态而非例外）。
+                update.Contents = update.Contents.Select(NormalizeArguments).ToList();
                 yield return update;
                 continue;
             }
@@ -93,7 +96,7 @@ public sealed class ReplySanitizingChatClient : DelegatingChatClient
                     continue;
                 }
 
-                newContents.Add(content);
+                newContents.Add(NormalizeArguments(content));
             }
 
             if (!emitted && safeToEmit.Length > 0)
@@ -153,4 +156,26 @@ public sealed class ReplySanitizingChatClient : DelegatingChatClient
 
         message.Contents = newContents;
     }
+
+    /// <summary>
+    /// C3（agui-reco-realtime）：把**非法**的工具调用实参规范化为空对象 <c>{}</c>，非工具调用内容原样返回。
+    ///
+    /// <para><b>要解的形态</b>：模型（真机实测为 Mimo）发出的 tool_call <c>arguments</c> 在 wire 上可能是
+    /// 字符串 <c>"null"</c> 这类**非 JSON 对象**形状，解析到 MEAI 后表现为
+    /// <see cref="FunctionCallContent.Arguments"/> 为 <c>null</c>。该形状会让工具执行环节拿不到实参而失败，
+    /// 进而使本轮走异常出口 —— 客户端此时已收到 <c>TOOL_CALL_START</c> 却没有配对的工具结果，
+    /// 于是把「assistant 带 toolCalls、无配对 tool 消息」的**残缺历史**持久化下来，
+    /// 后续每一轮全量重发该历史都会继续失败（仓库内称「历史毒化」）。</para>
+    ///
+    /// <para><b>为什么规范化成 <c>{}</c> 而不是丢弃该调用</b>：<c>{}</c> 是合法的 JSON 对象——
+    /// 工具照常执行、按「缺参数」自行降级（如返回参数无效提示），本轮因此能正常收尾，
+    /// 历史里也留下配对的工具结果。丢弃调用则会改变模型已经做出的决策、且与协议帧序不符。</para>
+    ///
+    /// <para><b>落点约束</b>：本类只包装 AguiHost 的 chatClient 单例（见类型注释），
+    /// 故此处属于 AG-UI 专属代码，不影响老 Api/Service 经 ModelRouter 构建的实例。</para>
+    /// </summary>
+    private static AIContent NormalizeArguments(AIContent content) =>
+        content is FunctionCallContent { Arguments: null } call
+            ? new FunctionCallContent(call.CallId, call.Name, new Dictionary<string, object?>())
+            : content;
 }
