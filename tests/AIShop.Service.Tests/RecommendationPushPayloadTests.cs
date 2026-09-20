@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text.Json;
 using AIShop.Core.Entities;
 using AIShop.Core.Interfaces;
+using AIShop.Core.Models;
 using AIShop.Core.Services;
 using AIShop.Core.StaticData;
 using AIShop.Infrastructure.Services;
@@ -11,6 +12,9 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using NSubstitute;
+using Serilog;
+using Serilog.Core;
+using Serilog.Events;
 
 namespace AIShop.Service.Tests;
 
@@ -20,13 +24,29 @@ namespace AIShop.Service.Tests;
 ///
 /// 三段：
 /// ① 契约零回归 —— 工具入口返回值与改动前的**逐字节**快照一致（含 <c>hasRecommendation=false</c> 兜底分支），
-///    且构造依赖仍为 4 个、不含被禁服务；
+///    且构造依赖为 5 个（第 5 个是 B1 新增的可选语义检索）、不含被禁服务；
 /// ② 推送门控 —— 正例（命中关键词且推荐非空）形状与工具结果同构；两条**独立**否分支（无关键词命中 / 推荐列表为空）；
 /// ③ 身份缺失 —— 推送返回 <c>null</c>，且**不是**工具路径那条「无法确定用户身份」的说明性负载。
+///
+/// <para>B1 追加第四段：<b>语义门控与语义反推内容</b>（修 L8「T恤有吗」漏推）——全部用替身
+/// <see cref="IProductSemanticSearch"/> 驱动（不依赖 bge 模型文件，确定性可进 CI）：
+/// 语义命中放行 / 闲聊不放行 / 关键词路径优先不漂移 / 检索异常降级为关键词门控 / 未注入时与改动前逐字节一致。</para>
 /// </summary>
 public sealed class RecommendationPushPayloadTests
 {
     private const string TestUser = "marla";
+
+    /// <summary>命中白名单关键词的上一轮依据（回归基线用）。</summary>
+    private const string KeywordMessage = "我想买跑步鞋";
+
+    /// <summary>无白名单关键词的闲聊消息（spec R2 场景 1 的否分支）。</summary>
+    private const string ChitChatMessage = "你好呀";
+
+    /// <summary>
+    /// 购物意图明确但**不在**白名单里的消息（盘点 L8）：23 组关键词里既无「T恤」也无展开命中，
+    /// 且目录里唯一 T 恤（id=2）的 Tags 也不含「T恤」——关键词路径必然漏掉它。
+    /// </summary>
+    private const string TShirtMessage = "T恤有吗";
 
     /// <summary>无关键词命中时 RecommendationService 的精选兜底文案（口径单一来源）。</summary>
     private const string CuratedFallbackMessage = "为您精选商品";
@@ -102,22 +122,28 @@ public sealed class RecommendationPushPayloadTests
     }
 
     [Fact]
-    public void ShouldKeepFourConstructorDependencies_WithoutProhibitedServices()
+    public void ShouldKeepFiveConstructorDependencies_WithoutProhibitedServices()
     {
-        var parameterTypes = typeof(RecommendationToolProvider)
+        var parameters = typeof(RecommendationToolProvider)
             .GetConstructors()
             .SelectMany(ctor => ctor.GetParameters())
-            .Select(parameter => parameter.ParameterType)
             .ToList();
 
-        // 推送入口**不得**新增依赖：仍是 4 个，且类型逐个钉死
-        Assert.Equal(4, parameterTypes.Count);
-        string[] expectedTypes = ["IServiceScopeFactory", "ICurrentUserAccessor", "IMemoryStore", "IMemoryCache"];
-        Assert.Equal(expectedTypes, parameterTypes.Select(type => type.Name));
+        // B1：新增第 5 个**可选**依赖 IProductSemanticSearch（本地 bge ONNX 语义检索，非大模型）。
+        // 断言「恰 5 个」防止后续再无声增依赖；逐项钉死类型防止被换成别的服务。
+        Assert.Equal(5, parameters.Count);
+        string[] expectedTypes =
+            ["IServiceScopeFactory", "ICurrentUserAccessor", "IMemoryStore", "IMemoryCache", "IProductSemanticSearch"];
+        Assert.Equal(expectedTypes, parameters.Select(parameter => parameter.ParameterType.Name));
 
-        // 零大模型调用的硬约束（IMemoryService 装配了 LlmReranker 精排）
-        Assert.DoesNotContain(typeof(IChatClient), parameterTypes);
-        Assert.DoesNotContain(typeof(IMemoryService), parameterTypes);
+        // 可选参语义（源码兼容）：既有直构造点 / 未注册 RAG 的宿主不必传 → 默认 null → 语义路径关闭
+        Assert.Equal(typeof(IProductSemanticSearch), parameters[4].ParameterType);
+        Assert.True(parameters[4].HasDefaultValue, "第 5 个依赖必须是可选参数（保持既有直构造点源码兼容）");
+        Assert.Null(parameters[4].DefaultValue);
+
+        // 零大模型调用的硬约束（IMemoryService 装配了 LlmReranker 精排）：bge 语义检索不在此列（进程内 ONNX，非 LLM）
+        Assert.DoesNotContain(typeof(IChatClient), parameters.Select(parameter => parameter.ParameterType));
+        Assert.DoesNotContain(typeof(IMemoryService), parameters.Select(parameter => parameter.ParameterType));
     }
 
     // ---------- ② 推送门控 ----------
@@ -158,7 +184,15 @@ public sealed class RecommendationPushPayloadTests
     [Fact]
     public void ShouldPush_WhenKeywordHitsAndProductsNonEmpty()
     {
-        Assert.True(RecommendationToolProvider.ShouldPush(["跑步"], PayloadWithProducts()));
+        // 关键词命中 → 推（B1 后判据为并集，此分支语义不变，回归）
+        Assert.True(RecommendationToolProvider.ShouldPush(["跑步"], [], PayloadWithProducts()));
+    }
+
+    [Fact]
+    public void ShouldPush_WhenOnlySemanticHitsAndProductsNonEmpty()
+    {
+        // 关键词未命中但语义命中 → 推（B1 修 L8 的那半边判据；「T恤有吗」走的就是这条）
+        Assert.True(RecommendationToolProvider.ShouldPush([], [Hit(2, 0.72)], PayloadWithProducts()));
     }
 
     [Fact]
@@ -174,8 +208,8 @@ public sealed class RecommendationPushPayloadTests
         Assert.NotEmpty(JsonDocument.Parse(toolJson).RootElement.GetProperty("products").EnumerateArray());
 
         Assert.Null(await harness.Provider.TryBuildPushPayloadAsync("你好呀"));
-        // 纯函数分支（与上条同源，独立可测）：关键词为空 → 不推
-        Assert.False(RecommendationToolProvider.ShouldPush([], PayloadWithProducts()));
+        // 纯函数分支（与上条同源，独立可测）：关键词与语义皆无 → 不推（spec R2 场景 1）
+        Assert.False(RecommendationToolProvider.ShouldPush([], [], PayloadWithProducts()));
     }
 
     [Fact]
@@ -193,8 +227,15 @@ public sealed class RecommendationPushPayloadTests
         Assert.Empty(toolRoot.GetProperty("products").EnumerateArray());
 
         Assert.Null(await harness.Provider.TryBuildPushPayloadAsync("我想买跑步鞋"));
-        // 纯函数分支：关键词非空但推荐为空 → 不推（防「兜底文案覆盖上一次面板」）
-        Assert.False(RecommendationToolProvider.ShouldPush(["跑步"], PayloadWithProducts([])));
+        // 纯函数分支：依据非空但推荐为空 → 不推（防「兜底文案覆盖上一次面板」）
+        Assert.False(RecommendationToolProvider.ShouldPush(["跑步"], [], PayloadWithProducts([])));
+    }
+
+    [Fact]
+    public void ShouldNotPush_WhenSemanticHitsButRecommendationIsEmpty()
+    {
+        // 语义命中但推荐列表为空（反推词在目录里召不回商品）→ 仍不推（后半句判据独立生效）
+        Assert.False(RecommendationToolProvider.ShouldPush([], [Hit(2, 0.72)], PayloadWithProducts([])));
     }
 
     // ---------- ③ 身份缺失 ----------
@@ -211,10 +252,197 @@ public sealed class RecommendationPushPayloadTests
         Assert.Null(await harness.Provider.TryBuildPushPayloadAsync("我想买跑步鞋"));
     }
 
+    // ---------- ④ B1：语义门控 + 内容来源第二层（修 L8「T恤有吗」漏推）----------
+
+    /// <summary>
+    /// L8 修复锚点（B1-dT）：购物意图明确、但**不在**关键词白名单里的「T恤有吗」，由语义命中放行门控，
+    /// 并用命中商品的类别反推关键词，使负载真的含 id=2（目录内唯一 T 恤，其 Tags 里并没有「T恤」）。
+    ///
+    /// <para><b>正锚点（= 改动前判据的等价复现）</b>：同款 provider、同一句话，未注入语义检索（= B1 之前的
+    /// 门控判据）时**不推**——证明下面的绿色不是环境自带的。</para>
+    /// </summary>
+    [Fact]
+    public async Task ShouldPushTShirtRound_WhenSemanticSearchFindsIt()
+    {
+        // 正锚点：B1 之前（无语义检索）这句必然推不出来（23 组白名单里既无「T恤」也无展开命中）
+        using var before = new Harness();
+        before.Accessor.SetCurrentUser(TestUser);
+        Assert.Null(await before.Provider.TryBuildPushPayloadAsync(TShirtMessage));
+
+        var semantic = new StubSemanticSearch([Hit(2, 0.72, name: "有机棉T恤", category: "服装")]);
+        using var after = new Harness(semanticSearch: semantic);
+        after.Accessor.SetCurrentUser(TestUser);
+
+        var push = await after.Provider.TryBuildPushPayloadAsync(TShirtMessage);
+        var payload = Assert.IsType<JsonElement>(push);
+
+        // 检索输入就是本轮依据（不是空串、也不是别的什么）
+        Assert.Equal(new[] { TShirtMessage }, semantic.Queries);
+        Assert.True(payload.GetProperty("hasRecommendation").GetBoolean());
+
+        var products = payload.GetProperty("products").EnumerateArray().ToList();
+        Assert.NotEmpty(products);
+        Assert.Contains(products, product => product.GetProperty("id").GetInt32() == 2);   // ← L8 修复锚点
+
+        // 内容来源第二层：反推词 = 命中商品的类别「服装」（目录内真实存在的串），reason 按它派生
+        var tshirt = products.Single(product => product.GetProperty("id").GetInt32() == 2);
+        Assert.Equal("有机棉T恤", tshirt.GetProperty("name").GetString());
+        Assert.Equal("服装", tshirt.GetProperty("category").GetString());
+        Assert.Equal("因为你提到「服装」", tshirt.GetProperty("reason").GetString());
+    }
+
+    /// <summary>
+    /// 闲聊轮不放行（spec R2 场景 1，等价于既有 <see cref="ShouldNotPush_WhenChatRoundHasNoKeywordHit"/>，
+    /// 但语义路径**已激活且返回空**）：放宽判据不得把闲聊也放进来。
+    /// </summary>
+    [Fact]
+    public async Task ShouldNotPushChitChat_WhenSemanticSearchReturnsNothing()
+    {
+        var semantic = new StubSemanticSearch([]);
+        using var harness = new Harness(semanticSearch: semantic);
+        harness.Accessor.SetCurrentUser(TestUser);
+
+        Assert.Null(await harness.Provider.TryBuildPushPayloadAsync(ChitChatMessage));
+        // 正锚点：语义检索确实被走到（否则「没推」可能只是没启用语义路径，断言空转）
+        Assert.Equal(new[] { ChitChatMessage }, semantic.Queries);
+    }
+
+    /// <summary>
+    /// B1-dT2（回归硬约束）：语义不可用或结果与关键词无关时，**关键词路径优先**——
+    /// 「我想买跑步鞋」的推送负载与改动前逐字节一致（不回退、不漂移）。
+    /// </summary>
+    [Fact]
+    public async Task ShouldKeepKeywordPathByteIdentical_WhenSemanticIsUnavailableOrIrrelevant()
+    {
+        // ③ 语义不可用（替身返回空）：逐字节等于改动前基线
+        using var unavailable = new Harness(semanticSearch: new StubSemanticSearch([]));
+        unavailable.Accessor.SetCurrentUser(TestUser);
+        Assert.Equal(BaselineQueryHit, await unavailable.Provider.RecommendProductsAsync(KeywordMessage));
+        Assert.Equal(
+            BaselineQueryHit,
+            Assert.IsType<JsonElement>(await unavailable.Provider.TryBuildPushPayloadAsync(KeywordMessage)).GetRawText());
+
+        // 更强：语义**有**命中也不得抢走关键词路径的内容（否则「我想买跑步鞋」的结果会漂移成 T 恤类商品）
+        using var irrelevant = new Harness(
+            semanticSearch: new StubSemanticSearch([Hit(2, 0.72, name: "有机棉T恤", category: "服装")]));
+        irrelevant.Accessor.SetCurrentUser(TestUser);
+        Assert.Equal(BaselineQueryHit, await irrelevant.Provider.RecommendProductsAsync(KeywordMessage));
+        Assert.Equal(
+            BaselineQueryHit,
+            Assert.IsType<JsonElement>(await irrelevant.Provider.TryBuildPushPayloadAsync(KeywordMessage)).GetRawText());
+    }
+
+    /// <summary>
+    /// B1-bT1（spec R4 场景 1 的降级面）：语义检索抛异常 → 不抛、退化为纯关键词门控、**恰好一条** Warning。
+    /// try/catch 只包检索调用本身，故这条 Warning 可归因到语义降级。
+    /// </summary>
+    [Fact]
+    public async Task ShouldNotPushChitChatAndWarnExactlyOnce_WhenSemanticSearchThrows()
+    {
+        var semantic = new StubSemanticSearch(failure: new InvalidOperationException("B1 用例：语义检索替身故意抛出"));
+        using var harness = new Harness(semanticSearch: semantic);
+        harness.Accessor.SetCurrentUser(TestUser);
+
+        var sink = new CollectingSink();
+        var original = Log.Logger;
+        Log.Logger = new LoggerConfiguration().MinimumLevel.Verbose().WriteTo.Sink(sink).CreateLogger();
+        JsonElement? push;
+        try
+        {
+            push = await harness.Provider.TryBuildPushPayloadAsync(ChitChatMessage);
+        }
+        finally
+        {
+            Log.Logger = original;
+        }
+
+        Assert.Null(push);   // 语义故障后仍是「闲聊不推」，未被异常改变
+        var warning = Assert.Single(sink.Events, logEvent => logEvent.Level == LogEventLevel.Warning);
+        Assert.Contains("推荐语义检索失败", warning.MessageTemplate.Text, StringComparison.Ordinal);
+        Assert.IsType<InvalidOperationException>(warning.Exception);
+        Assert.Equal(new[] { ChitChatMessage }, semantic.Queries);
+    }
+
+    /// <summary>
+    /// B1-bT1 的另一半（降级不劣化）：语义检索抛异常时，**关键词路径照常推送**且内容逐字节不变。
+    /// </summary>
+    [Fact]
+    public async Task ShouldStillPushKeywordRound_WhenSemanticSearchThrows()
+    {
+        var semantic = new StubSemanticSearch(failure: new InvalidOperationException("B1 用例：语义检索替身故意抛出"));
+        using var harness = new Harness(semanticSearch: semantic);
+        harness.Accessor.SetCurrentUser(TestUser);
+
+        var push = await harness.Provider.TryBuildPushPayloadAsync(KeywordMessage);
+
+        Assert.Equal(BaselineQueryHit, Assert.IsType<JsonElement>(push).GetRawText());
+    }
+
+    /// <summary>
+    /// B1-bT2（⑤）：未注入语义检索（未启用 RAG 的宿主 / 既有直构造点）→ 行为与改动前逐字节一致，
+    /// 「T恤有吗」仍推不出来（语义路径是唯一的差异来源）。
+    /// </summary>
+    [Fact]
+    public async Task ShouldBehaveIdentically_WhenSemanticSearchNotInjected()
+    {
+        using var harness = new Harness();   // 不注册 IProductSemanticSearch → 可选参默认 null
+        harness.Accessor.SetCurrentUser(TestUser);
+
+        Assert.Equal(BaselineQueryHit, await harness.Provider.RecommendProductsAsync(KeywordMessage));
+        Assert.Equal(
+            BaselineQueryHit,
+            Assert.IsType<JsonElement>(await harness.Provider.TryBuildPushPayloadAsync(KeywordMessage)).GetRawText());
+        Assert.Null(await harness.Provider.TryBuildPushPayloadAsync(TShirtMessage));
+    }
+
     // ---------- 夹具 ----------
 
     private static Memory Preference(string text)
         => new() { Id = Guid.NewGuid().ToString(), Text = text, UserId = TestUser };
+
+    /// <summary>替身语义检索的一条命中（Score 为相似度，供门控阈值判定）。</summary>
+    private static ProductSearchHit Hit(
+        int productId,
+        double score,
+        string name = "语义命中商品",
+        string category = "鞋类",
+        decimal price = 99.99m)
+        => new(productId, name, category, price, score);
+
+    /// <summary>
+    /// 替身语义检索（B1 用例专用）：返回脚本化命中或按需抛异常——**不依赖 bge 模型文件**，确定性可进 CI。
+    /// 记录检索输入，供断言「检索用的就是本轮依据」。
+    /// </summary>
+    private sealed class StubSemanticSearch(
+        IReadOnlyList<ProductSearchHit>? hits = null,
+        Exception? failure = null) : IProductSemanticSearch
+    {
+        /// <summary>收到的检索输入（按调用序）。</summary>
+        public List<string> Queries { get; } = [];
+
+        public Task<IReadOnlyList<ProductSearchHit>> SearchAsync(
+            string query,
+            string? domain = null,
+            int top = 5,
+            string? category = null,
+            CancellationToken ct = default)
+        {
+            Queries.Add(query);
+            return failure is null
+                ? Task.FromResult(hits ?? [])
+                : Task.FromException<IReadOnlyList<ProductSearchHit>>(failure);
+        }
+
+        public Task EnsureIndexedAsync(CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    /// <summary>收集 Serilog 日志事件的内存 sink（配合临时替换全局 <c>Log.Logger</c> 捕获告警）。</summary>
+    private sealed class CollectingSink : ILogEventSink
+    {
+        public List<LogEvent> Events { get; } = [];
+
+        public void Emit(LogEvent logEvent) => Events.Add(logEvent);
+    }
 
     private static RecommendationToolProvider.RecommendationPayload PayloadWithProducts(
         IReadOnlyList<RecommendationToolProvider.RecommendedProduct>? products = null)
@@ -228,11 +456,19 @@ public sealed class RecommendationPushPayloadTests
     /// 测试装配（沿用 RecommendationToolProviderTests 的口径）：替身 <see cref="IProductRepository"/> +
     /// 真实 <see cref="ProductCatalog"/> + 真实 <see cref="RecommendationService"/>，provider 经 DI 解析。
     /// </summary>
+    /// <param name="memories">替身记忆存储返回的记忆（偏好关键词来源）。</param>
+    /// <param name="products">替身仓储返回的商品目录（null = <see cref="ProductSeedData.Products"/>）。</param>
+    /// <param name="semanticSearch">
+    /// 替身语义检索；**null 表示不注册**（与 B1 之前 / 未启用 RAG 的宿主同形，可选参解析为 null）。
+    /// </param>
     private sealed class Harness : IDisposable
     {
         private readonly ServiceProvider _services;
 
-        public Harness(IReadOnlyList<Memory>? memories = null, IReadOnlyList<Product>? products = null)
+        public Harness(
+            IReadOnlyList<Memory>? memories = null,
+            IReadOnlyList<Product>? products = null,
+            IProductSemanticSearch? semanticSearch = null)
         {
             var repository = Substitute.For<IProductRepository>();
             repository.GetAll().Returns(products ?? ProductSeedData.Products);
@@ -248,6 +484,10 @@ public sealed class RecommendationPushPayloadTests
             services.AddSingleton<ICurrentUserAccessor>(Accessor);
             services.AddSingleton(Store);
             services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));
+            // 按**接口**静态类型注册（参数类型即 IProductSemanticSearch，故 TService 推断为接口）；
+            // 若把它换成具体类型，DI 解析 IProductSemanticSearch 会落空、provider 静默拿到 null。
+            if (semanticSearch is not null)
+                services.AddSingleton(semanticSearch);
             services.AddSingleton<RecommendationToolProvider>();
 
             _services = services.BuildServiceProvider();

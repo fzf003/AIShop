@@ -58,6 +58,12 @@ public sealed class AguiRecommendationPushTests : IDisposable
     /// <summary>无白名单关键词的闲聊消息。</summary>
     private const string ChitChatMessage = "你好呀，今天心情不错";
 
+    /// <summary>
+    /// B1（盘点 L8）：购物意图明确但**不在**白名单里的消息——23 组关键词里既无「T恤」也无展开命中，
+    /// 目录里唯一 T 恤（种子 id=2「有机棉T恤」）的 Tags 也不含「T恤」→ 纯关键词判据必然漏推。
+    /// </summary>
+    private const string TShirtMessage = "T恤有吗";
+
     /// <summary>种子账户：会话快照归属键（<c>AGUIShopping:{用户名}</c>）与聊天历史 <c>conversation_id</c> 都由它派生。</summary>
     private const string TestUser = "fzf003";
 
@@ -450,6 +456,52 @@ public sealed class AguiRecommendationPushTests : IDisposable
         Assert.Equal(HttpStatusCode.OK, statusBound);
         var framesBound = ParseSseFrames(sseBound);
         Assert.Equal(1, CountFrames(framesBound, CustomType, RecommendationEvent));
+    }
+
+    // ---------- ⑧ B1：语义检索注入 + L8「T恤有吗」（真机 bge）----------
+
+    /// <summary>
+    /// B1-eT + L8 端到端（真机 WAF，走**真实** bge 语义检索）：宿主 <c>AddRagService</c> 注册的
+    /// <see cref="IProductSemanticSearch"/> 经可选参自动注入 provider，使购物意图明确但不在白名单里的
+    /// 「T恤有吗」能推出目录内唯一 T 恤（种子 id=2）。
+    ///
+    /// <para><b>判别性</b>：若该依赖未注入（可选参为 null），门控只剩关键词判据 → 该轮 0 帧、用例必红。
+    /// 故本用例同时锁住「注入面」（生产装配里 provider 拿到的不是 null）与「L8 修复」两件事；
+    /// 替身驱动的确定性版本在 <c>RecommendationPushPayloadTests</c>（不依赖模型文件）。</para>
+    ///
+    /// <para><b>正锚点</b>：同宿主、同模型替身的另一轮（白名单关键词）照常推 1 帧 —— 证明 T 恤轮的有帧
+    /// 不是环境自带的；并断言文本回复 + <c>RUN_FINISHED</c> 照常，排除「流串了所以帧序异常」。</para>
+    /// </summary>
+    [Fact]
+    public async Task ShouldPushTShirtRound_ViaRealSemanticSearchInjectedFromHost()
+    {
+        using var factory = StartFactory(TextOnlyChatClient("S6-T8 已为您找到 T 恤。"));
+        using var client = factory.CreateClient();
+
+        // 正锚点：白名单关键词轮照常推 1 帧（门控与装配都在工作）
+        var (statusKeyword, sseKeyword) = await PostRoundAsync(client, "s6-t8-keyword", KeywordMessage);
+        Assert.Equal(HttpStatusCode.OK, statusKeyword);
+        Assert.Equal(1, CountFrames(ParseSseFrames(sseKeyword), CustomType, RecommendationEvent));
+
+        // 断言（L8）：T 恤轮经真实语义检索放行，载荷含 id=2
+        var (status, sse) = await PostRoundAsync(client, "s6-t8-tshirt", TShirtMessage);
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Contains("S6-T8", sse);
+        var frames = ParseSseFrames(sse);
+        Assert.True(
+            IndexOfFrame(frames, RunFinishedType, name: null) >= 0,
+            $"本轮应正常收尾。帧序：{Describe(frames)}");
+
+        var customIndex = IndexOfFrame(frames, CustomType, RecommendationEvent);
+        Assert.True(
+            customIndex >= 0,
+            $"「T恤有吗」应经语义检索推出推荐 CUSTOM 帧（0 帧 = 漏推 L8 或语义检索未注入）。帧序：{Describe(frames)}");
+        Assert.Equal(1, CountFrames(frames, CustomType, RecommendationEvent));
+
+        var ids = frames[customIndex].GetProperty("value").GetProperty("products").EnumerateArray()
+            .Select(product => product.GetProperty("id").GetInt32())
+            .ToArray();
+        Assert.Contains(2, ids);
     }
 
     // ---------- 装配 ----------
