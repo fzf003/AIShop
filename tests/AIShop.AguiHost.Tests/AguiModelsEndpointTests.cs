@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text;
 using System.Text.Json;
 using AIShop.Service.Agui;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -68,7 +69,7 @@ public sealed class AguiModelsEndpointTests
         // 期望序 = 子键序数升序（deepseek < gpt-4.1 < qwen），非 appsettings 书写序（spec R1 第 4 段）
         AssertModel(items[0], expectedId: "deepseek", expectedName: "DeepSeek", expectedModel: "deepseek-v4-flash", expectedDefault: false);
         AssertModel(items[1], expectedId: "gpt-4.1", expectedName: "Mimo", expectedModel: "mimo-v2.5", expectedDefault: true);
-        AssertModel(items[2], expectedId: "qwen", expectedName: "Qwen 3.7", expectedModel: "qwen3.8-flash", expectedDefault: false);
+        AssertModel(items[2], expectedId: "qwen", expectedName: "Qwen 3.7", expectedModel: "kimi-k3", expectedDefault: false);
 
         // 响应不含敏感信息（spec R1 第 5 段：模型密钥与端点地址不在响应中）
         Assert.DoesNotContain("Endpoint", body);
