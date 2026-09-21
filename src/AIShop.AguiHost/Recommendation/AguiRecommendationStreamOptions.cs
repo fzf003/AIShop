@@ -81,6 +81,11 @@ internal static class AguiRecommendationStreamOptions
 
         // ② 内容类型的 JSON 多态派生类型注册（design §4.4 D 第 4 条）：在宿主 HTTP JSON 选项的 resolver 链上挂
         // JsonTypeInfo 修饰器，把本类型追加进 AIContent 的多态表（复制既有配置，不动其它派生类型）。
+        //
+        // ⚠️ 作用面是**宿主级**（L18）：`Configure<HttpJsonOptions>` 对**全宿主的 HTTP JSON 序列化**生效，
+        // 不只作用于 AG-UI SSE 的 CUSTOM 帧。当前**无副作用** —— 全仓没有第二个把 `AIContent` 当响应体
+        // 序列化的 REST 端点（`/models`、`/products`、`/cart*` 都返回各自的 DTO）。**新增这类端点前**
+        // 需重新评估：它会顺带获得这两个判别符，届时应考虑收窄（例如改挂在 AG-UI 端点自己的序列化选项上）。
         services.Configure<HttpJsonOptions>(options =>
         {
             var resolver = options.SerializerOptions.TypeInfoResolver ?? new DefaultJsonTypeInfoResolver();
