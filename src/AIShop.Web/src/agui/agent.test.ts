@@ -26,8 +26,10 @@ import {
   createHangingSseResponse,
   createSseResponse,
   customEvent,
+  encodeSse,
   runFinished,
   runStarted,
+  SSE_CONTENT_TYPE,
   type SseEvent,
   textMessageContent,
   textMessageEnd,
@@ -720,4 +722,123 @@ describe('agent.ts：C2 挂起兜底（服务端连首字节都不发时 isRunni
       vi.useRealTimers()
     }
   })
+})
+
+/**
+ * L5：会话销毁 —— 在途轮的副作用必须随会话一起消失。
+ *
+ * **要解的形态**：一轮在途（真机实测单轮 6–11 秒）时退出登录 / 切账户。`createAgent` 里
+ * `agent.subscribe({...})` 的返回值原先**被丢弃**，`endSession` 只退订了 store 侧 —— 旧 agent 的
+ * 订阅仍活着，它晚到的 `CUSTOM` 经 `setRecoFromCustomEvent` 写进**模块级全局**推荐 store，于是
+ * ① 新账户面板被上一账户的负载顶掉；② 随后一次 store 通知又把它写进新账户的 `agui.reco.{username}`
+ * （违反 spec「退出只清当前账户」）。
+ *
+ * `dispose()` 的三步各挡一段，但**只有前两步**能由本文件的单测锁定：
+ * - **中止在途轮**（`abortRun`）→ 用例 a：旧轮的事件不再送达；
+ * - **断开订阅**（`unsubscribe`）→ 用例 b：销毁后 SDK 的后续派发不再触达本会话（走活引用）；
+ * - **`disposed` 守卫** → **单测锁定不了**（原因见文末说明），靠真机验证。
+ *
+ * ⚠️ **2026-09-21 记一次误判与两次更正（本组用例最值得回头看的地方）**：
+ * ① 先据 SDK 源码推断「`abortRun()` 会派发 `onRunFailed`，故用户切账户会看到假的『网络异常』」；
+ * ② 随后写用例验证，却用 fake timers 只推进 0ms —— **异步链没走完**，断言「未弹提示」通过，
+ *    于是**推翻了①**，还写下「该现象未能复现」；
+ * ③ **真机复现把①又推了回来** —— 在途轮中点退出，账户页**确实**弹出「网络异常，请稍后重试」。
+ *
+ * 教训：**单测替身在 abort 路径上与真实网络行为不同**（替身下本轮正常 resolve、`onRunFailed`
+ * 不派发），所以单测「绿」既不能证明没问题、也不能证明问题不存在 —— **产品行为以真机为准**。
+ *
+ * 用例 a、b 都是**反证导向**的：整块去掉 `dispose()` → 用例 a 红；去掉 `unsubscribe()` → 用例 b 红。
+ */
+describe('agent.ts：L5 会话销毁（在途轮不得污染已切换的账户）', () => {
+  /**
+   * 自建 SSE 流：测试持有 controller，可精确控制「事件何时到达」—— 本组用例的核心。
+   * 现成的 `createHangingSseResponse` 只能一次性入队，构造不出「销毁之后才到」这个窗口。
+   *
+   * 流被中止后再 `push` 会**同步抛错**（`Controller is already closed`）—— 这不是缺陷，正是
+   * 「连接已断」的可观测证据，用例 a 据此断言。
+   */
+  function installManualSse(): { push: (chunk: string) => void } {
+    const handle = { push: (_chunk: string): void => undefined }
+    const stub = installFetchStub({
+      [AGUI_ENDPOINT]: () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              handle.push = (chunk) => controller.enqueue(new TextEncoder().encode(chunk))
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': SSE_CONTENT_TYPE } },
+        ),
+    })
+    restoreFetch = stub.restore
+    return handle
+  }
+
+  /** 起一轮并推进到「首字节已到、本轮在途」的状态。 */
+  async function startInFlightRound(sse: { push: (chunk: string) => void }, threadId: string): Promise<void> {
+    startSession({ model: MODEL_ITEM.id })
+    // 前置 catch：销毁会中止本轮，避免被 vitest 记为 unhandled rejection
+    runRound('你好').catch(() => undefined)
+    await vi.advanceTimersByTimeAsync(0)
+    sse.push(encodeSse(runStarted(threadId, `${threadId}-r1`)))
+    await vi.advanceTimersByTimeAsync(0)
+  }
+
+  it('a. endSession 中止在途轮：旧轮的事件不再送达，推荐 store 不被污染', async () => {
+    vi.useFakeTimers()
+    try {
+      resetRecoContent()
+      writeUsername('marla')
+      const sse = installManualSse()
+      await startInFlightRound(sse, 't-l5a')
+
+      // 退出登录 / 切账户（`closeToAccount` 走的就是这一句）
+      endSession()
+
+      // 断言 1「连接已断」：旧轮的事件**不可能**再送达 —— 这是「不污染」的机制本身
+      expect(() =>
+        sse.push(encodeSse(customEvent('recommendation', { message: '为你精选', products: [] }))),
+      ).toThrow()
+      await vi.advanceTimersByTimeAsync(0)
+
+      // 断言 2：面板数据源没有被上一账户的负载写入
+      expect(getRecoSnapshot()).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('b. dispose 断开 SDK 订阅：旧 agent 后续的派发不再触达本会话', async () => {
+    const session = createAgent({ username: 'marla', model: MODEL_ITEM.id, threadId: 't-l5b' })
+
+    let notified = 0
+    session.subscribe(() => {
+      notified += 1
+    })
+
+    session.dispose()
+
+    // `setMessages` 遍历的是 SDK 的 `this.subscribers` **活引用**（不是 `runAgent` 开头那份快照），
+    // 因此退订在这条路径上必须生效 —— 这正是 `dispose()` 里 `unsubscribe()` 的作用面。
+    session.agent.setMessages([{ id: 'm-l5b', role: 'user', content: '销毁之后' }])
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(notified).toBe(0)
+  })
+
+  /**
+   * 关于「`disposed` 守卫」为什么**没有**对应用例（2026-09-21 实测后的决定）。
+   *
+   * **现象与修复**：在途轮中点「退出」→ 账户选择页弹出「网络异常，请稍后重试」。根因是
+   * `dispose()` 里的 `abortRun()` **会**派发本轮的 `onRunFailed`，而 `unsubscribe()` 拦不住它
+   * —— 本轮派发走的是 `runAgent` 开头拍下的订阅者**快照**。修法是 `disposed` 标记，四个回调自查。
+   * **真机复验已通过**：加守卫前 `hasNetworkError: true`，加守卫后 `false`（「在途」由等待态的
+   * 「正在思考中…」占位气泡确认）。
+   *
+   * **为什么写不出单测**：本文件的 SSE 替身构造下，中止后本轮 `runAgent()` **正常 resolve**
+   * （实测 `outcome: 'RESOLVED'`、`toastCalls: 0`），`onRunFailed` **不被派发** —— 于是任何
+   * 「断言未弹提示」的用例都**恒为真**，属于空转断言，留着只会制造「已覆盖」的假象，故删除。
+   * 替身与真实网络在 abort 路径上的这一差异本身就值得记住：
+   * **这条不变量靠真机验证守，不靠本文件的单测。**
+   */
 })

@@ -81,10 +81,20 @@ export function startSession({ model }: StartSessionOptions): void {
   emitChange()
 }
 
-/** 结束会话（退出登录 / 切账户前）：仅断开订阅并清内存态，**不动**持久化（清理归 `clearSession`）。 */
+/**
+ * 结束会话（退出登录 / 切账户前）：断开订阅、**销毁会话**并清内存态，**不动**持久化（清理归 `clearSession`）。
+ *
+ * `session.dispose()`（L5）是必须的：它断开 agent 侧订阅并中止在途轮。少了这一步，旧账户在途轮
+ * 晚到的 `CUSTOM` 仍会写进**模块级全局**推荐 store —— 新账户面板被上一账户负载顶掉，随后还会落进
+ * 新账户的 `agui.reco.{username}`。详见 `agent.ts#dispose` 与 `agent.test.ts` 的 L5 用例。
+ *
+ * 顺序：**先退订 store 侧**（下一句），再 `dispose()`。两侧订阅各管一段，退订在前 ——
+ * 保证 `dispose()` 之后不存在仍指向本会话的活订阅。
+ */
 export function endSession(): void {
   unsubscribeSession?.()
   unsubscribeSession = null
+  session?.dispose()
   session = null
   emitChange()
 }

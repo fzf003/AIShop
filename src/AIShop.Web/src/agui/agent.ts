@@ -102,6 +102,30 @@ export interface AguiSession {
   subscribe(listener: () => void): () => void
   /** 发一轮：追加一条用户消息（唯一 id）后 `runAgent({ forwardedProps })`。 */
   runRound(text: string): Promise<RunAgentResult>
+  /**
+   * 销毁会话（退出登录 / 切账户，L5）：**中止在途轮**、**断开订阅**，并**立起 `disposed` 守卫**。
+   *
+   * 为什么必须显式销毁（而不是丢引用等 GC）：订阅闭包持有的是**模块级全局**的推荐 store
+   * 写入点（`setRecoFromCustomEvent`）。旧账户在途轮晚到的 `CUSTOM` 会写进那个全局 store ——
+   * 新账户的面板被上一账户的负载顶掉，随后还会被写进新账户的 `agui.reco.{username}`
+   * （违反 spec「退出只清当前账户」）。
+   *
+   * 三步各挡一段，缺一不可：
+   * - `abortRun()` 中止在途轮：SSE 连接断开，旧轮的事件从此不可能送达（L5-a 锁定）；
+   * - `disposed = true` 拦住**本轮残留的派发**：SDK 在 `runAgent` 开头把订阅者列表拍成**快照**，
+   *   本轮余下的回调 —— **含中止自身引发的 `onRunFailed`** —— 走的就是那份快照，
+   *   **`unsubscribe()` 拦不住**。真机实测（2026-09-21）：不设此守卫时，在途轮中点退出会在账户页
+   *   弹出「网络异常，请稍后重试」（L5-c 锁定）；
+   * - `unsubscribe()` 断开**后续派发**：`setMessages` / `addMessage` 这类 API 遍历的是
+   *   `this.subscribers` **活引用**（L5-b 锁定）。
+   *
+   * 顺序：**先置 `disposed`**，再退订、再中止 —— 标记必须早于 `abortRun()`（它引发的派发是
+   * 异步的，标记先立起来才不会漏）。
+   *
+   * 幂等：重复调用安全（`unsubscribe` 内部是数组过滤；`AbortController.abort()` 本身幂等）。
+   * `abortController` 由 SDK 在**每轮** `runAgent` 时重建，故中止不会影响任何后续轮次。
+   */
+  dispose(): void
 }
 
 /**
@@ -280,16 +304,37 @@ export function createAgent(config: AguiSessionConfig): AguiSession {
    */
   let failed = false
 
+  /**
+   * 会话是否已销毁（L5）。
+   *
+   * **为什么必须有它**：`dispose()` 里的 `abortRun()` 中止在途轮之后，SDK **仍会**派发本轮的
+   * `onRunFailed` —— 真机实测（2026-09-21）：在途轮中点「退出」，账户选择页会弹出
+   * 「网络异常，请稍后重试」，把用户主动的操作报成故障。
+   *
+   * 而 `unsubscribe()` **拦不住它**：本轮余下的派发走的是 `runAgent` 开头拍下的**订阅者快照**，
+   * 退订只影响后续（`setMessages` / `addMessage` 这类活引用路径）。故每个回调都要自查本标记 ——
+   * 销毁之后，本轮残留的一切派发都不得再向外传播（既不提示失败，也不写推荐 store、不通知渲染）。
+   */
+  let disposed = false
+
   // 复制一份再遍历：订阅者在回调里退订不会打乱本次派发。
   const notify = (): void => {
     for (const listener of [...listeners]) listener()
   }
 
-  agent.subscribe({
-    onMessagesChanged: notify,
-    onNewMessage: notify,
+  // L5：**接住订阅句柄** —— `dispose()` 靠它断开。返回值原先被丢弃，正是跨账户污染的根因：
+  // 订阅闭包里有写**模块级全局**推荐 store 的 `setRecoFromCustomEvent`，断了会话也不会停。
+  const subscription = agent.subscribe({
+    // 四个回调都以 `disposed` 自查开头 —— 销毁后本轮残留的派发（含中止引发的 `onRunFailed`）
+    // 不得再向外传播。理由见 `disposed` 声明。
+    onMessagesChanged: () => {
+      if (!disposed) notify()
+    },
+    onNewMessage: () => {
+      if (!disposed) notify()
+    },
     onRunFinalized: () => {
-      if (failed) return
+      if (disposed || failed) return
       notify()
     },
     // `CUSTOM` 事件（推荐推送的载体，spec R6 / R7）：**只搬运、不解析**。
@@ -307,6 +352,7 @@ export function createAgent(config: AguiSessionConfig): AguiSession {
     // `reco.ts#setRecoFromCustomEvent`，真正的渲染语义归面板的 `parseRecommendation`。协议层多解析
     // 一次就会变成第二份解析器（F2 的硬约束），也会把「结构不符保留上一次」的口径提前固化在这里。
     onCustomEvent: (params) => {
+      if (disposed) return
       setRecoFromCustomEvent(params.event.value)
       notify()
     },
@@ -314,7 +360,10 @@ export function createAgent(config: AguiSessionConfig): AguiSession {
     // 之前，是**普通 HTTP 响应**，`@ag-ui/client` 把它转成挂 `status` / `payload` 的 `Error` 后派发到本回调。
     // 顺序 = 先 notify（让 UI 退出运行态）、再分派（清会话 / 提示），此后本轮**不再**有通知
     // ——「清会话」必须是本轮的**最后一次**写入（理由见 `failed` 与 `handleRunFailure`）。
+    // 【L5 关键守卫】中止在途轮**也会**走到这里（真机实测 2026-09-21：在途轮中点退出，
+    // 账户页弹出「网络异常，请稍后重试」）。用户主动切账户不是故障，不得提示。
     onRunFailed: (params) => {
+      if (disposed) return
       failed = true
       notify()
       handleRunFailure(params.error)
@@ -354,6 +403,13 @@ export function createAgent(config: AguiSessionConfig): AguiSession {
       } finally {
         disarmFirstByteWatchdog()
       }
+    },
+    // L5：销毁 = **中止在途轮 + 断开订阅 + 立起 disposed 守卫**。三者作用面不同，见接口声明。
+    dispose(): void {
+      // 必须先置标记：`abortRun()` 引发的回调是异步派发的，标记先立起来才不会漏。
+      disposed = true
+      subscription.unsubscribe()
+      agent.abortRun()
     },
   }
 }
