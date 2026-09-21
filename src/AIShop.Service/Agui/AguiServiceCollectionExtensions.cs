@@ -161,10 +161,18 @@ public static class AguiServiceCollectionExtensions
         await SeedUserAsync("fzf003", "fzf003");
         await db.SaveChangesAsync();
 
-        // 幂等播种商品：空表才写入 18 个种子商品（覆盖全新库与既有库两路径，重复启动不产生重复行）
-        if (!await db.Products.AnyAsync())
+        // 幂等播种商品：按 Id **补齐缺失的**种子商品（原实现是「空表才写入」）。
+        // 为什么改：种子表一旦扩充，既有库（Products 已非空）就永远拿不到新商品 ——
+        // 而「给商品表补货」正是这条路径要支持的。按 Id 补齐既能让既有库自动更新，
+        // 又幂等（重复启动不产生重复行），且**不动**库里已有的任何一行（含用户写入的数据）。
+        //
+        // 数据源是 AguiHost **专用**的 AguiProductSeedData（共享的 ProductSeedData + 本宿主追加的 8 条）——
+        // 共享那份维持 18 条不变，因为 Api 也在读它且 Api 属禁改范围。
+        var seededIds = await db.Products.Select(product => product.Id).ToListAsync();
+        var missingProducts = AguiProductSeedData.Products.Where(product => !seededIds.Contains(product.Id)).ToList();
+        if (missingProducts.Count > 0)
         {
-            db.Products.AddRange(ProductSeedData.Products);
+            db.Products.AddRange(missingProducts);
             await db.SaveChangesAsync();
         }
 

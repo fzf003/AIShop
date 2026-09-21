@@ -65,7 +65,7 @@ public sealed class AguiStartupSeedingTests : IDisposable
     }
 
     [Fact]
-    public async Task Initialize_OnFreshDatabase_Seeds18ProductsAnd3Users_AndCreatesIndependentRagDb()
+    public async Task Initialize_OnFreshDatabase_SeedsConfiguredProductsAnd3Users_AndCreatesIndependentRagDb()
     {
         var dbPath = NewDbPath("ef");
         var ragPath = NewDbPath("rag");
@@ -76,9 +76,10 @@ public sealed class AguiStartupSeedingTests : IDisposable
             // 启动引导：MigrateAsync 建 schema → 幂等播种 → RAG 预热（内部 try/catch，失败仅 Warning 不抛）
             await AguiServiceCollectionExtensions.InitializeAsync(sp);
 
-            // EF 独立业务库：18 商品 + 3 测试用户均落库（MigrateAsync 建 schema，不是 EnsureCreated）
+            // EF 独立业务库：AguiHost 商品种子（共享 18 条 + 本宿主追加 8 条）+ 3 测试用户均落库
+            // （MigrateAsync 建 schema，不是 EnsureCreated）。商品数从种子常量取，加商品时自动跟随。
             using var ctx = new AppDbContext(OptionsFor(dbPath));
-            Assert.Equal(18, await ctx.Products.CountAsync());
+            Assert.Equal(AguiProductSeedData.Products.Count, await ctx.Products.CountAsync());
             Assert.Equal(1, await ctx.Users.CountAsync(u => u.Username == "marla"));
             Assert.Equal(1, await ctx.Users.CountAsync(u => u.Username == "steve"));
             Assert.Equal(1, await ctx.Users.CountAsync(u => u.Username == "fzf003"));
@@ -111,7 +112,7 @@ public sealed class AguiStartupSeedingTests : IDisposable
         SqliteConnection.ClearAllPools();
 
         using var ctx = new AppDbContext(OptionsFor(dbPath));
-        Assert.Equal(18, await ctx.Products.CountAsync());
+        Assert.Equal(AguiProductSeedData.Products.Count, await ctx.Products.CountAsync());
         Assert.Equal(1, await ctx.Users.CountAsync(u => u.Username == "marla"));
         Assert.Equal(1, await ctx.Users.CountAsync(u => u.Username == "steve"));
         Assert.Equal(1, await ctx.Users.CountAsync(u => u.Username == "fzf003"));

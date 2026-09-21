@@ -30,8 +30,11 @@
 
   <ItemGroup>
     <!-- 测试缝：使 internal static ModelRouter.BuildChatHttpPipeline 等对 Service.Tests 可见。
-         （property 形式的 <InternalsVisibleTo> 不生成 friend 特性，必须用 item 形式 Include） -->
+         （property 形式的 <InternalsVisibleTo> 不生成 friend 特性，必须用 item 形式 Include）
+         AguiHost.Tests 亦需可见：其播种/商品端点用例要引用 internal 的 AguiProductSeedData
+         （AguiHost 专用种子 = 共享 18 条 + 本宿主追加 8 条），以便断言随商品集自动跟随。 -->
     <InternalsVisibleTo Include="AIShop.Service.Tests" />
+    <InternalsVisibleTo Include="AIShop.AguiHost.Tests" />
   </ItemGroup>
 
   <PropertyGroup>

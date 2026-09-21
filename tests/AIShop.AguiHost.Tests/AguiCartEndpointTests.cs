@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AIShop.Core.StaticData;
+using AIShop.Service.Agui;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 
@@ -202,7 +203,10 @@ public sealed class AguiCartEndpointTests : IDisposable
         // spec「购物车端点」场景 4（非法数量与不存在商品被拒）：quantity 非正与 productId 不存在分别返回 400
         // 与各自文案，且购物车【无任何变化】（入参校验全部发生在写入之前）。
         var knownProductId = ProductSeedData.Products[0].Id;
-        var unknownProductId = ProductSeedData.Products.Max(p => p.Id) + 1;
+        // 「不存在的商品」取自 **AguiHost 自己的种子**最大值 + 1 —— 不能用 Core 的 ProductSeedData：
+        // 后者停在 18，而 AguiHost 播了 26 条，`Max(Id)+1` 会算出一个真实存在的商品（19 = 月饼礼盒），
+        // 于是本该 400 的加购会成功。用本宿主种子才能保证落在真空区。
+        var unknownProductId = AguiProductSeedData.Products.Max(p => p.Id) + 1;
 
         var factory = StartFactory();
         using var client = factory.CreateClient();

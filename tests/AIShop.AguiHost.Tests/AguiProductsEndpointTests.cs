@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using AIShop.Core.Interfaces;
 using AIShop.Core.StaticData;
+using AIShop.Service.Agui;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
@@ -83,7 +84,9 @@ public sealed class AguiProductsEndpointTests : IDisposable
         using (var scope = factory.Services.CreateScope())
             expected = scope.ServiceProvider.GetRequiredService<IProductRepository>().GetAll();
 
-        Assert.Equal(ProductSeedData.Products.Count, expected.Count);
+        // 商品数与目录同源：AguiHost 用的是自己那份种子（共享 18 条 + 本宿主追加 8 条），
+        // 不是 Core 的 ProductSeedData（那份维持 18 条、由 Api 使用）。
+        Assert.Equal(AguiProductSeedData.Products.Count, expected.Count);
         Assert.Equal(expected.Count, items.Count);
 
         for (var i = 0; i < expected.Count; i++)
