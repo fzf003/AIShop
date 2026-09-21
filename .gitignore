@@ -35,7 +35,12 @@ src/AIShop.Infrastructure/Rag/Models/
 .claude/skills/matt-workflow/
 .claude/agents
 
-tools/
+# 只忽略仓库根的 tools/（工具链脚本）。
+# 原来写的是 `tools/`（无斜杠前缀 = 匹配任意层级），在 Windows 上大小写不敏感，
+# 于是把产品代码目录 src/AIShop.Service/Tools 与 src/AIShop.McpServer/Tools 一并忽略了 ——
+# 已跟踪的文件不受影响，但**在这两个目录里新建的文件不会被 git 看到**。
+# 加前导斜杠限定为根目录，两个产品目录即恢复可跟踪。
+/tools/
 .vs/
 .teach/
 docs/design
