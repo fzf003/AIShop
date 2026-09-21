@@ -21,18 +21,17 @@
  *    MUST NOT 退化为「只弹一个 Toast」）。
  *
  * 推荐面板接线（agui-reco-realtime F4 / design §4.5 B、C、D）：面板数据源 = 推荐内容 store
- * （`agui/reco.ts`），三个来源分别是 —— `CUSTOM` 事件（协议层已在 `agent.ts` 接好）、
- * **工具结果**（本文件对 `lastRecommendationContent(messages)` 的变化做 effect）、
+ * （`agui/reco.ts`），三个来源分别是 —— `CUSTOM` 事件与**工具结果**（两者都在协议层 `agent.ts`
+ * 的事件回调里**同步**写入；工具结果自 L6 起从本文件的 effect 搬了过去，理由见 `agent.ts`）、
  * **恢复初值**（会话 effect 内以 `readReco(username)` 优先、历史工具结果兜底）。
- * 面板组件与 props 形状零改动，`lastRecommendationContent` 函数保留（既是工具结果来源，
- * 也是刷新恢复的兜底来源）。负载的**持久化回写**（`writeReco`）由 F5 挂进会话 effect 的
- * 既有一致性通知链（与 `writeToolRounds` 同一次通知、同一批次）。
+ * 面板组件与 props 形状零改动；`lastRecommendationContent` 改从协议层导入，本文件只用它算恢复初值。
+ * 负载的**持久化回写**（`writeReco`）由 F5 挂进会话 effect 的既有一致性通知链
+ * （与 `writeToolRounds` 同一次通知、同一批次）。
  */
-import type { Message } from '@ag-ui/client'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { setToastHandler } from './agui/agent'
-import { getRecoSnapshot, resetRecoContent, setRecoFromToolResult, useRecoContent } from './agui/reco'
+import { lastRecommendationContent, setToastHandler } from './agui/agent'
+import { getRecoSnapshot, resetRecoContent, useRecoContent } from './agui/reco'
 import {
   endSession,
   getAgent,
@@ -45,7 +44,6 @@ import {
 import {
   attachToolEvents,
   createToolTracker,
-  decodeToolResultContent,
   type ToolCallEntry,
   type ToolRound,
   type ToolTracker,
@@ -101,35 +99,6 @@ function initialToolRounds(): readonly ToolRound[] {
   return username === null ? [] : readToolRounds(username)
 }
 
-/**
- * 「最近一次 `recommend_products` 的工具结果原文」（spec R9 第 1 段的数据来源）。
- *
- * 口径（handoff-C8 遗留 1）：**必须是该工具自己的结果**，不能把别的工具结果（`get_cart_summary`
- * 的纯文本等）喂给推荐面板；取**最新一条**（消息序最后），且**不在轮次之间清空** —— 清空会让
- * 「解析失败保留上一次内容」（R9-3）退化成闪回占位。
- *
- * 宿主把工具结果字符串多编码了一层（`content === JSON.stringify(result)`，design §15.1 / D1）：
- * 在**读取侧**恰好剥一次（`decodeToolResultContent`）。这是读取边界，**不改写** `messages`
- * —— 持久化（R2）里仍是宿主原样送达的 `content`。只调用一次，勿链式。
- */
-function lastRecommendationContent(messages: readonly Message[]): string | null {
-  const callIds = new Set<string>()
-  for (const message of messages) {
-    if (message.role !== 'assistant') continue
-    for (const call of message.toolCalls ?? []) {
-      if (call.function.name === 'recommend_products') callIds.add(call.id)
-    }
-  }
-
-  let content: string | null = null
-  for (const message of messages) {
-    if (message.role === 'tool' && callIds.has(message.toolCallId)) {
-      content = decodeToolResultContent(message.content)
-    }
-  }
-  return content
-}
-
 export default function App() {
   const [screen, setScreen] = useState<Screen>(initialScreen)
   const [models, setModels] = useState<readonly ModelInfo[] | null>(null)
@@ -146,18 +115,6 @@ export default function App() {
    * （切账户/重建时 `setTracker` 换新实例，订阅却还挂着上一次的引用）。
    */
   const trackerRef = useRef<ToolTracker | null>(null)
-
-  /**
-   * 工具结果来源的「已见值」：`lastRecommendationContent(messages)` 上一次被写进推荐 store 的原文。
-   *
-   * 两个用途（agui-reco-realtime F4）：
-   * 1. **变化判定** —— 该 effect 的依赖是 `messages`（每次 store 通知都换新引用），若不做值比较，
-   *    每一轮纯文本对话都会把同一条旧工具结果重写一遍（对 store 是无谓广播，对面板是无谓覆盖：
-   *    会把更晚到达的 `CUSTOM` 内容顶掉）；
-   * 2. **会话启动基线** —— 进入主界面时由会话 effect 置为「历史里最后一条工具结果」，使恢复期
-   *    不把历史旧值当成新变化（否则 `agui.reco.{username}` 的恢复优先级失效）。
-   */
-  const toolRecoRef = useRef<string | null>(null)
 
   const { messages, isRunning } = useSession()
   const { cart } = useCart()
@@ -228,7 +185,6 @@ export default function App() {
 
     const restoredToolReco = lastRecommendationContent(readMessages(username))
     resetRecoContent(readReco(username) ?? restoredToolReco)
-    toolRecoRef.current = restoredToolReco
 
     const next = createToolTracker({ initialRounds: readToolRounds(username) })
     trackerRef.current = next
@@ -261,29 +217,6 @@ export default function App() {
       detachPersist()
     }
   }, [screen])
-
-  /**
-   * 推荐内容的**工具结果来源**（agui-reco-realtime F4 / design §4.5 C）：`messages` 里
-   * `lastRecommendationContent` 的**变化**写进推荐 store。
-   *
-   * 三条口径：
-   * - **只在非 `null` 时写**：没有推荐工具结果的轮次（闲聊、纯加购）不得把面板清空 ——
-   *   「不在轮次之间清空」是既有口径（`reco.ts#setRecoFromToolResult` 同样忽略 `null`），
-   *   面板的「解析失败保留上一次」也依赖它；
-   * - **只在值变化时写**：与 `toolRecoRef` 比较（`messages` 每次通知都换新引用，不做值比较会对
-   *   同一条旧结果反复广播，见该 ref 的注释）；
-   * - **解码在读取侧恰好一次**：`lastRecommendationContent` 内的 `decodeToolResultContent` 是
-   *   唯一的 wire 边界解码点，store 侧不再解码（`CUSTOM` 路径的硬约束 2）。
-   *
-   * 到达顺序即覆盖顺序（后到者胜，spec R9-1）：本 effect 写的是**早于** `CUSTOM` 到达的那一路，
-   * 因此同轮「先工具结果、后 `CUSTOM`」时面板最终显示 `CUSTOM` 的内容。
-   */
-  useEffect(() => {
-    const content = lastRecommendationContent(messages)
-    if (content === null || content === toolRecoRef.current) return
-    toolRecoRef.current = content
-    setRecoFromToolResult(content)
-  }, [messages])
 
   /**
    * 会话失效（服务端判定该账户不存在）→ 清该账户本地数据 + 回账户选择页（spec R4 第 1 段）。

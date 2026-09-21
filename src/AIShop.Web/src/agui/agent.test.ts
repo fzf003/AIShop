@@ -37,6 +37,7 @@ import {
   toolCallArgs,
   toolCallEnd,
   toolCallResult,
+  toolCallResultEncoded,
   toolCallStart,
 } from '../test/sse'
 import { AGUI_ENDPOINT, createAgent, FIRST_BYTE_TIMEOUT_MS } from './agent'
@@ -841,4 +842,67 @@ describe('agent.ts：L5 会话销毁（在途轮不得污染已切换的账户�
    * 替身与真实网络在 abort 路径上的这一差异本身就值得记住：
    * **这条不变量靠真机验证守，不靠本文件的单测。**
    */
+})
+
+/**
+ * L6：推荐三源的**覆盖时序**。
+ *
+ * spec R9-1 要求「后到者胜」（按**到达顺序**覆盖）。而三源原先**不在同一时序上**：
+ * - `CUSTOM` 在协议层 `onCustomEvent` 里**同步**写 store；
+ * - 工具结果要等 React 重渲染后由 `App.tsx` 的 `useEffect([messages])` 才写。
+ *
+ * 于是「模型先调 `recommend_products`、宿主随后推 CUSTOM」这一真机次序下，**更早的工具结果可能
+ * 顶掉更晚的 CUSTOM**（`App.tsx` 的 `toolRecoRef` 注释已承认该风险，当时只用「值比较」缓解 ——
+ * 两源内容相同时没事，**不同**时仍会顶掉）。真实触发条件是 React 18 的批次合并 / 并发渲染让那个
+ * effect 晚于 CUSTOM 派发；**jsdom + `act()` 会在 await 点及时 flush，所以复现不出来** ——
+ * 这正是盘点所说「`waitFor` 冲洗掩盖了时序」。
+ *
+ * 修法因此落在**结构**上：把工具结果的派生也搬进协议层（`onMessagesChanged` 与 `onCustomEvent`
+ * 同为**同步**派发），两源因此落在同一条时序上，**到达顺序即写入顺序**。
+ *
+ * 本用例锁定该结构：**只发工具结果（不含 CUSTOM）的一轮，store 也必须被写入**。
+ * 反证：把工具结果的派生退回 `App.tsx` 的 effect，本用例必须变红。
+ */
+describe('agent.ts：L6 工具结果来源在协议层同步写入（与 CUSTOM 同一时序）', () => {
+  it('轮次内的 recommend_products 工具结果 → 写入推荐 store', async () => {
+    resetRecoContent()
+    writeUsername('marla')
+
+    const payload = JSON.stringify({
+      message: '工具结果',
+      hasRecommendation: true,
+      products: [
+        {
+          id: 11,
+          name: '工具结果里的商品',
+          category: '测试',
+          price: 1,
+          emoji: '🎁',
+          reason: '因为你提到「测试」',
+        },
+      ],
+    })
+
+    const stub = installFetchStub({
+      [AGUI_ENDPOINT]: scriptRounds([
+        [
+          runStarted('t-l6', 'r-l6'),
+          textMessageStart('a-l6'),
+          toolCallStart('tc1', 'recommend_products', 'a-l6'),
+          toolCallArgs('tc1', '{}'),
+          toolCallEnd('tc1'),
+          toolCallResultEncoded('tc1', 'tr1', payload),
+          textMessageContent('a-l6', '好的'),
+          textMessageEnd('a-l6'),
+          runFinished('t-l6', 'r-l6'),
+        ],
+      ]),
+    })
+    restoreFetch = stub.restore
+
+    startSession({ model: MODEL_ITEM.id })
+    await runRound('推荐点东西')
+
+    expect(getRecoSnapshot()).not.toBeNull()
+  })
 })

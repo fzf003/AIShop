@@ -24,7 +24,8 @@ import { HttpAgent, type Message, type MiddlewareFunction, type RunAgentResult }
 import { filter, tap } from 'rxjs'
 
 import { dispatchApiFailure } from '../api/errors'
-import { setRecoFromCustomEvent } from './reco'
+import { setRecoFromCustomEvent, setRecoFromToolResult } from './reco'
+import { decodeToolResultContent } from './tools'
 
 /**
  * 顶部提示（Toast）出口。
@@ -242,6 +243,39 @@ function filterReasoningMessages(messages: readonly Message[]): Message[] {
   return messages.filter((message) => message.role !== REASONING_ROLE)
 }
 
+/**
+ * 「最近一次 `recommend_products` 的工具结果原文」（spec R9 第 1 段的数据来源）。
+ *
+ * **L6 起住在协议层**（原先在 `App.tsx`）：该来源必须与 `CUSTOM` **同一时序**写入推荐 store ——
+ * 否则「模型先调工具、宿主随后推 CUSTOM」这一真机次序下，更早的工具结果会顶掉更晚的 CUSTOM
+ * （论证见 `createAgent` 里 `onMessagesChanged` 的注释）。`App.tsx` 仍用它做**会话初值**注入。
+ *
+ * 口径（handoff-C8 遗留 1）：**必须是该工具自己的结果**，不能把别的工具结果（`get_cart_summary`
+ * 的纯文本等）喂给推荐面板；取**最新一条**（消息序最后），且**不在轮次之间清空** —— 清空会让
+ * 「解析失败保留上一次内容」（R9-3）退化成闪回占位。
+ *
+ * 宿主把工具结果字符串多编码了一层（`content === JSON.stringify(result)`，design §15.1 / D1）：
+ * 在**读取侧**恰好剥一次（`decodeToolResultContent`）。这是读取边界，**不改写** `messages`
+ * —— 持久化（R2）里仍是宿主原样送达的 `content`。只调用一次，勿链式。
+ */
+export function lastRecommendationContent(messages: readonly Message[]): string | null {
+  const callIds = new Set<string>()
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue
+    for (const call of message.toolCalls ?? []) {
+      if (call.function.name === 'recommend_products') callIds.add(call.id)
+    }
+  }
+
+  let content: string | null = null
+  for (const message of messages) {
+    if (message.role === 'tool' && callIds.has(message.toolCallId)) {
+      content = decodeToolResultContent(message.content)
+    }
+  }
+  return content
+}
+
 export function createAgent(config: AguiSessionConfig): AguiSession {
   const agent = new HttpAgent({
     url: AGUI_ENDPOINT,
@@ -324,11 +358,41 @@ export function createAgent(config: AguiSessionConfig): AguiSession {
 
   // L5：**接住订阅句柄** —— `dispose()` 靠它断开。返回值原先被丢弃，正是跨账户污染的根因：
   // 订阅闭包里有写**模块级全局**推荐 store 的 `setRecoFromCustomEvent`，断了会话也不会停。
+  /**
+   * 「已写进推荐 store 的工具结果原文」（L6）：避免每次消息变化都重复写同一个值
+   * （`messages` 在流式期间频繁变化，而工具结果整轮通常只出现一次）。
+   *
+   * 初值 = 恢复种子里的最后一条工具结果 —— 与 `App.tsx` 注入推荐 store 的初值同源，
+   * 这样「恢复期不把历史旧值当成新变化」，`agui.reco.{username}` 的恢复优先级不会被顶掉。
+   */
+  let lastToolReco = lastRecommendationContent(agent.messages)
+
+  /**
+   * 工具结果来源（L6）：**同步**派生并写入推荐 store。
+   *
+   * 为什么放在这里、而不是 `App.tsx` 的 `useEffect([messages])`：那个 effect 要等 React 重渲染后
+   * 才跑，而 `CUSTOM` 在 `onCustomEvent` 里是**同步**写的 —— 两源因此**不在同一时序上**。
+   * 「模型先调 `recommend_products`、宿主随后推 CUSTOM」这一真机次序下，更早的工具结果会顶掉
+   * 更晚的 CUSTOM，违反 spec R9-1「后到者胜」（`App.tsx` 的 `toolRecoRef` 注释已承认该风险，
+   * 当时只用「值比较」缓解 —— 两源内容相同时没事，**不同**时仍会顶掉）。
+   *
+   * `onMessagesChanged` 与 `onCustomEvent` 同为 SDK **同步**派发，搬到这里之后
+   * **到达顺序即写入顺序**。
+   */
+  const syncRecoFromToolResult = (): void => {
+    const content = lastRecommendationContent(agent.messages)
+    if (content === null || content === lastToolReco) return
+    lastToolReco = content
+    setRecoFromToolResult(content)
+  }
+
   const subscription = agent.subscribe({
     // 四个回调都以 `disposed` 自查开头 —— 销毁后本轮残留的派发（含中止引发的 `onRunFailed`）
     // 不得再向外传播。理由见 `disposed` 声明。
     onMessagesChanged: () => {
-      if (!disposed) notify()
+      if (disposed) return
+      syncRecoFromToolResult()
+      notify()
     },
     onNewMessage: () => {
       if (!disposed) notify()
