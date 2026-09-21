@@ -27,6 +27,11 @@ namespace AIShop.Service.Tools;
 /// 不走任何大模型（模型在进程内推理），故上述「零大模型调用」硬约束对两条入口依然成立；
 /// 未注册 / 检索失败时整体退化回关键词判据，见 <see cref="SearchRelatedAsync"/>。</para>
 ///
+/// <para><b>否定语境判据（D）</b>：推送入口在算负载**之前**先过 <see cref="IsNegatedIntent"/> ——
+/// 本轮消息明确表达「不买 / 不要 / 只是看看」时直接返回 <c>null</c>（面板保持上一次），
+/// 因为「我在陈述状态」与「我在找东西」在语义相似度上分不开（「健身」与健身商品天然高度相关）。
+/// 判据**只作用于推送入口**（工具入口 <see cref="RecommendProductsAsync"/> 契约不变）。</para>
+///
 /// 两条对外入口共用同一个私有 builder（{身份校验 → 对话关键词 → 语义命中 → 偏好关键词 → Build → 投影}），
 /// 因此**口径不可能分叉**：
 /// <list type="bullet">
@@ -71,6 +76,35 @@ public sealed class RecommendationToolProvider(
     internal const float SemanticMatchThreshold = 0.5f;
 
     /// <summary>
+    /// 否定线索（D）：本轮消息命中其中任意一条，即视为「用户表达了不买 / 不要 / 只是看看」的**备选**否定语境。
+    /// 只有同时**不含** <see cref="ShoppingContinuationCues"/> 时才真的拦（见 <see cref="IsNegatedIntent"/>）。
+    ///
+    /// <para>口径取舍（**宁可漏拦，不要误杀**）：误杀正常购物（用户问了却不响应）的代价大于漏拦（多推一次），
+    /// 故线索表偏保守——只有含义**明确**的短语才进表。特别注意：
+    /// ① 不收裸「不要」（会命中「我要**不要**买跑鞋」这类正常购物问句）与裸「看看」「不买吗」等歧义串；
+    /// ② 不收「不买X」式的**只排除某一项**的说法（那是继续找东西的信号，由
+    /// <see cref="ShoppingContinuationCues"/> 放行）。</para>
+    /// </summary>
+    private static readonly string[] NegationCues =
+    [
+        "不买", "不想买", "不想要", "不用买", "不打算买", "没打算买", "暂时不买", "不急着买",
+        "只是看看", "随便看看", "看看而已", "没什么想买", "没有想买", "不要了", "不需要",
+    ];
+
+    /// <summary>
+    /// 「仍在找东西」的续说信号（D）：出现其中任意一条，<see cref="IsNegatedIntent"/> 就**不拦**
+    /// （否定只是排除某一项 / 否定之后又提了新需求）。
+    ///
+    /// <para>收录的是**显式求新**的说法：「别的 / 其他 / 还有 / 有没有 / 推荐 / 有什么 / 哪款 / 哪个」。
+    /// 判据为「含有即放行」——放行方向正是「宁可漏拦」所偏好的那一侧。同理**不收**裸「什么」
+    /// （会命中否定线索「没什么想买」里的「什么」，把本该拦的句子放行）。</para>
+    /// </summary>
+    private static readonly string[] ShoppingContinuationCues =
+    [
+        "别的", "其他", "其它", "还有", "有没有", "推荐", "有什么", "哪款", "哪个",
+    ];
+
+    /// <summary>
     /// 偏好关键词缓存的 TTL。记忆写入是**轮后异步**（MemoryContextProvider 后台 AddAsync），
     /// 主动失效无收益；TTL 到期自然回源。
     /// </summary>
@@ -106,7 +140,8 @@ public sealed class RecommendationToolProvider(
     /// <list type="number">
     /// <item>身份缺失返回 <c>null</c> ——**不**复用 <see cref="IdentityMissingPayload"/>，
     /// 「无法确定用户身份」是说明性文案、不是推荐，推给面板会让面板被无意义内容覆盖（spec R4 场景 2）。</item>
-    /// <item>门控（<see cref="ShouldPush"/>）不通过返回 <c>null</c>，由调用方按「不推送」处理。</item>
+    /// <item>门控不通过返回 <c>null</c>，由调用方按「不推送」处理——门控 = 否定语境短路
+    /// （<see cref="IsNegatedIntent"/>，D）+ 并集判据（<see cref="ShouldPush"/>，B1）。</item>
     /// <item>返回 <see cref="JsonElement"/> 而非字符串——<c>CUSTOM</c> 事件的 payload 形状是**对象**。</item>
     /// </list>
     /// 本入口**不改变**<see cref="RecommendProductsAsync"/> 的返回值与 schema，也**不新增**任何被禁依赖
@@ -117,6 +152,11 @@ public sealed class RecommendationToolProvider(
     public async Task<JsonElement?> TryBuildPushPayloadAsync(string? query, CancellationToken ct = default)
     {
         if (currentUserAccessor.CurrentUser is null) return null;
+
+        // D（否定语境）：本轮明确「不买 / 不要 / 只是看看」→ 不推，面板保持上一次内容
+        // （与 spec R2「闲聊轮保持上一次」同口径）。短路在语义检索之前：既省一次检索，
+        // 也保证这类轮**绝不**因商品相关性（如「健身」→ 健身商品天然高相似度）被带出场。
+        if (IsNegatedIntent(query)) return null;
 
         var semanticHits = QualifiedHits(await SearchRelatedAsync(query, ct));
         var payload = await BuildPayloadAsync(query, semanticHits, ct);
@@ -145,6 +185,38 @@ public sealed class RecommendationToolProvider(
         IReadOnlyCollection<ProductSearchHit> semanticHits,
         RecommendationPayload payload)
         => payload.Products.Count > 0 && (currentKeywords.Count > 0 || semanticHits.Count > 0);
+
+    /// <summary>
+    /// 否定语境判据（D，纯函数，独立可测）：本轮消息**明确表达「不买 / 不要 / 只是看看」**时为 <c>true</c>。
+    ///
+    /// <para><b>要解决的问题（盘点 L7）</b>：语义检索分不出「我在陈述状态」与「我在找东西」——
+    /// 「我最近在健身，不过今天不买」里的「健身」与健身商品天然高度相关，光靠相似度拦不住，会误推。
+    /// 故在门控上叠加本条：命中否定线索就**不推**（<see cref="TryBuildPushPayloadAsync"/> 直接返回
+    /// <c>null</c>，面板保持上一次）。</para>
+    ///
+    /// <para><b>必须区分「否定后无新需求」与「否定只是排除某一项」（否则就是打地鼠）</b>：
+    /// 「这个不买，有别的推荐吗」「不买跑鞋了，有没有别的鞋」都在**购物**，必须照推。
+    /// 判据因此是两步：<b>（命中否定线索）且（不含 <see cref="ShoppingContinuationCues"/> 中的续说信号）</b>。
+    /// 任何续说信号都放行。</para>
+    ///
+    /// <para><b>口径：宁可漏拦，不要误杀</b>——误杀（用户问了却不响应）的代价大于漏拦（多推一次），
+    /// 故只要句子有歧义就放行。已知的**拦不住**（会照推）的句式：
+    /// ① 否定不出现在线索表里的说法（如「今天不下单」「就不买了」「先不加购」）；
+    /// ② 否定之后用**非续说信号**提出新需求的（如「不需要耳机了，想看看音箱」——「想看看」不在续说表内）；
+    /// ③ 否定与需求在同一分句且无线索词的（如「这个不合适」）。以上均属**有意**接受（见 handoff-D 取舍说明），
+    /// 不为此继续加特例（那会开始误杀正常购物）。</para>
+    ///
+    /// <para>空 / 空白输入返回 <c>false</c>（无消息 = 无否定语境，交由关键词 / 语义门控处置）。</para>
+    /// </summary>
+    /// <param name="query">本轮用户消息（自然语言，可为空）。</param>
+    internal static bool IsNegatedIntent(string? query)
+        => !string.IsNullOrWhiteSpace(query)
+            && ContainsAny(query, NegationCues)
+            && !ContainsAny(query, ShoppingContinuationCues);
+
+    /// <summary>文本是否含 <paramref name="cues"/> 中任意一条（忽略大小写；线索均为中文短语，大小写仅为稳妥）。</summary>
+    private static bool ContainsAny(string text, string[] cues)
+        => cues.Any(cue => ContainsIgnoreCase(text, cue));
 
     /// <summary>
     /// 推荐负载构建：工具入口与推送入口的**唯一**口径来源，五步原样搬移
@@ -179,9 +251,15 @@ public sealed class RecommendationToolProvider(
         var basisKeywords = currentKeywords;
         var recommendation = recommendationEngine.Build(basisKeywords, prefKeywords);
 
-        // 内容来源第二层（L8）：关键词路径选不出商品、但语义有命中 → 用命中商品的类别反推关键词兜底。
-        // 反推词即本轮的「依据」，故 reason 也按它派生（否则语义路径的商品 reason 恒为空串、标签缺失）。
-        if (recommendation.Recommended.Count == 0 && semanticHits.Count > 0)
+        // 内容来源第二层（L8）：关键词路径选不出商品、**或本轮压根没命中关键词**时，
+        // 只要语义有命中，就用命中商品的类别反推关键词兜底。
+        //
+        // 【为什么必须带上 currentKeywords.Count == 0 这一支】只判「选不出商品」是不够的：
+        // 关键词为空时 Build 会用**历史偏好**去选，偏好非空就照样能选出商品（Count > 0），
+        // 兜底因此被跳过、内容全被偏好带跑。实测：「T恤有吗」关键词为空、语义命中那件有机棉 T 恤，
+        // 却推出一水健身类商品（偏好驱动），正是这条漏判所致。
+        // 而「本轮关键词为空」恰恰意味着用户**没**给出明确品类依据，此时不该让偏好主导内容。
+        if ((currentKeywords.Length == 0 || recommendation.Recommended.Count == 0) && semanticHits.Count > 0)
         {
             basisKeywords = DeriveKeywords(semanticHits);
             recommendation = recommendationEngine.Build(basisKeywords, prefKeywords);

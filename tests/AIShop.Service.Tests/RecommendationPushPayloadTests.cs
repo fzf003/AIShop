@@ -31,6 +31,9 @@ namespace AIShop.Service.Tests;
 /// <para>B1 追加第四段：<b>语义门控与语义反推内容</b>（修 L8「T恤有吗」漏推）——全部用替身
 /// <see cref="IProductSemanticSearch"/> 驱动（不依赖 bge 模型文件，确定性可进 CI）：
 /// 语义命中放行 / 闲聊不放行 / 关键词路径优先不漂移 / 检索异常降级为关键词门控 / 未注入时与改动前逐字节一致。</para>
+///
+/// <para>D 追加第五段：<b>否定语境门控</b>（修 L7「我最近在健身，不过今天不买」误推）——
+/// 纯函数 <c>IsNegatedIntent</c> 的判定表 + 「不买只排除某一项、仍在找东西」的**误伤防护**用例。</para>
 /// </summary>
 public sealed class RecommendationPushPayloadTests
 {
@@ -393,6 +396,131 @@ public sealed class RecommendationPushPayloadTests
             BaselineQueryHit,
             Assert.IsType<JsonElement>(await harness.Provider.TryBuildPushPayloadAsync(KeywordMessage)).GetRawText());
         Assert.Null(await harness.Provider.TryBuildPushPayloadAsync(TShirtMessage));
+    }
+
+    // ---------- ⑤ D：否定语境门控（修 L7 误推）----------
+    //
+    // 要修的 defect（真机实测 L7）：「我最近在健身，不过今天不买」→ 语义/关键词都因「健身」命中
+    // 而照推健身类商品。语义检索分不出「我在陈述状态」与「我在找东西」，故在门控上叠加否定语境判据。
+    // 同时必须**不误伤**「否定只是排除某一项、仍在找东西」的说法（下表的后两条）。
+
+    /// <summary>「陈述状态 + 明确不买」：本轮不推（D 要修的那条）。</summary>
+    private const string DeclineMessage = "我最近在健身，不过今天不买";
+
+    /// <summary>否定只排除某一项、仍在要别的（**误伤防护**，必须照推）。</summary>
+    private const string DeclineOneAskOthersMessage = "这个不买，有别的推荐吗";
+
+    /// <summary>同上，换一个说法（**误伤防护**，必须照推）。</summary>
+    private const string DeclineRunShoesAskOthersMessage = "不买跑鞋了，有没有别的鞋";
+
+    /// <summary>
+    /// 否定语境判据的**纯函数**表：拦得住哪些、哪些**有意**放行（宁可漏拦不要误杀）。
+    /// </summary>
+    [Theory]
+    [InlineData(DeclineMessage, true)]                    // 陈述状态 + 今天不买 → 拦（L7 修复点）
+    [InlineData("随便看看，没什么想买的", true)]              // 「只是看看」类 → 拦
+    [InlineData("谢谢，不用买了", true)]                     // 「不用买」→ 拦
+    [InlineData(DeclineOneAskOthersMessage, false)]       // 排除某一项 + 求新（「别的」）→ 放行（误伤防护）
+    [InlineData(DeclineRunShoesAskOthersMessage, false)]  // 排除某一项 + 求新（「有没有」）→ 放行（误伤防护）
+    [InlineData("我想买跑步鞋", false)]                     // 正常购物 → 放行（回归）
+    [InlineData("你好呀", false)]                          // 闲聊 → 放行（由关键词/语义门控拦，不在本条职责内）
+    [InlineData("我要不要买跑鞋", false)]                    // 裸「不要」不收 → 「要不要买」不得被误杀
+    [InlineData("今天先不下单", false)]                      // 已知漏拦（线索表未收「不下单」）——有意接受，见 handoff-D
+    [InlineData(null, false)]                             // 无消息 = 无否定语境
+    [InlineData("", false)]
+    public void IsNegatedIntent_ShouldOnlyMatchExplicitDeclineContexts(string? query, bool expected)
+        => Assert.Equal(expected, RecommendationToolProvider.IsNegatedIntent(query));
+
+    /// <summary>
+    /// 「我最近在健身，不过今天不买」→ **不推**（面板保持上一次）。
+    ///
+    /// <para><b>正锚点</b>：同一 provider、只删掉否定分句的「我最近在健身」**会推**——证明该轮确有推荐依据
+    /// （「健身」是白名单关键词，真机上语义同样高相关），「不推」的唯一原因是叠加的否定语境判据，
+    /// 不是「本来就没东西可推」。</para>
+    /// </summary>
+    [Fact]
+    public async Task ShouldNotPushDeclineRound_WhenMessageSaysNotBuyingToday()
+    {
+        using var harness = new Harness();
+        harness.Accessor.SetCurrentUser(TestUser);
+
+        // 正锚点：去掉「不过今天不买」后照推（关键词「健身」命中）——本条即红端「误推」的等价复现
+        var withoutDecline = await harness.Provider.TryBuildPushPayloadAsync("我最近在健身");
+        Assert.NotNull(withoutDecline);
+
+        // D：加上否定分句 → 拦
+        Assert.Null(await harness.Provider.TryBuildPushPayloadAsync(DeclineMessage));
+        Assert.True(RecommendationToolProvider.IsNegatedIntent(DeclineMessage));
+    }
+
+    /// <summary>
+    /// 误伤防护 ①：「这个不买，有别的推荐吗」→ **照推**（用户只是在排除某一项，仍在找东西）。
+    ///
+    /// <para>语义替身给出一条达阈值命中，使该轮**本来就能推**——若否定判据写成「含『不买』即拦」，
+    /// 本条必红（正是「打地鼠」式实现会误杀的正常购物轮）。</para>
+    /// </summary>
+    [Fact]
+    public async Task ShouldStillPush_WhenDeclinesOneItemButAsksForAlternatives()
+    {
+        var semantic = new StubSemanticSearch([Hit(2, 0.72, name: "有机棉T恤", category: "服装")]);
+        using var harness = new Harness(semanticSearch: semantic);
+        harness.Accessor.SetCurrentUser(TestUser);
+
+        var push = await harness.Provider.TryBuildPushPayloadAsync(DeclineOneAskOthersMessage);
+        var payload = Assert.IsType<JsonElement>(push);
+
+        // 语义检索确实被走到（未被否定判据短路），且内容含命中商品 #2（反推「服装」兜底）
+        Assert.Equal(new[] { DeclineOneAskOthersMessage }, semantic.Queries);
+        var products = payload.GetProperty("products").EnumerateArray().ToList();
+        Assert.Contains(products, product => product.GetProperty("id").GetInt32() == 2);
+        Assert.False(RecommendationToolProvider.IsNegatedIntent(DeclineOneAskOthersMessage));
+    }
+
+    /// <summary>
+    /// 误伤防护 ②：「不买跑鞋了，有没有别的鞋」→ **照推**（关键词路径命中「跑鞋」，不看语义）。
+    /// </summary>
+    [Fact]
+    public async Task ShouldStillPush_WhenDeclinesRunShoesButAsksForAnotherPair()
+    {
+        using var harness = new Harness();
+        harness.Accessor.SetCurrentUser(TestUser);
+
+        var push = await harness.Provider.TryBuildPushPayloadAsync(DeclineRunShoesAskOthersMessage);
+        var payload = Assert.IsType<JsonElement>(push);
+
+        Assert.True(payload.GetProperty("hasRecommendation").GetBoolean());
+        Assert.NotEmpty(payload.GetProperty("products").EnumerateArray());
+        Assert.False(RecommendationToolProvider.IsNegatedIntent(DeclineRunShoesAskOthersMessage));
+    }
+
+    /// <summary>正常购物意图不受影响（回归）：照推，且商品列表非空。</summary>
+    [Fact]
+    public async Task ShouldPushPurchaseIntentRound_WhenIntentIsExplicit()
+    {
+        using var harness = new Harness();
+        harness.Accessor.SetCurrentUser(TestUser);
+
+        var push = await harness.Provider.TryBuildPushPayloadAsync(KeywordMessage);
+        var payload = Assert.IsType<JsonElement>(push);
+
+        Assert.True(payload.GetProperty("hasRecommendation").GetBoolean());
+        Assert.NotEmpty(payload.GetProperty("products").EnumerateArray());
+        // 且与工具入口同源同内容（同一 builder 的唯一证据）
+        Assert.Equal(
+            await harness.Provider.RecommendProductsAsync(KeywordMessage),
+            payload.GetRawText());
+        Assert.False(RecommendationToolProvider.IsNegatedIntent(KeywordMessage));
+    }
+
+    /// <summary>闲聊轮仍不推（回归，spec R2 场景 1）；本条由「关键词/语义皆无」拦，不由否定判据拦。</summary>
+    [Fact]
+    public async Task ShouldNotPushChatRound_WhenThereIsNoDeclineOrIntent()
+    {
+        using var harness = new Harness(memories: [Preference("用户喜欢跑步")]);
+        harness.Accessor.SetCurrentUser(TestUser);
+
+        Assert.Null(await harness.Provider.TryBuildPushPayloadAsync(ChitChatMessage));
+        Assert.False(RecommendationToolProvider.IsNegatedIntent(ChitChatMessage));
     }
 
     // ---------- 夹具 ----------
