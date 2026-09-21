@@ -88,6 +88,31 @@ public sealed class AguiCorsTests
         Assert.NotEqual("*", response.Headers.GetValues(AllowOriginHeader).Single());
     }
 
+    /// <summary>
+    /// L12：CORS 的**作用面必须与 spec 声明一致** —— spec 只声明覆盖 <c>GET /models</c>、AG-UI 端点
+    /// （<c>/</c>）、<c>/products</c>、<c>/cart*</c>；声明外的路径（此处的 <c>/health</c>，以及
+    /// <c>/devui</c>、<c>/v1/*</c>）不得获得跨源放行头。
+    ///
+    /// 修复前用全站中间件 <c>app.UseCors(PolicyName)</c>，白名单 origin 连 DevUI / OpenAI wire 都被放行，
+    /// 属契约外暴露面。
+    ///
+    /// 反证：把 <c>Program.cs</c> 的 <c>UseWhen</c> 换回全站 <c>UseCors</c>，本用例必须变红。
+    /// </summary>
+    [Fact]
+    public async Task PathsOutsideDeclaredScope_DoNotGetCorsHeaders()
+    {
+        using var factory = StartFactory(AllowedOrigin);
+        using var client = factory.CreateClient();
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/health");
+        request.Headers.Add("Origin", AllowedOrigin);
+        using var response = await client.SendAsync(request);
+
+        Assert.False(
+            response.Headers.Contains(AllowOriginHeader),
+            "spec 未声明覆盖 /health，该路径不得携带 Access-Control-Allow-Origin（L12）");
+    }
+
     [Fact]
     public async Task GetModels_OriginNotInAllowList_IsNotAllowed()
     {

@@ -157,10 +157,15 @@ try
     await AguiServiceCollectionExtensions.InitializeAsync(app.Services);
 
     // T4 CORS 中间件（仅在配置了有效白名单时注册，design §6.3）：置于 username 注入中间件【之前】——
-    // 预检 OPTIONS 在 CORS 中间件内结束（返回 204），不会被读请求体的中间件额外处理；两个端点（"/" 与 /models）
-    // 由同一命名策略覆盖。用中间件式命名策略而非端点级 [EnableCors]：后者依赖路由元数据顺序，易在自建中间件旁静默失效。
+    // 预检 OPTIONS 在 CORS 中间件内结束（返回 204），不会被读请求体的中间件额外处理。
+    // 【L12】再套一层路径闸门（UseWhen）：命名策略只作用于 spec 声明的 4 类路径
+    // （GET /models、AG-UI 端点 "/"、/products、/cart*），不像此前那样全站生效 ——
+    // 否则白名单 origin 连 /devui、/v1/*、/health 都会被跨源放行（契约外暴露面）。
+    // 未启用 CORS 时整段短路，spec「默认不注册 / 零开销」不受影响。
     if (corsEnabled)
-        app.UseCors(AguiCors.PolicyName);
+        app.UseWhen(
+            context => AguiCors.IsCorsScopedPath(context.Request.Path),
+            branch => branch.UseCors(AguiCors.PolicyName));
 
     // T5 username 注入中间件（置于 MapAGUIServer 之前）：AGUI forwarded metadata(username) → ICurrentUserAccessor（缺省 steve）
     app.UseAguiUsernameForwarding();

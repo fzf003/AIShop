@@ -1,3 +1,5 @@
+using Microsoft.AspNetCore.Http;
+
 namespace AIShop.AguiHost;
 
 /// <summary>
@@ -16,7 +18,11 @@ namespace AIShop.AguiHost;
 /// </summary>
 internal static class AguiCors
 {
-    /// <summary>命名策略名：中间件式 <c>UseCors(PolicyName)</c>（全站生效），不用端点级 <c>[EnableCors]</c>。</summary>
+    /// <summary>
+    /// 命名策略名。用于「全局中间件 + 路径闸门」（<c>UseWhen</c> + <c>UseCors(PolicyName)</c>，
+    /// 作用面见 <see cref="IsCorsScopedPath"/>），**不用**端点级 <c>[EnableCors]</c> ——
+    /// 后者依赖路由元数据与中间件顺序，易在自建中间件旁静默失效。
+    /// </summary>
     internal const string PolicyName = "AguiClient";
 
     /// <summary>白名单配置键。键缺失 / 空数组 / 全为空白项 = 不启用 CORS（默认态）。</summary>
@@ -46,6 +52,22 @@ internal static class AguiCors
 
         return true;
     }
+
+    /// <summary>
+    /// CORS 作用域判据（L12）：请求路径是否落在 **spec 声明覆盖**的范围内。
+    ///
+    /// <para>spec（<c>agui-client-support</c> R7）只声明覆盖 <c>GET /models</c>、AG-UI 端点（<c>/</c>）、
+    /// <c>/products</c> 与 <c>/cart*</c>。此前用全站 <c>app.UseCors(PolicyName)</c>，白名单 origin
+    /// 连带拿到 <c>/devui</c>、<c>/v1/*</c>、<c>/health</c> 的跨源放行与任意方法 / 头 —— 契约外暴露面。</para>
+    ///
+    /// <para>根路径 <c>/</c> 必须**精确**比对：<c>StartsWithSegments("/")</c> 对任何路径都为真，
+    /// 那样等于没有闸门。</para>
+    /// </summary>
+    internal static bool IsCorsScopedPath(PathString path)
+        => path == "/"
+            || path.StartsWithSegments("/models")
+            || path.StartsWithSegments("/products")
+            || path.StartsWithSegments("/cart");
 
     /// <summary>读 <see cref="ConfigKey"/>，逐项 Trim 后过滤空白项（配置里的空串 / 纯空白项不作数）。</summary>
     private static string[] ReadAllowedOrigins(IConfiguration config)
