@@ -280,8 +280,11 @@ internal static class AguiUsernameForwarder
             return true;
 
         context.Response.StatusCode = StatusCodes.Status404NotFound;
+        // L21：文案取**常量**（`AguiClientIdentity` 是它在 AguiHost 内的唯一持有方）。
+        // 该 404 由本中间件产出，端点的同名分支只作防御性兜底 —— 两处若各写一份字面量，
+        // 「同一失败语义只有一个文案来源」就只是注释里的一句空话。
         await context.Response.WriteAsJsonAsync(
-            new { detail = "User not found" },
+            new { detail = AguiClientIdentity.UserNotFoundDetail },
             context.RequestAborted);
         return false;
     }

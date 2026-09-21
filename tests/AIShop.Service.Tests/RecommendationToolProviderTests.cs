@@ -167,6 +167,11 @@ public sealed class RecommendationToolProviderTests
         Assert.True(properties.TryGetProperty("query", out _), schema);
         // 方法组注册（非 lambda）才能保住默认值 → query 不是 required（lambda 会让模型不传时调用失败）
         Assert.False(IsRequired(root, "query"), schema);
+
+        // L19：`CancellationToken` 是 AIFunctionFactory 的**约定参数**（由框架注入），不得进 schema ——
+        // 否则模型会被要求填一个它根本无法提供的参数。
+        Assert.False(properties.TryGetProperty("ct", out _), schema);
+        Assert.Single(properties.EnumerateObject());
     }
 
     // ---------- 偏好进入推荐（spec R11 场景 1）----------
@@ -317,8 +322,32 @@ public sealed class RecommendationToolProviderTests
         Assert.Equal(["跑步", "耳机", "健身", "咖啡", "瑜伽"], keywords);
     }
 
-    // ---------- 延迟预算（design §8.5 验收②）----------
+    /// <summary>
+    /// L19：工具入口必须把**调用方的 token 透传下去**，而不是硬用 <c>CancellationToken.None</c>
+    /// —— 否则客户端断开后，工具路径那条偏好全表枚举仍会跑完。
+    ///
+    /// 断言「透传」而非「抛异常」：本 Harness 的记忆存储是替身，无论 ct 是否取消都会照常返回，
+    /// 构造不出「抛」的差异；而「store 收到的是不是调用方那个 token」是同一缺陷的直接证据。
+    ///
+    /// 反证：把 <c>RecommendProductsAsync</c> 里那两个实参改回 <c>CancellationToken.None</c>，
+    /// 本用例必须变红（收到的会是 <c>None</c>）。
+    /// </summary>
+    [Fact]
+    public async Task RecommendProducts_PassesCallerCancellationTokenToMemoryStore()
+    {
+        using var harness = new Harness(memories: [Preference("用户喜欢跑步")]);
+        harness.Accessor.SetCurrentUser(TestUser);
 
+        using var cts = new CancellationTokenSource();
+
+        await harness.Provider.RecommendProductsAsync("我想买跑步鞋", cts.Token);
+
+        // 偏好缓存未命中 → 直读记忆存储；这一步必须拿到调用方的 token。
+        // `GetAllAsync` 返回 IAsyncEnumerable（Received 的断言在调用时即生效，不消费序列）。
+        _ = harness.Store.Received(1).GetAllAsync(Arg.Any<MemoryFilter?>(), cts.Token);
+    }
+
+    // ---------- 延迟预算（design §8.5 验收②）----------
     [Fact]
     public async Task ShouldStayWithinLatencyBudget_WhenPreferenceCacheIsWarm()
     {

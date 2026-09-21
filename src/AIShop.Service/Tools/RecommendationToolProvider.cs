@@ -122,14 +122,20 @@ public sealed class RecommendationToolProvider(
     /// </summary>
     /// <param name="query">用户当前想问的内容（自然语言，可为空；空/不匹配时退化为偏好 + 精选兜底）。</param>
     public async Task<string> RecommendProductsAsync(
-        [Description("用户当前想问的内容（自然语言），可为空")] string? query = null)
+        [Description("用户当前想问的内容（自然语言），可为空")] string? query = null,
+        CancellationToken ct = default)
     {
         // 身份缺失 → 安全降级（spec R10 场景 3）
         if (currentUserAccessor.CurrentUser is null)
             return JsonSerializer.Serialize(IdentityMissingPayload, JsonOptions);
 
-        var semanticHits = QualifiedHits(await SearchRelatedAsync(query, CancellationToken.None));
-        var payload = await BuildPayloadAsync(query, semanticHits, CancellationToken.None);
+        // L19：两入口的取消语义必须对称。原先此处硬传 `CancellationToken.None`，而推送入口
+        // （TryBuildPushPayloadAsync）是透传 ct 的 —— 客户端断开后，工具路径那条**偏好全表枚举**
+        // （ReadPreferenceKeywordsAsync 的 await foreach）仍会跑完；且它未被缓存命中时每次都要遍历。
+        // 加 ct 参数由框架注入（CancellationToken 是 AIFunctionFactory 的约定参数，不进工具 schema），
+        // 不改变工具的对外契约。
+        var semanticHits = QualifiedHits(await SearchRelatedAsync(query, ct));
+        var payload = await BuildPayloadAsync(query, semanticHits, ct);
         return JsonSerializer.Serialize(payload ?? IdentityMissingPayload, JsonOptions);
     }
 
@@ -184,7 +190,14 @@ public sealed class RecommendationToolProvider(
         IReadOnlyCollection<string> currentKeywords,
         IReadOnlyCollection<ProductSearchHit> semanticHits,
         RecommendationPayload payload)
-        => payload.Products.Count > 0 && (currentKeywords.Count > 0 || semanticHits.Count > 0);
+    {
+        // L17：显式守卫。`payload` 是非空注解参数，但 C# 的 null 注解只是警告 —— 传 null 时
+        // 原先会在 `payload.Products` 处抛 NRE（栈里看不出是「谁传了 null」）。本方法 internal、
+        // 当前唯一调用点有前置守卫，故不影响任何既有路径。
+        ArgumentNullException.ThrowIfNull(payload);
+
+        return payload.Products.Count > 0 && (currentKeywords.Count > 0 || semanticHits.Count > 0);
+    }
 
     /// <summary>
     /// 否定语境判据（D，纯函数，独立可测）：本轮消息**明确表达「不买 / 不要 / 只是看看」**时为 <c>true</c>。
@@ -345,8 +358,10 @@ public sealed class RecommendationToolProvider(
         [
             // 方法组注册（非 lambda）：保留 RecommendProductsAsync 的参数默认值，query 才是**可选**参数。
             // lambda 注册会丢失默认值 → schema 把 query 标成 required → 模型不传时调用失败。
+            // L19：委托类型带上 CancellationToken —— `AIFunctionFactory` 对它是**约定参数**（由框架注入、
+            // 不进工具 schema），签名对齐后方法组注册仍成立，上面的默认值语义不受影响。
             AIFunctionFactory.Create(
-                (Func<string?, Task<string>>)RecommendProductsAsync,
+                (Func<string?, CancellationToken, Task<string>>)RecommendProductsAsync,
                 "recommend_products",
                 "结合当前对话与用户偏好返回推荐商品，供推荐面板展示。调用后用自然语言向用户介绍推荐结果，不要输出 JSON、不要输出商品编号。")
         ];

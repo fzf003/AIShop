@@ -55,8 +55,13 @@ internal sealed class RecommendationPushAgent : DelegatingAIAgent
     /// <param name="inner">内层 agent（= 宿主 keyed factory 的 <c>AGUIShoppingAgent.Create</c> 产物）。</param>
     /// <param name="recommendationTools">推荐负载提供者（S2 的推送入口，同一 builder 保证与工具结果同口径）。</param>
     internal RecommendationPushAgent(AIAgent inner, RecommendationToolProvider recommendationTools)
-        : base(inner)
+        : base(inner ?? throw new ArgumentNullException(nameof(inner)))
     {
+        // L17：显式守卫。参数是非空注解的，但注解只是警告；传 null 会让本类在**第一次用到它**时
+        // （流末推送）才炸，栈里看不出是构造时传错了。当前生产路径经 GetRequiredService 传入，
+        // 故不影响任何既有行为。
+        ArgumentNullException.ThrowIfNull(recommendationTools);
+
         _recommendationTools = recommendationTools;
     }
 

@@ -113,7 +113,7 @@ export default function RecoPanel({ content, onAdd }: RecoPanelProps) {
       <div className="reco-hd">
         <h4>为你推荐</h4>
         <p>
-          结合对话与偏好 · 每轮自动更新
+          结合对话与偏好 · 有相关内容时更新
         </p>
       </div>
 
