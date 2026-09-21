@@ -55,6 +55,15 @@
   border-bottom-left-radius: 6px;
 }
 
+/*
+ * 等待态占位气泡（design §16）：结构与 assistant 气泡一致（复用 `row a` / `bub` 的白卡底与圆角），
+ * 仅把文字降到弱文本色（复用 `.welcome` / 流式光标同一令牌 `--ink-3`）以示意「尚未产出内容」。
+ * 不新增视觉体系、不引入动画。
+ */
+.row.a .bub.thinking {
+  color: var(--ink-3);
+}
+
 /* 欢迎语（空对话）：浅灰胶囊，横向居中，位于消息区顶部 */
 .welcome {
   align-self: center;

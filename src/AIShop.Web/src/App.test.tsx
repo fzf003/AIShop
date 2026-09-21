@@ -33,6 +33,7 @@ import { act, fireEvent, render, screen, userEvent, waitFor } from './test/rende
 import {
   type SseEvent,
   createSseResponse,
+  customEvent,
   encodeSseBody,
   runFinished,
   runStarted,
@@ -251,6 +252,135 @@ describe('流式渲染与单轮运行约束（R7）', () => {
   })
 })
 
+describe('等待态占位气泡（design §16）', () => {
+  /**
+   * 三条用例覆盖交互决定的全部时机：
+   * 1. 点发送即出现（无延迟）；
+   * 2. 首个文本增量到达 → 占位消失、由真实流式气泡接替；
+   * 3. 轮次结束（`RUN_FINISHED`）→ 占位不残留（含「本轮无任何文本输出」的边界）。
+   *
+   * 占位是**纯 UI 占位、不是消息**：第 4 条另证它不进入 `messages`（不持久化、不进请求体）。
+   */
+  function placeholderOf(container: HTMLElement): Element | null {
+    return container.querySelector('.row.a .bub.thinking')
+  }
+
+  it('点发送后立即出现「正在思考中…」占位，且位于对话区末尾（不进入消息序列）', async () => {
+    // 响应体一直挂着、一个事件都不发：把「首字未到」的窗口稳定住，便于断言。
+    const stream = openSseStream()
+    stubFetch({ '/models': MODELS, '/agui': () => stream.response })
+
+    const { container } = render(<App />)
+    await enterMain(/Marla/, /MiMo/)
+    expect(placeholderOf(container)).toBeNull()
+
+    await userEvent.type(screen.getByLabelText('消息'), '你好')
+    await userEvent.click(sendButton())
+
+    // 点发送即出现（不需要任何服务端事件）
+    await waitFor(() => {
+      expect(placeholderOf(container)?.textContent).toBe('正在思考中…')
+    })
+
+    // 位置 = 对话区末尾：`.msgs` 的**最后**一个子元素（那一行）里就是这条占位气泡
+    const msgs = container.querySelector('.msgs')
+    expect(msgs?.lastElementChild?.lastElementChild).toBe(placeholderOf(container))
+
+    // 纯 UI 占位、不是消息：用户消息之后没有新增消息，history 仍只有那一条用户消息。
+    await waitFor(() => {
+      expect(sendButton().disabled).toBe(true)
+    })
+    const stored = JSON.parse(
+      globalThis.localStorage.getItem(STORAGE_KEYS.messages('marla')) ?? '[]',
+    ) as Message[]
+    expect(stored.map((m) => m.role)).toEqual(['user'])
+    expect(JSON.stringify(stored)).not.toContain('正在思考中')
+
+    // 收尾：关闭挂起的流（本轮没有真实回复内容，仅用于结束运行态）。
+    await act(async () => {
+      stream.close()
+    })
+  })
+
+  it('首个文本增量到达 → 占位消失、由真实内容接替', async () => {
+    const stream = openSseStream()
+    stubFetch({ '/models': MODELS, '/agui': () => stream.response })
+
+    const { container } = render(<App />)
+    await enterMain(/Marla/, /MiMo/)
+
+    await userEvent.type(screen.getByLabelText('消息'), '你好')
+    await userEvent.click(sendButton())
+    await waitFor(() => {
+      expect(placeholderOf(container)).not.toBeNull()
+    })
+
+    // 只发「文本消息开始」（正文仍为空）→ 仍算未开字，占位不动
+    await act(async () => {
+      stream.send([runStarted('thread-1', 'run-1'), textMessageStart('assistant-1')])
+    })
+    await waitFor(() => {
+      expect(sendButton().disabled).toBe(true)
+    })
+    expect(placeholderOf(container)).not.toBeNull()
+
+    // 首个文本增量到达 → 占位消失、真实气泡接替（一个真气泡，且不是占位类）
+    await act(async () => {
+      stream.send([textMessageContent('assistant-1', '你好呀')])
+    })
+    await waitFor(() => {
+      expect(placeholderOf(container)).toBeNull()
+    })
+    expect(container.querySelector('.row.a .bub')?.textContent).toBe('你好呀')
+    expect(container.querySelectorAll('.row.a .bub:not(.thinking)')).toHaveLength(1)
+
+    await act(async () => {
+      stream.send([textMessageEnd('assistant-1'), runFinished('thread-1', 'run-1')])
+      stream.close()
+    })
+  })
+
+  it('本轮无任何文本输出（只推 CUSTOM、只调工具）→ 收尾时占位不残留', async () => {
+    const stream = openSseStream()
+    stubFetch({ '/models': MODELS, '/agui': () => stream.response })
+
+    const { container } = render(<App />)
+    await enterMain(/Marla/, /MiMo/)
+
+    await userEvent.type(screen.getByLabelText('消息'), '推荐点东西')
+    await userEvent.click(sendButton())
+
+    // 全程只推 CUSTOM 事件：没有任何文本 → 占位应一直显示（判据「还没开字」成立）
+    await act(async () => {
+      stream.send([
+        runStarted('thread-1', 'run-1'),
+        customEvent('recommendation', { message: '为你精选', products: [] }),
+      ])
+    })
+    await waitFor(() => {
+      expect(placeholderOf(container)).not.toBeNull()
+    })
+
+    // `RUN_FINISHED` 到达 → `isRunning` 变假 → 占位无条件消失，不残留
+    await act(async () => {
+      stream.send([runFinished('thread-1', 'run-1')])
+      stream.close()
+    })
+
+    await waitFor(() => {
+      expect(sendButton().disabled).toBe(false)
+    })
+    expect(placeholderOf(container)).toBeNull()
+    expect(container.querySelector('.row.a')).toBeNull()
+
+    // 该轮同样没有把占位写进历史
+    const stored = JSON.parse(
+      globalThis.localStorage.getItem(STORAGE_KEYS.messages('marla')) ?? '[]',
+    ) as Message[]
+    expect(stored.map((m) => m.role)).toEqual(['user'])
+  })
+})
+
 describe('空对话欢迎语（R17）', () => {
   it('空历史账户进入主界面 → 消息区顶部显示欢迎语胶囊（R17-1）', async () => {
     stubFetch({ '/models': MODELS, '/agui': completeRound('好的') })
@@ -275,8 +405,10 @@ describe('空对话欢迎语（R17）', () => {
     await userEvent.type(screen.getByLabelText('消息'), '你好')
     await userEvent.click(sendButton())
 
-    // 本轮尚未收到任何助手内容（`.row.a` 还不存在），欢迎语必须已经消失
-    expect(container.querySelector('.row.a')).toBeNull()
+    // 本轮尚未收到任何助手内容，欢迎语必须已经消失。
+    // 注意：此时对话区末尾会有一条**等待态占位气泡**（`.row.a .bub.thinking`，本变更新增），
+    // 它不是助手内容 —— 故这里按「排除占位」的选择器断言「还没有真实的助手气泡」。
+    expect(container.querySelector('.row.a .bub:not(.thinking)')).toBeNull()
     expect(welcomeOf(container)).toBeNull()
 
     await act(async () => {
