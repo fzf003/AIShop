@@ -56,11 +56,24 @@ internal static class AguiCors
            ?? [];
 
     /// <summary>
-    /// 启动期形态校验（fail-fast）：每项须可 <c>Uri.TryCreate(..., UriKind.Absolute)</c> 且 scheme ∈ {http, https}。
+    /// 启动期形态校验（fail-fast）：每项须是「协议 + 域名 + 端口」三元组的<b>规范形态</b>——
+    /// 可 <c>Uri.TryCreate(..., UriKind.Absolute)</c> 且 scheme ∈ {http, https}，<b>且</b>与
+    /// <c>uri.GetComponents(SchemeAndServer, UriEscaped)</c>（即协议 + 域名 + 端口的规范形式）逐字相等。
     /// <para>
     /// 必要性：<c>WithOrigins</c> 是<b>精确字符串匹配</b>——写 <c>*</c>、写缺 scheme 的 <c>localhost:5173</c>、
-    /// 或末尾多一个 <c>/</c>（浏览器发出的 <c>Origin</c> 头不带尾部斜杠）都不会在运行时报错，只会「永不匹配」；
-    /// 静默失效比启动即抛更难排查，故把可判定的形态错误提前到启动期。
+    /// 或末尾多一个 <c>/</c>、带路径 / 查询串（浏览器发出的 <c>Origin</c> 头是规范 origin，不含这些）
+    /// 都不会在运行时报错，只会「永不匹配」；静默失效比启动即抛更难排查，故把可判定的形态错误提前到启动期。
+    /// </para>
+    /// <para>
+    /// 为什么比对规范形式而不是 <c>uri.AbsolutePath</c>：<c>AbsolutePath</c> <b>区分不出</b>
+    /// <c>http://localhost:5173</c> 与 <c>http://localhost:5173/</c>（两者都是 <c>"/"</c>），
+    /// 而这两者在 <c>WithOrigins</c> 下「一个命中、一个永不匹配」。<c>SchemeAndServer</c> 会规范化掉
+    /// scheme / host 大小写、默认端口、路径与查询串，恰好等价于「规范 origin」。
+    /// </para>
+    /// <para>
+    /// 为什么用 <see cref="StringComparison.OrdinalIgnoreCase"/>：<c>WithOrigins</c> 的匹配实测为
+    /// <b>序数忽略大小写</b>（配 <c>http://LOCALHOST:5173</c> 能命中请求 <c>Origin: http://localhost:5173</c>），
+    /// 故校验必须与之一致——大小写差异不构成「永不匹配」，不应误报为非法配置。
     /// </para>
     /// </summary>
     private static void ValidateOrigins(IReadOnlyList<string> origins)
@@ -68,14 +81,19 @@ internal static class AguiCors
         foreach (var origin in origins)
         {
             if (Uri.TryCreate(origin, UriKind.Absolute, out var uri)
-                && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
+                && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+                && string.Equals(
+                    origin,
+                    uri.GetComponents(UriComponents.SchemeAndServer, UriFormat.UriEscaped),
+                    StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
 
             throw new InvalidOperationException(
-                $"配置 {ConfigKey} 中的「{origin}」不是合法 origin：必须是含协议与端口、无末尾斜杠的绝对地址"
-                + "（如 http://localhost:5173）。WithOrigins 为精确字符串匹配，写 * 或省略协议只会「永不匹配」而静默失效。");
+                $"配置 {ConfigKey} 中的「{origin}」不是合法 origin：必须是不含路径 / 末尾斜杠 / 查询串的精确 origin"
+                + "（协议 + 域名 + 端口，如 http://localhost:5173）。"
+                + "WithOrigins 为精确字符串匹配，写 *、省略协议、或多一个末尾斜杠只会「永不匹配」而静默失效。");
         }
     }
 }

@@ -13,6 +13,10 @@ namespace AIShop.AguiHost.Tests;
 /// 覆盖 spec ADDED R6（<b>CORS 默认不注册</b>：无配置 → 容器无 CORS 服务、响应无 <c>Access-Control-Allow-*</c>）
 /// 与 R7（<b>白名单可配置且精确匹配</b>：命中放行 / 未命中不放行 / 预检通过 / 配置形态错误启动即抛）。
 /// <para>
+/// L9 收紧：形态校验由「绝对地址 + scheme」收紧为「与协议 + 域名 + 端口的规范形式逐字（忽略大小写）相等」，
+/// 使「末尾斜杠 / 路径 / 查询串」这类<b>运行期永不匹配</b>的配置在启动期即抛（与校验自身文案一致）。
+/// </para>
+/// <para>
 /// 驱动方式：WAF 真实宿主（<see cref="WebApplicationFactory{TEntryPoint}"/>，内容根 = <c>src/AIShop.AguiHost</c>，
 /// 读真实 <c>appsettings.json</c>，其中<b>没有</b> <c>Cors</c> 节）+ 脚本化模型工厂<b>不替换</b>——
 /// 用例只打 <c>GET /models</c>（公开只读、不触模型）与 <c>OPTIONS /</c>（预检被 CORS 中间件短路，不进 Agent），
@@ -148,12 +152,16 @@ public sealed class AguiCorsTests
     }
 
     [Theory]
-    [InlineData("localhost:5173")] // 缺 scheme（Uri 会解析成 scheme=localhost）
-    [InlineData("*")]              // 通配：WithOrigins 下永不匹配
+    [InlineData("localhost:5173")]       // 缺 scheme（Uri 会解析成 scheme=localhost）
+    [InlineData("*")]                    // 通配：WithOrigins 下永不匹配
+    [InlineData("http://localhost:5173/")]      // L9：末尾斜杠——浏览器 Origin 头不带尾斜杠，运行期永不匹配
+    [InlineData("http://localhost:5173/path")]  // L9：带路径
+    [InlineData("http://localhost:5173?a=1")]   // L9：带查询串
     public void AddAguiCors_MalformedOrigin_FailsFastWithProblemValue(string malformedOrigin)
     {
         // spec R7 场景 4：形态不合规的 origin 必须在【启动期】以明确异常快速失败（不得静默「永不匹配」），
         // 异常消息含问题值。fail-fast 发生在注册之前 → 容器里不得留下半注册的 CORS 服务。
+        // L9：校验收紧到与自身文案一致——「末尾斜杠 / 路径 / 查询串」都属非法（WithOrigins 精确匹配永远对不上）。
         var services = new ServiceCollection();
 
         var exception = Assert.Throws<InvalidOperationException>(
@@ -163,6 +171,30 @@ public sealed class AguiCorsTests
         Assert.False(
             services.Any(descriptor => descriptor.ServiceType == typeof(ICorsService)),
             "形态校验未通过时不得留下任何 CORS 服务注册");
+    }
+
+    [Theory]
+    [InlineData(AllowedOrigin)]                    // 回归：常规 origin（协议 + 域名 + 端口，无尾斜杠）
+    [InlineData("https://example.com:8443")]       // 回归：https + 非默认端口
+    [InlineData("http://LOCALHOST:5173")]          // WithOrigins 匹配实测为序数忽略大小写 → 不得误报
+    [InlineData("http://example.com")]             // 无显式端口（默认端口即规范形式）
+    public void AddAguiCors_CanonicalOrigin_IsAccepted(string validOrigin)
+    {
+        // L9 回归面：收紧后既有合法配置必须照样通过，且策略按【精确 origin 列表】注册（非任意源）。
+        // 判据 = 与「协议 + 域名 + 端口」的规范形式逐字（忽略大小写）相等。
+        var services = new ServiceCollection();
+
+        Assert.True(
+            services.AddAguiCors(BuildConfig((Origin0ConfigKey, validOrigin))),
+            $"合法 origin「{validOrigin}」不得被形态校验拒绝");
+
+        using var provider = services.BuildServiceProvider();
+        var policy = provider.GetRequiredService<IOptions<CorsOptions>>().Value.GetPolicy(AguiCors.PolicyName);
+
+        Assert.NotNull(policy);
+        // WithOrigins 会把 scheme/host 规范化为小写（实测），故按忽略大小写比对：策略里落的正是该项本身。
+        Assert.Equal(validOrigin, policy.Origins.Single(), ignoreCase: true);
+        Assert.False(policy.AllowAnyOrigin);
     }
 
     [Fact]
