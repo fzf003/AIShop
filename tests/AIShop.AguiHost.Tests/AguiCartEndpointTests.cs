@@ -197,6 +197,90 @@ public sealed class AguiCartEndpointTests : IDisposable
         Assert.Equal(3L, quantity);
     }
 
+    /// <summary>
+    /// L11：同一 <c>Idempotency-Key</c> 的重复加购**只生效一次**（网络重试 / 代理重发不再翻倍），
+    /// 且重复请求**回放首次的响应**。
+    ///
+    /// 加购是累加语义（<c>existing.Quantity += quantity</c>），没有这条约定时同一个请求到达两次
+    /// 就会加两次，且返回 200 看起来一切正常。
+    ///
+    /// 反证：去掉 <c>AddCartItemAsync</c> 里的幂等分支，本用例必须变红（库内数量会是 2）。
+    /// </summary>
+    [Fact]
+    public async Task AddCartItem_SameIdempotencyKeyTwice_AppliesOnceAndReplaysFirstResponse()
+    {
+        var product = ProductSeedData.Products[0];
+
+        var factory = StartFactory();
+        using var client = factory.CreateClient();
+
+        var key = Guid.NewGuid().ToString();
+
+        using var first = await PostWithIdempotencyKeyAsync(client, product.Id, key);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        var firstBody = await first.Content.ReadAsStringAsync();
+
+        using var second = await PostWithIdempotencyKeyAsync(client, product.Id, key);
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+
+        // 回放首次结果：两次响应逐字节一致
+        Assert.Equal(firstBody, await second.Content.ReadAsStringAsync());
+
+        using var json = JsonDocument.Parse(firstBody);
+        var items = json.RootElement.GetProperty("items").EnumerateArray().ToList();
+        Assert.Single(items);
+        Assert.Equal(1, items[0].GetProperty("quantity").GetInt32());
+
+        await factory.DisposeAsync();
+        SqliteConnection.ClearAllPools();
+
+        // 库内也只加了一次
+        var (rows, quantity) = await ReadCartItemAsync(_businessDbPath, product.Id);
+        Assert.Equal(1L, rows);
+        Assert.Equal(1L, quantity);
+    }
+
+    /// <summary>
+    /// L11 对照：**不同**幂等键的两次加购照常累加 —— 幂等键不得把「用户真的买两次」也吞掉。
+    /// </summary>
+    [Fact]
+    public async Task AddCartItem_DifferentIdempotencyKeys_StillAccumulate()
+    {
+        var product = ProductSeedData.Products[0];
+
+        var factory = StartFactory();
+        using var client = factory.CreateClient();
+
+        using (var first = await PostWithIdempotencyKeyAsync(client, product.Id, Guid.NewGuid().ToString()))
+        {
+            Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        }
+
+        using var second = await PostWithIdempotencyKeyAsync(client, product.Id, Guid.NewGuid().ToString());
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+
+        using var json = JsonDocument.Parse(await second.Content.ReadAsStringAsync());
+        var item = json.RootElement.GetProperty("items").EnumerateArray().Single();
+        Assert.Equal(2, item.GetProperty("quantity").GetInt32());
+
+        await factory.DisposeAsync();
+        SqliteConnection.ClearAllPools();
+    }
+
+    /// <summary>带 <c>Idempotency-Key</c> 头的加购请求（L11）。</summary>
+    private static async Task<HttpResponseMessage> PostWithIdempotencyKeyAsync(
+        HttpClient client,
+        int productId,
+        string idempotencyKey)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/cart/items?username={ExistingUser}")
+        {
+            Content = JsonContent.Create(new { productId, quantity = 1 }),
+        };
+        request.Headers.Add("Idempotency-Key", idempotencyKey);
+        return await client.SendAsync(request);
+    }
+
     [Fact]
     public async Task AddCartItem_InvalidQuantityOrUnknownProduct_Returns400AndLeavesCartUnchanged()
     {

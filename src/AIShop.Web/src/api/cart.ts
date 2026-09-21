@@ -82,12 +82,18 @@ export async function getCart(): Promise<CartResponse> {
   return parseCart(await apiFetch<unknown>(CART_PATH))
 }
 
-/** 加购：相同商品已在车内时由服务端累加，客户端不做本地数量推算。 */
+/**
+ * 加购：相同商品已在车内时由服务端累加，客户端不做本地数量推算。
+ *
+ * **幂等键（L11）**：加购是累加语义，而网络层重试 / 代理重发会让**同一个**请求到达两次 —— 没有幂等
+ * 约定时数量会翻倍，且返回 200 看起来一切正常。这里为**每次调用**生成一个新键：同一次用户操作的重发
+ * 带同一个键（服务端据此回放首次结果、不再累加），不同操作各带各的键（正常累加）。
+ */
 export async function addItem(productId: number, quantity = 1): Promise<CartResponse> {
   return parseCart(
     await apiFetch<unknown>(CART_ITEMS_PATH, {
       method: 'POST',
-      headers: JSON_HEADERS,
+      headers: { ...JSON_HEADERS, 'Idempotency-Key': crypto.randomUUID() },
       body: JSON.stringify({ productId, quantity }),
     }),
   )

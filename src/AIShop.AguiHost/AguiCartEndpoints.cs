@@ -1,5 +1,6 @@
 using AIShop.Core.Entities;
 using AIShop.Core.Interfaces;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace AIShop.AguiHost;
 
@@ -46,6 +47,20 @@ internal static class AguiCartEndpoints
 {
     /// <summary>数量非正时的错误文案（必须拦在 <see cref="Cart.AddItem"/> 抛 <see cref="ArgumentOutOfRangeException"/> 之前）。</summary>
     private const string QuantityMustBePositiveDetail = "Quantity must be greater than 0";
+
+    /// <summary>
+    /// 幂等键的请求头名（L11）。
+    /// <para>
+    /// 加购是**累加**语义（<c>existing.Quantity += quantity</c>），而网络层重试 / 代理重发会让**同一个**
+    /// 请求到达两次 —— 没有幂等约定时数量会翻倍，且返回 200 看起来一切正常。约定：调用方为**每一次用户操作**
+    /// 生成一个键随请求带上；服务端按它去重，重复到达的请求**回放首次结果、不再累加**。
+    /// </para>
+    /// <para>缺失 / 空白该头时走既有非幂等路径（向后兼容，不改既有调用方的行为）。</para>
+    /// </summary>
+    private const string IdempotencyKeyHeader = "Idempotency-Key";
+
+    /// <summary>幂等记录的保留时长（覆盖重试 / 双击的时间尺度，不必更长）。</summary>
+    private static readonly TimeSpan IdempotencyWindow = TimeSpan.FromMinutes(10);
 
     /// <summary>加购商品在商品目录中不存在时的错误文案。</summary>
     private const string ProductNotFoundDetail = "Product not found";
@@ -112,10 +127,12 @@ internal static class AguiCartEndpoints
     /// </summary>
     private static async Task<IResult> AddCartItemAsync(
         AddCartItemRequest request,
+        HttpContext http,
         ICurrentUserAccessor accessor,
         IUserRepository users,
         ICartRepository carts,
         IProductRepository products,
+        IMemoryCache cache,
         CancellationToken ct)
     {
         var username = accessor.CurrentUser;
@@ -125,6 +142,16 @@ internal static class AguiCartEndpoints
         var user = await users.GetByUsernameAsync(username, ct);
         if (user is null)
             return Results.NotFound(new { detail = AguiClientIdentity.UserNotFoundDetail });
+
+        // 幂等（L11）：同一 Idempotency-Key 的重复请求**回放首次结果**，不再累加。
+        // 放在用户校验之后 —— 不把「身份都还没确认」的请求写进幂等缓存。
+        var idempotencyKey = ReadIdempotencyKey(http, username);
+        if (idempotencyKey is not null
+            && cache.TryGetValue<CartResponse>(idempotencyKey, out var replayed)
+            && replayed is not null)
+        {
+            return Results.Ok(replayed);
+        }
 
         // 入参校验全部发生在写入之前：数量非正会让 Cart.AddItem 抛异常，必须在此拦截为 400。
         if (request.Quantity <= 0)
@@ -139,7 +166,25 @@ internal static class AguiCartEndpoints
             user.Id, product.Id, product.Name, product.Price, product.Emoji, request.Quantity, ct);
 
         // 回读「操作后的购物车」：写端点与读端点返回同一形状，前端每个操作后可直接 setState，不必再发一次 GET。
-        return Results.Ok(ToCartResponse(await carts.GetByUserIdAsync(user.Id, ct)));
+        var response = ToCartResponse(await carts.GetByUserIdAsync(user.Id, ct));
+
+        // 只有**成功**的加购才记幂等结果 —— 上面的 400 / 404 各自提前 return，不会被回放成成功。
+        if (idempotencyKey is not null)
+            cache.Set(idempotencyKey, response, IdempotencyWindow);
+
+        return Results.Ok(response);
+    }
+
+    /// <summary>
+    /// 读并规范化幂等键（L11）：头缺失 / 空白 → <c>null</c>（走既有非幂等路径）；
+    /// 有值时返回**按用户名隔离**的缓存键 —— 两个账户偶然用了同一个键，也不会互相回放对方的购物车。
+    /// </summary>
+    private static string? ReadIdempotencyKey(HttpContext http, string username)
+    {
+        if (!http.Request.Headers.TryGetValue(IdempotencyKeyHeader, out var values)) return null;
+
+        var raw = values.ToString().Trim();
+        return raw.Length == 0 ? null : $"cart_idem_{username}_{raw}";
     }
 
     /// <summary>
