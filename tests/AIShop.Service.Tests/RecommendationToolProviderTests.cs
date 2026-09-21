@@ -269,6 +269,54 @@ public sealed class RecommendationToolProviderTests
         Assert.StartsWith("根据你的偏好「", ProductsOf(firstJson).EnumerateArray().First().GetProperty("reason").GetString());
     }
 
+    // ---------- L10：截断按相关性，不再按 UTF-16 码点 ----------
+
+    /// <summary>
+    /// L10：单轮命中超过 5 个关键词时，参与推荐的是**用户先说到的**那些，而不是码点最小的那些。
+    ///
+    /// 例句中「跑步」出现在最前（索引 3），由它一并命中的 健身 / 运动 同点；咖啡、巧克力 次之；
+    /// 耳机 / 手表 在句尾。旧口径（<c>OrderBy(keyword, Ordinal)</c>）会选出
+    /// <c>健身 / 咖啡 / 巧克力 / 手表 / 耳机</c> —— **句中靠后的反而入选**，正是 L10 描述的问题。
+    ///
+    /// 反证：把 <c>MatchKeywords</c> 的排序改回纯序数，本用例必须变红。
+    /// </summary>
+    [Fact]
+    public void ShouldRankQueryKeywordsByMentionOrder_WhenMoreThanFiveMatch()
+    {
+        var keywords = RecommendationToolProvider.MatchKeywords(
+            "我想买跑步鞋，还要咖啡和巧克力，再推荐个耳机和手表");
+
+        Assert.Equal(["健身", "跑步", "运动", "咖啡", "巧克力"], keywords);
+    }
+
+    /// <summary>
+    /// L10：偏好关键词按**跨记忆出现频次**取前 5 —— 反复提到的偏好比只提过一次的更巩固。
+    ///
+    /// 同频次按序数兜底，故结果与字典枚举顺序无关（频次本身是集合级统计量）——
+    /// spec R11 第 2 段的确定性要求因此仍然成立。
+    ///
+    /// 反证：把 <c>TopPreferenceKeywords</c> 的排序改回纯序数，本用例必须变红
+    /// （旧口径会选出 <c>健身 / 咖啡 / 瑜伽 / 耳机 / 跑步</c>，把出现 3 次的「跑步」排到最后）。
+    /// </summary>
+    [Fact]
+    public void ShouldRankPreferenceKeywordsByFrequency_WhenMoreThanFiveMatch()
+    {
+        var frequencies = new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            ["健身"] = 1,
+            ["跑步"] = 3,
+            ["运动"] = 1,
+            ["瑜伽"] = 1,
+            ["耳机"] = 2,
+            ["音乐"] = 1,
+            ["咖啡"] = 1,
+        };
+
+        var keywords = RecommendationToolProvider.TopPreferenceKeywords(frequencies);
+
+        Assert.Equal(["跑步", "耳机", "健身", "咖啡", "瑜伽"], keywords);
+    }
+
     // ---------- 延迟预算（design §8.5 验收②）----------
 
     [Fact]

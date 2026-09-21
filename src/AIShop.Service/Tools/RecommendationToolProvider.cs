@@ -383,13 +383,18 @@ public sealed class RecommendationToolProvider(
     /// </summary>
     private async Task<string[]?> ReadPreferenceKeywordsAsync(string username, CancellationToken ct)
     {
-        var matched = new List<string>();
+        // 频次表（L10）：累计每个关键词出现在多少条记忆里 —— 语义与用法见 TopPreferenceKeywords。
+        var frequencies = new Dictionary<string, int>(StringComparer.Ordinal);
 
         try
         {
             await foreach (var memory in memoryStore.GetAllAsync(new MemoryFilter { UserId = username }, ct))
             {
-                matched.AddRange(MatchedKeys(memory.Text));
+                // MatchedKeys 对单条文本已按 key 去重，故此处的计数即「出现在多少条记忆里」。
+                foreach (var key in MatchedKeys(memory.Text))
+                {
+                    frequencies[key] = frequencies.GetValueOrDefault(key) + 1;
+                }
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -399,8 +404,24 @@ public sealed class RecommendationToolProvider(
             return null;
         }
 
-        return TopKeywords(matched);
+        return TopPreferenceKeywords(frequencies);
     }
+
+    /// <summary>
+    /// 偏好关键词（L10）：按**跨记忆出现频次**降序取前 <see cref="MaxKeywords"/> 个 ——
+    /// 反复提到的偏好比只提过一次的更巩固。
+    ///
+    /// <para><b>为什么用频次、而不是「记忆的新旧顺序」</b>：spec R11 第 2 段要求结果**不依赖存储的
+    /// 枚举顺序**（<c>GetAllAsync</c> 的 <c>ORDER BY</c> 不得影响输出）。频次是**集合级统计量**，
+    /// 与枚举顺序无关；同频次再按**序数**兜底，确定性因此仍然成立。</para>
+    /// </summary>
+    internal static string[] TopPreferenceKeywords(IReadOnlyDictionary<string, int> frequencies)
+        => frequencies
+            .OrderByDescending(pair => pair.Value)
+            .ThenBy(pair => pair.Key, StringComparer.Ordinal)
+            .Select(pair => pair.Key)
+            .Take(MaxKeywords)
+            .ToArray();
 
     /// <summary>偏好缓存的键（按用户名键控，同一用户的不同会话共享）。</summary>
     private static string PreferenceCacheKey(string username) => $"reco_prefkw_{username}";
@@ -408,34 +429,61 @@ public sealed class RecommendationToolProvider(
     /// <summary>
     /// 关键词抽取：对文本跑 <see cref="ProductKeywordMap"/> 白名单匹配（key 命中，或任一展开命中，忽略大小写）。
     /// 对话关键词与记忆文本共用本方法，保证两处规则不分叉。
+    ///
+    /// <para><b>L10</b>：返回结果**按词在文本中出现的先后**排列 —— 用户先说到的最相关。
+    /// 顺序即相关性，调用方据此截断（<see cref="TakeTop"/>），不再靠 UTF-16 码点（中文下近似随机）。</para>
     /// </summary>
-    private static string[] MatchKeywords(string? text) => TopKeywords(MatchedKeys(text));
+    internal static string[] MatchKeywords(string? text) => TakeTop(MatchedKeys(text));
 
-    /// <summary>命中 <see cref="ProductKeywordMap"/> 的白名单 key（未排序、未去重，交由 <see cref="TopKeywords"/> 收敛）。</summary>
+    /// <summary>
+    /// 命中 <see cref="ProductKeywordMap"/> 的白名单 key，**按在文本中出现的先后**排列（L10）。
+    ///
+    /// <para>位置取「key 本身或任一展开词的最早出现处」—— 只靠展开词命中的关键词（文本说「健身」、
+    /// key 是「运动」）因此同样有位置，不会被一律排到最后。</para>
+    /// <para>理论边界：多个展开词同点命中时按**序数**兜底，保证同一输入产出同一顺序。</para>
+    /// </summary>
     private static IEnumerable<string> MatchedKeys(string? text)
     {
         if (string.IsNullOrWhiteSpace(text)) return [];
 
         return ProductKeywordMap.Entries
-            .Where(entry => ContainsIgnoreCase(text, entry.Key) || HasExpansionHit(text, entry.Value))
-            .Select(entry => entry.Key);
+            .Select(entry => (entry.Key, Position: EarliestHitPosition(text, entry.Key, entry.Value)))
+            .Where(match => match.Position >= 0)
+            .OrderBy(match => match.Position)
+            .ThenBy(match => match.Key, StringComparer.Ordinal)
+            .Select(match => match.Key);
+    }
+
+    /// <summary>key 本身或任一展开词在文本中最早出现的位置；都没命中返回 <c>-1</c>。</summary>
+    private static int EarliestHitPosition(string text, string key, string[] expansions)
+    {
+        var earliest = IndexOfIgnoreCase(text, key);
+
+        foreach (var expansion in expansions)
+        {
+            var position = IndexOfIgnoreCase(text, expansion);
+            if (position >= 0 && (earliest < 0 || position < earliest)) earliest = position;
+        }
+
+        return earliest;
     }
 
     /// <summary>
-    /// 去重 → 序数排序 → Take(5)。
-    /// 排序是为了**输出确定性**：结果不随字典枚举顺序 / 记忆存储的枚举顺序（<c>ORDER BY updated_at DESC</c>）变化。
+    /// 保序去重 → 取前 <see cref="MaxKeywords"/> 个。
+    ///
+    /// <para><b>不再重排</b>：顺序由调用方按相关性给定（本轮 = 句中先后，偏好 = 出现频次）。
+    /// L10 之前这里按序数重排，中文下等于随机丢弃 —— 那只是为了「输出确定性」，却把
+    /// 确定性当成了排序依据；确定性应当**建立在相关性排序之上**，而不是取代它。</para>
     /// </summary>
-    private static string[] TopKeywords(IEnumerable<string> keys)
-        => keys.Distinct(StringComparer.Ordinal)
-            .OrderBy(keyword => keyword, StringComparer.Ordinal)
-            .Take(MaxKeywords)
-            .ToArray();
-
-    private static bool HasExpansionHit(string text, string[] expansions)
-        => expansions.Any(expansion => ContainsIgnoreCase(text, expansion));
+    private static string[] TakeTop(IEnumerable<string> keys)
+        => keys.Distinct(StringComparer.Ordinal).Take(MaxKeywords).ToArray();
 
     private static bool ContainsIgnoreCase(string text, string value)
-        => text.Contains(value, StringComparison.OrdinalIgnoreCase);
+        => IndexOfIgnoreCase(text, value) >= 0;
+
+    /// <summary>忽略大小写的子串定位；未命中返回 <c>-1</c>（L10 起需要位置，故向上抽一层）。</summary>
+    private static int IndexOfIgnoreCase(string text, string value)
+        => text.IndexOf(value, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>工具返回体（camelCase 序列化；message / hasRecommendation / categories 直接取 RecommendationService 口径）。</summary>
     internal sealed record RecommendationPayload(
