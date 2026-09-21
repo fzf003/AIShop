@@ -4,6 +4,7 @@ using AIShop.Core.Interfaces;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace AIShop.AguiHost;
 
@@ -92,6 +93,13 @@ internal static class AguiUsernameForwarder
                 await HandleRestIdentityAsync(context, restEndpoint, next);
                 return;
             }
+
+            // 【L3 C 防护】写方法 + 既未挂 AguiClientRestEndpoint、也不是 AG-UI 流端点（AguiStreamEndpoint）→
+            // 记一条 Warning（只观测、不改变行为：下面仍按现逻辑回落 DefaultUsername）。
+            // 命中即意味着「新加了一个写端点却忘了挂身份标记」——该请求会落入 AG-UI 分支、以缺省用户身份写数据，
+            // 且返回 200 假成功、静默无告警。结构性拦截由测试 AllWriteEndpoints_MustCarryRestEndpointMarker 承担，
+            // 本告警是运行时的第二道观测（未见标记的当前活体，避免下次静默中招）。
+            WarnIfUnmarkedWriteEndpoint(context);
 
             // 仅 AG-UI 承载 body 的 POST（RunAgentInput）需要提取 username；其余请求透传
             if (!HttpMethods.IsPost(context.Request.Method))
@@ -198,6 +206,53 @@ internal static class AguiUsernameForwarder
         context.RequestServices.GetRequiredService<ICurrentUserAccessor>().SetCurrentUser(username);
         await next(context);
     }
+
+    /// <summary>
+    /// L3 C 防护：对「写方法 + 未挂身份标记」的端点记一条 Warning（<b>只观测、不改变请求行为</b>）。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 命中条件（三者同时满足）：① 路由已匹配到端点（<c>context.GetEndpoint()</c> 非 null——未匹配的 404
+    /// 请求不算「端点漏挂」）；② 请求方法是写方法（<c>POST</c> / <c>PUT</c> / <c>DELETE</c> / <c>PATCH</c>）；
+    /// ③ 该端点既没挂 <see cref="AguiClientRestEndpoint"/>（挂了的已在调用点分流到 REST 分支）、
+    /// 也没挂 <see cref="AguiStreamEndpoint"/>（AG-UI 流端点 / DevUI / OpenAI wire 这类<b>有意</b>走 AG-UI
+    /// 分支的合法端点）。前两条排除只读端点与未匹配请求，第三条排除会误报的合法端点。
+    /// </para>
+    /// <para>
+    /// 命中的语义 =「新增写端点漏挂标记」：该请求会落 AG-UI 分支，以 <see cref="DefaultUsername"/> 身份写数据，
+    /// 且返回 200 假成功、静默无告警（见 <c>docs/agui-convergence-inventory.md</c> 的 L3）。告警文案指向修法，
+    /// 但<b>不改行为</b>——身份回落逻辑逐字不变，仅增加可观测性。
+    /// </para>
+    /// </remarks>
+    private static void WarnIfUnmarkedWriteEndpoint(HttpContext context)
+    {
+        var endpoint = context.GetEndpoint();
+        if (endpoint is null || !IsWriteMethod(context.Request.Method))
+            return;
+
+        if (endpoint.Metadata.GetMetadata<AguiStreamEndpoint>() is not null)
+            return;
+
+        // 容器未注册 ILoggerFactory 时（极简测试管线）静默跳过：本告警是观测增强，不得成为请求的硬依赖。
+        var logger = context.RequestServices.GetService<ILoggerFactory>()
+            ?.CreateLogger(typeof(AguiUsernameForwarder).FullName!);
+
+        logger?.LogWarning(
+            "端点 {Endpoint} 接受写方法 {Method} 但既未挂 AguiClientRestEndpoint、也不是 AG-UI 流端点（AguiStreamEndpoint）："
+            + "该请求将落入 AG-UI 分支，以缺省用户 {DefaultUser} 的身份写数据，并可能返回 200 假成功。"
+            + "若这是业务 REST 写端点，请给它的 Map* 调用挂 .WithMetadata(new AguiClientRestEndpoint())；"
+            + "若它确实走 AG-UI 分支（如 DevUI / OpenAI wire），则改挂 AguiStreamEndpoint 以消除本告警。",
+            endpoint.DisplayName,
+            context.Request.Method,
+            DefaultUsername);
+    }
+
+    /// <summary>写方法判定（会改变服务端状态的 HTTP 方法）：POST / PUT / DELETE / PATCH。</summary>
+    private static bool IsWriteMethod(string method)
+        => HttpMethods.IsPost(method)
+            || HttpMethods.IsPut(method)
+            || HttpMethods.IsDelete(method)
+            || HttpMethods.IsPatch(method);
 
     /// <summary>
     /// 显式 username 的用户表存在性校验（agui-client-support T3，spec R3）。

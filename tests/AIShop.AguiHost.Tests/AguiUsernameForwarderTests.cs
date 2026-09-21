@@ -6,6 +6,7 @@ using AIShop.Core.Interfaces;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using NSubstitute;
 
 namespace AIShop.AguiHost.Tests;
@@ -224,6 +225,108 @@ public sealed class AguiUsernameForwarderTests
         return AguiClientIdentity.TryResolveQueryUsername(context.Request);
     }
 
+    // ─────────────────────────────────────────────────────────────────────────────
+    // L3 C 防护：写方法 + 未挂身份标记 → 运行时 Warning（只观测、不改行为），
+    // AG-UI 流端点（挂 AguiStreamEndpoint）与只读方法不得产生该 Warning。
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task UnmarkedWriteMethodEndpoint_LogsWarningAndKeepsFallbackBehavior()
+    {
+        // L3 缺陷的运行时观测（C 防护）：路由匹配到【写方法端点】但该端点既没挂 AguiClientRestEndpoint、
+        // 也不是 AG-UI 流端点（AguiStreamEndpoint）→ 记一条 Warning，文案指向修法（挂 AguiClientRestEndpoint）。
+        // 这正是「新增写端点却忘了挂标记 → 以缺省用户身份写数据、200 假成功」这一静默缺陷的告警出口。
+        var users = Substitute.For<IUserRepository>();
+        var accessor = Substitute.For<ICurrentUserAccessor>();
+        var recorder = new RecordingLoggerFactory();
+
+        var result = await InvokePipelineAsync(
+            HttpMethods.Post, queryString: null, marker: null, users, accessor,
+            loggerFactory: recorder, endpointPresent: true);
+
+        var warning = Assert.Single(recorder.Entries);
+        Assert.Equal(LogLevel.Warning, warning.Level);
+        // 文案必须能指向修法：点名 AguiClientRestEndpoint（挂标记）——否则告警等于没给出口。
+        Assert.Contains("AguiClientRestEndpoint", warning.Message);
+
+        // C 只加日志、【不改变行为】：未挂标记的 POST 仍走 AG-UI 分支 → 回落缺省用户并放行下游。
+        Assert.Equal("steve", AguiUsernameForwarder.DefaultUsername);
+        accessor.Received(1).SetCurrentUser("steve");
+        Assert.True(result.NextCalled);
+    }
+
+    [Fact]
+    public async Task AguiStreamMarkedEndpoint_DoesNotLogTheUnmarkedWriteWarning()
+    {
+        // 排除误报（C 防护的关键）：挂 AguiStreamEndpoint 的写端点（AG-UI 流端点 POST /、DevUI / OpenAI wire）
+        // 【有意】走 AG-UI 分支拿缺省用户身份 → 不得产生「漏挂标记」告警。断言 0 条日志，防止以后把合法端点误报。
+        var users = Substitute.For<IUserRepository>();
+        var accessor = Substitute.For<ICurrentUserAccessor>();
+        var recorder = new RecordingLoggerFactory();
+
+        var result = await InvokePipelineAsync(
+            HttpMethods.Post, queryString: null, marker: null, users, accessor,
+            loggerFactory: recorder, aguiStreamMarker: true);
+
+        Assert.Empty(recorder.Entries);
+
+        // 行为不变：仍回落缺省用户并放行（AG-UI 分支逐字不变）。
+        accessor.Received(1).SetCurrentUser("steve");
+        Assert.True(result.NextCalled);
+    }
+
+    [Fact]
+    public async Task RestMarkedWriteEndpoint_DoesNotLogTheUnmarkedWriteWarning()
+    {
+        // 排除误报：挂 AguiClientRestEndpoint 的写端点（如 POST /cart/items）在 REST 分支即返回，
+        // 不会走到告警判定 → 不产生「漏挂标记」告警（此处用 POST 驱动，避免只覆盖 GET 的盲区）。
+        var users = Substitute.For<IUserRepository>();
+        users.GetByUsernameAsync("marla", Arg.Any<CancellationToken>())
+            .Returns(new User { Username = "marla", DisplayName = "marla" });
+        var accessor = Substitute.For<ICurrentUserAccessor>();
+        var recorder = new RecordingLoggerFactory();
+
+        await InvokePipelineAsync(
+            HttpMethods.Post, "?username=marla", new AguiClientRestEndpoint(), users, accessor,
+            loggerFactory: recorder);
+
+        Assert.Empty(recorder.Entries);
+        accessor.Received(1).SetCurrentUser("marla");
+    }
+
+    [Fact]
+    public async Task UnmarkedReadOnlyEndpoint_DoesNotLogTheUnmarkedWriteWarning()
+    {
+        // 不扩大告警面：只读方法（GET）即便未挂标记也只放行、不告警——否则 /models、/health 等
+        // 每个只读端点都会刷屏，告警失去信号价值。
+        var users = Substitute.For<IUserRepository>();
+        var accessor = Substitute.For<ICurrentUserAccessor>();
+        var recorder = new RecordingLoggerFactory();
+
+        var result = await InvokePipelineAsync(
+            HttpMethods.Get, queryString: null, marker: null, users, accessor,
+            loggerFactory: recorder, endpointPresent: true);
+
+        Assert.Empty(recorder.Entries);
+        Assert.True(result.NextCalled);
+    }
+
+    [Fact]
+    public async Task UnmatchedWriteRequest_DoesNotLogTheUnmarkedWriteWarning()
+    {
+        // 不误伤 404：路由未匹配到任何端点（context.GetEndpoint() = null）时不算「端点漏挂」→ 不告警。
+        // 否则任何 POST 到不存在路径的请求都会刷 Warnings。
+        var users = Substitute.For<IUserRepository>();
+        var accessor = Substitute.For<ICurrentUserAccessor>();
+        var recorder = new RecordingLoggerFactory();
+
+        await InvokePipelineAsync(
+            HttpMethods.Post, queryString: null, marker: null, users, accessor,
+            loggerFactory: recorder, endpointPresent: false);
+
+        Assert.Empty(recorder.Entries);
+    }
+
     /// <summary>最小请求管线的一次执行结果。</summary>
     private sealed record PipelineResult(int StatusCode, string Body, bool NextCalled);
 
@@ -231,14 +334,20 @@ public sealed class AguiUsernameForwarderTests
     /// 在最小请求管线上驱动 <see cref="AguiUsernameForwarder.UseAguiUsernameForwarding"/>（不启动真实宿主）：
     /// 装配中间件 + 终结委托，向 <see cref="DefaultHttpContext"/> 发请求并跑完整管线；
     /// <paramref name="marker"/> 非 null 时把 <see cref="AguiClientRestEndpoint"/> 挂到端点元数据
-    /// （模拟 <c>WithMetadata</c>，即 REST 分支的唯一判定依据）。
+    /// （模拟 <c>WithMetadata</c>，即 REST 分支的唯一判定依据）；<paramref name="aguiStreamMarker"/> 为 true 时
+    /// 改挂 <see cref="AguiStreamEndpoint"/>（模拟 AG-UI 流端点）；<paramref name="endpointPresent"/> 为 true 时
+    /// 挂一个<b>无任何标记</b>的端点（模拟「新加写端点漏挂标记」——路由匹配到了、但两个标记都没有）。
+    /// <paramref name="loggerFactory"/> 非 null 时注册进管线，供告警断言（C 防护）。
     /// </summary>
     private static async Task<PipelineResult> InvokePipelineAsync(
         string method,
         string? queryString,
         AguiClientRestEndpoint? marker,
         IUserRepository users,
-        ICurrentUserAccessor accessor)
+        ICurrentUserAccessor accessor,
+        ILoggerFactory? loggerFactory = null,
+        bool aguiStreamMarker = false,
+        bool endpointPresent = false)
     {
         var services = new ServiceCollection();
         services.AddSingleton(users);
@@ -246,6 +355,8 @@ public sealed class AguiUsernameForwarderTests
         // 中间件经 WriteAsJsonAsync 写错误体：注册 Http JsonOptions（web 默认 = camelCase）
         // 使匿名类型 new { detail = ... } 序列化为 {"detail":"..."}，与真实宿主同形。
         services.ConfigureHttpJsonOptions(_ => { });
+        if (loggerFactory is not null)
+            services.AddSingleton(loggerFactory);
         await using var provider = services.BuildServiceProvider();
 
         var app = new ApplicationBuilder(provider);
@@ -263,12 +374,19 @@ public sealed class AguiUsernameForwarderTests
         if (queryString is not null)
             context.Request.QueryString = new QueryString(queryString);
         context.Response.Body = new MemoryStream();
+
+        var metadata = new List<object>();
         if (marker is not null)
+            metadata.Add(marker);
+        if (aguiStreamMarker)
+            metadata.Add(new AguiStreamEndpoint());
+
+        if (marker is not null || aguiStreamMarker || endpointPresent)
         {
             context.SetEndpoint(new Endpoint(
                 requestDelegate: null,
-                metadata: new EndpointMetadataCollection(marker),
-                displayName: "test-rest-endpoint"));
+                metadata: new EndpointMetadataCollection(metadata),
+                displayName: "test-endpoint"));
         }
 
         await pipeline(context);
@@ -277,5 +395,43 @@ public sealed class AguiUsernameForwarderTests
             context.Response.StatusCode,
             Encoding.UTF8.GetString(((MemoryStream)context.Response.Body).ToArray()),
             nextCalled);
+    }
+
+    /// <summary>
+    /// 记录型 <see cref="ILoggerFactory"/>：捕获所有 <c>(Level, Message)</c>，供 C 防护的告警断言。
+    /// 只实现管线需要用到的部分（<c>CreateLogger</c> + <c>Log</c>），不引第三方日志包。
+    /// </summary>
+    private sealed class RecordingLoggerFactory : ILoggerFactory
+    {
+        /// <summary>按记录顺序保存的日志条目。</summary>
+        public List<(LogLevel Level, string Message)> Entries { get; } = [];
+
+        public ILogger CreateLogger(string categoryName) => new RecordingLogger(Entries);
+
+        public void AddProvider(ILoggerProvider provider)
+        {
+            // 最小替身：不接 provider，记录只看 Entries
+        }
+
+        public void Dispose()
+        {
+            // 无可释放资源
+        }
+
+        private sealed class RecordingLogger : ILogger
+        {
+            private readonly List<(LogLevel Level, string Message)> _sink;
+
+            public RecordingLogger(List<(LogLevel Level, string Message)> sink) => _sink = sink;
+
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(
+                LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+                Func<TState, Exception?, string> formatter)
+                => _sink.Add((logLevel, formatter(state, exception)));
+        }
     }
 }

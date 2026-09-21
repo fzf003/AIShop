@@ -69,3 +69,26 @@ internal sealed class AguiClientRestEndpoint
     /// <summary>缺参（缺失 / 空白）时是否必须带身份：<c>true</c> → 400 短路；<c>false</c> → 放行且不注入身份。</summary>
     public bool RequireUsername { get; init; } = true;
 }
+
+#pragma warning disable S2094 // 端点元数据标记：无成员是设计意图（只作 GetMetadata<T>() 的存在性判别），非漏写
+/// <summary>
+/// 端点元数据标记：<b>有意走 AG-UI 身份分支</b>的端点——AG-UI 流式端点（<c>POST /</c>）以及同源的
+/// Development 端点（DevUI 面板 / OpenAI Responses / Conversations wire）。
+/// </summary>
+/// <remarks>
+/// <para>
+/// 这些端点<b>有意不挂</b> <see cref="AguiClientRestEndpoint"/>：其身份来自请求体 <c>forwardedProps</c>
+/// （缺失时回落 <see cref="AguiUsernameForwarder.DefaultUsername"/>），而非 REST 面的 <c>?username=</c>。
+/// </para>
+/// <para>
+/// 本标记的<b>唯一用途</b>是让 <see cref="AguiUsernameForwarder.UseAguiUsernameForwarding"/> 的
+/// 「漏挂标记」告警（L3 C 防护）能区分「有意走 AG-UI 分支的合法端点」与「新加写端点却忘记挂
+/// <see cref="AguiClientRestEndpoint"/>」——否则对每一个 AG-UI / DevUI 的 POST 都会误报。
+/// </para>
+/// <para>
+/// 本标记<b>不参与身份解析</b>：REST 分支的判定依据仍然只有 <see cref="AguiClientRestEndpoint"/> 一个
+/// （见 <see cref="AguiUsernameForwarder"/>），加本标记不改变任何请求的数据流向。
+/// </para>
+/// </remarks>
+internal sealed class AguiStreamEndpoint;
+#pragma warning restore S2094

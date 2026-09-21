@@ -173,7 +173,9 @@ try
     // T7 keyed MapAGUIServer：按 agentName 从 DI 解析 keyed AIAgent（preview 提供 (string agentName, string pattern)
     // 重载 = GetRequiredKeyedService<AIAgent>(agentName)，见镜像 AGUIEndpointRouteBuilderExtensions），
     // 映射为 AG-UI SSE 端点 "/"，保持 T5 装配语义（MapAGUIServer 请求管线、username 中间件顺序）不回退。
-    app.MapAGUIServer(AGUIShoppingAgent.AgentName, "/");
+    // 【L3 C 防护】挂 AguiStreamEndpoint：该端点是【有意】走 AG-UI 身份分支的合法写端点（POST /），
+    // 与漏挂 AguiClientRestEndpoint 的写端点区分开，避免 username 中间件的漏挂告警对它误报。
+    app.MapAGUIServer(AGUIShoppingAgent.AgentName, "/").WithMetadata(new AguiStreamEndpoint());
 
     // agui-client-support T2：辅助 REST 端点——根级 GET /models（模型清单，数据取自模型工厂、公开可读）。
     // 与 "/"（AG-UI SSE）、/health、/alive、/devui、/v1/* 路由互不冲突；映射顺序不影响请求管线
@@ -200,9 +202,12 @@ try
     {
         // DevUI 会话通道：OpenAI Responses/Conversations wire 供 DevUI 面板发起会话（官方样例 AgentWebChat /
         // DevUIAspireIntegration 成对出现）——与上方服务注册配套，勿注释、勿删除（注释会触发 S125，DevUI 会话不可用）。
-        app.MapOpenAIResponses();
-        app.MapOpenAIConversations();
-        app.MapDevUI();
+        // 【L3 C 防护】这三个映射的端点（含 POST /v1/responses、/v1/conversations 等写方法）【有意】走 AG-UI
+        // 身份分支（体里没有 forwardedProps → 回落缺省用户），故一并挂 AguiStreamEndpoint，避免被 username
+        // 中间件的「漏挂标记的写端点」告警误报（它们是合法端点，不是漏挂）。
+        app.MapOpenAIResponses().WithMetadata(new AguiStreamEndpoint());
+        app.MapOpenAIConversations().WithMetadata(new AguiStreamEndpoint());
+        app.MapDevUI().WithMetadata(new AguiStreamEndpoint());
     }
 
     await app.RunAsync();
