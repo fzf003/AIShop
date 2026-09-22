@@ -269,6 +269,30 @@ public sealed class AguiCorsTests
         }
     }
 
+    /// <summary>
+    /// T7：CORS 命名策略对**新端点**的覆盖 —— `/products` 与 `/cart` 同在 spec 声明的范围内
+    /// （`spec.md:217`：`GET /models`、AG-UI 端点、`/products`、`/cart*`），必须与 `/models` 一样拿到放行头。
+    ///
+    /// 为什么单独断言：既有 CORS 用例只打 `GET /models`（`:52/75/95`）与 `OPTIONS /`（`:113`）——
+    /// 若将来有人把「全局中间件 + 路径闸门」换成端点级 `[EnableCors]` / `RequireCors`，
+    /// **新端点会静默失去放行头而没有任何用例变红**。本用例就是那个会红的。
+    /// </summary>
+    [Theory]
+    [InlineData("/products")]
+    [InlineData("/cart")]
+    public async Task NewEndpoints_OriginInAllowList_AreAllowed(string path)
+    {
+        using var factory = StartFactory(AllowedOrigin);
+        using var client = factory.CreateClient();
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, path);
+        request.Headers.Add("Origin", AllowedOrigin);
+        using var response = await client.SendAsync(request);
+
+        // 只看放行头：状态码各端点自有语义（`/cart` 缺 `?username=` 会 400），不在本用例关注面内。
+        Assert.Equal(AllowedOrigin, ResponseHeader(response, AllowOriginHeader));
+    }
+
     /// <summary>以内存配置构造 <see cref="IConfiguration"/>（键值对为空 = 无 Cors 节的等价形态）。</summary>
     private static IConfiguration BuildConfig(params (string Key, string Value)[] entries)
         => new ConfigurationBuilder()

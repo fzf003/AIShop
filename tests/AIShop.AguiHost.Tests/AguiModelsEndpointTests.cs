@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using AIShop.Service.Agui;
@@ -180,6 +181,39 @@ public sealed class AguiModelsEndpointTests
         }
 
         throw new InvalidOperationException($"未能从 {AppContext.BaseDirectory} 上溯找到含 AIShop.sln 的仓库根");
+    }
+
+    /// <summary>
+    /// T6：<c>GET /models</c> 带请求体（含 <c>forwardedProps.username</c> / <c>model</c>）时，
+    /// 响应与**不带体**时**逐字节一致**。
+    ///
+    /// 为什么值得断言：`/models` 有意保持**公开可读**（登录页在选定身份之前就要用它），故不校验身份。
+    /// 但它与 AG-UI 端点共用同一个宿主与中间件管线 —— 万一将来有人把 username/model 中间件的读取逻辑
+    /// 扩大到「所有带体的请求」，带体的 `/models` 就可能被意外短路或改变结果。本用例把「带体不影响」
+    /// 钉死：既有 4 条用例都只发不带体的 GET，覆盖不到这条边界。
+    /// </summary>
+    [Fact]
+    public async Task GetModels_WithForwardedPropsBody_ReturnsIdenticalResponse()
+    {
+        using var factory = new WebApplicationFactory<Program>();
+        using var client = factory.CreateClient();
+
+        using var plain = await client.GetAsync("/models");
+        var plainBody = await plain.Content.ReadAsStringAsync();
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/models")
+        {
+            Content = JsonContent.Create(new
+            {
+                forwardedProps = new { username = "marla", model = "qwen" },
+            }),
+        };
+        using var withBody = await client.SendAsync(request);
+        var withBodyText = await withBody.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, plain.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, withBody.StatusCode);
+        Assert.Equal(plainBody, withBodyText);
     }
 
     /// <summary>读取仓库内文件全文；<b>期望存在的文件缺失即显式失败</b>（不得静默跳过，否则断言空转）。</summary>

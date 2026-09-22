@@ -521,3 +521,27 @@ describe('主界面入口与退出登录（R12 / R2 第 3 段 / R5）', () => {
     expect(container.querySelector('.row.u')).toBeNull()
   })
 })
+
+/**
+ * T21：模型清单为**空数组**时的分支。
+ *
+ * 盘点 T21 原文：「空清单分支（`GET /models` 返回 `[]`）无用例」—— 既有用例**全部**传非空 `MODELS`。
+ * 该分支是**配置错误**（服务端没配任何模型节），前端**不猜 id、不硬编码**，直接显示错误并停在模型屏。
+ */
+describe('模型清单为空（T21）', () => {
+  it('GET /models 返回 [] → 显示「服务端未配置任何模型」，且不进主界面', async () => {
+    stubFetch({ '/models': [], '/agui': () => completeRound('好的') })
+
+    render(<App />)
+
+    // 账户屏在模型屏之前，选账户不需要模型清单
+    await userEvent.click(await screen.findByRole('button', { name: /Marla/ }))
+
+    await waitFor(() => {
+      expect(screen.getByText('服务端未配置任何模型')).toBeDefined()
+    })
+
+    // 不猜 id 的直接证据：没有发起任何 AG-UI 请求（没进主界面）
+    expect(stub?.callsTo('/agui')).toHaveLength(0)
+  })
+})
