@@ -905,4 +905,76 @@ describe('agent.ts：L6 工具结果来源在协议层同步写入（与 CUSTOM 
 
     expect(getRecoSnapshot()).not.toBeNull()
   })
+
+  /**
+   * T12：**两源内容逐字节不同**时，store 最终必须是【后到】的那一份。
+   *
+   * 盘点 T12 原文：「『同轮两源』只在**语义**层断言，**逐字节不同**时面板最终显示哪一份未测」——
+   * 既有用例（`AguiRecommendationPushTests`）只证明了两个负载**语义等价**，而真机上它们可能
+   * **逐字节不同**（转义形态差异、模型多次调工具等）。L6 之前更糟：两源不同时序，谁胜取决于
+   * React 何时 flush。
+   *
+   * L6 把工具结果搬进协议层后，两源同为 SDK **同步**派发 —— 于是可以在这里直接断言
+   * **「到达顺序 = 写入顺序」**：本用例让工具结果先到、`CUSTOM` 后到，store 必须是 `CUSTOM` 的文本。
+   *
+   * 反证：把用例里 `CUSTOM` 与工具结果的**顺序对调**（CUSTOM 先到），断言必须变红 —— 那时
+   * 后到的是工具结果，store 应是它的文本。
+   */
+  it('T12：两源内容不同时，store 是【后到】的 CUSTOM（到达顺序即写入顺序）', async () => {
+    resetRecoContent()
+    writeUsername('marla')
+
+    const toolPayload = JSON.stringify({
+      message: '工具结果的文案',
+      hasRecommendation: true,
+      products: [
+        {
+          id: 11,
+          name: '工具结果里的商品',
+          category: '测试',
+          price: 1,
+          emoji: '🎁',
+          reason: '因为你提到「测试」',
+        },
+      ],
+    })
+    const customPayload = {
+      message: 'CUSTOM 的文案',
+      hasRecommendation: true,
+      products: [
+        {
+          id: 22,
+          name: 'CUSTOM 里的商品',
+          category: '测试',
+          price: 2,
+          emoji: '🎁',
+          reason: '因为你提到「测试」',
+        },
+      ],
+    }
+
+    const stub = installFetchStub({
+      [AGUI_ENDPOINT]: scriptRounds([
+        [
+          runStarted('t-t12', 'r-t12'),
+          textMessageStart('a-t12'),
+          toolCallStart('tc1', 'recommend_products', 'a-t12'),
+          toolCallArgs('tc1', '{}'),
+          toolCallEnd('tc1'),
+          toolCallResultEncoded('tc1', 'tr1', toolPayload),
+          // 后到者：CUSTOM 在工具结果之后
+          customEvent('recommendation', customPayload),
+          textMessageContent('a-t12', '好的'),
+          textMessageEnd('a-t12'),
+          runFinished('t-t12', 'r-t12'),
+        ],
+      ]),
+    })
+    restoreFetch = stub.restore
+
+    startSession({ model: MODEL_ITEM.id })
+    await runRound('推荐点东西')
+
+    expect(getRecoSnapshot()).toBe(JSON.stringify(customPayload))
+  })
 })
