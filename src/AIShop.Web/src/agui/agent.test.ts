@@ -40,7 +40,7 @@ import {
   toolCallResultEncoded,
   toolCallStart,
 } from '../test/sse'
-import { AGUI_ENDPOINT, createAgent, FIRST_BYTE_TIMEOUT_MS } from './agent'
+import { AGUI_ENDPOINT, createAgent, FIRST_BYTE_TIMEOUT_MS, lastRecommendationContent } from './agent'
 import { getRecoSnapshot, resetRecoContent } from './reco'
 import { endSession, getSnapshot, runRound, setModel, startSession, subscribe } from './store'
 
@@ -976,5 +976,38 @@ describe('agent.ts：L6 工具结果来源在协议层同步写入（与 CUSTOM 
     await runRound('推荐点东西')
 
     expect(getRecoSnapshot()).toBe(JSON.stringify(customPayload))
+  })
+
+  /**
+   * T20：**多条 `recommend_products` 结果**时取哪一条。
+   *
+   * 盘点 T20 原文：「『两条 `recommend_products` 结果、后者非法时保留前者』无用例」。
+   * 面板侧「非法 → 保留上一次」已有覆盖（`RecoPanel.test.tsx:186/198`），缺的是**协议层这一跳**：
+   * `lastRecommendationContent` 取的是**消息序最后一条**（不是「最近一条合法的」）——
+   * 它把**非法的**那份原样交给 store，由面板的 `parseRecommendation` 判为不可渲染并保留上一次。
+   *
+   * 这个分工必须钉住：若将来有人把它改成「跳过非法、回退到上一条合法的」，面板反而会显示一条
+   * **比实际更陈旧**的结果（用户看到的是两次之前的推荐）。
+   */
+  it('T20：多条推荐工具结果 → 取消息序最后一条（即便它非法，也交给面板去判）', () => {
+    const legalPayload = JSON.stringify('{"message":"合法的","products":[]}')
+
+    const messages = [
+      {
+        id: 'm-t20-a',
+        role: 'assistant',
+        toolCalls: [{ id: 'tc-a', function: { name: 'recommend_products', arguments: '{}' } }],
+      },
+      { id: 'tr-a', role: 'tool', toolCallId: 'tc-a', content: JSON.stringify(legalPayload) },
+      {
+        id: 'm-t20-b',
+        role: 'assistant',
+        toolCalls: [{ id: 'tc-b', function: { name: 'recommend_products', arguments: '{}' } }],
+      },
+      // 后者非法（不是合法 JSON）
+      { id: 'tr-b', role: 'tool', toolCallId: 'tc-b', content: JSON.stringify('这不是 JSON') },
+    ] as Message[]
+
+    expect(lastRecommendationContent(messages)).toBe('这不是 JSON')
   })
 })

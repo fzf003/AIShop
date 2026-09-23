@@ -332,6 +332,56 @@ describe('推荐负载持久化回写与刷新恢复（F5）', () => {
     expect(globalThis.localStorage.getItem(recoKey())).toBe(JSON.stringify(RECO_TWO))
   })
 
+  /**
+   * T19：**从零开始**的持久化路径。既有用例都预置了 `agui.reco.marla`（快照自挂载起即非空），
+   * 本用例覆盖「该账户从未有推荐」这一侧，并且**分两步**测：
+   *
+   * 1. **无推荐的轮次**（纯文本，无 `CUSTOM`、无工具结果）→ 有 store 通知、但快照仍是 `null`
+   *    → 断言**键仍不存在**。这一步才真正测到 `if (reco !== null)` 那个守卫 ——
+   *    只断言「挂载后立即无键」是测不到的（那时压根没触发过通知）。
+   * 2. **首次收到 `CUSTOM`** → 键才被建。
+   */
+  it('T19：无推荐的轮次不建键；首次收到 CUSTOM 后才建键（从零开始）', async () => {
+    /** 纯文本轮（无 CUSTOM、无工具结果）：有通知，但 store 仍为 null。 */
+    const plainRound = (threadId: string): SseEvent[] => [
+      runStarted(threadId, 'run-1'),
+      textMessageStart('a1'),
+      textMessageContent('a1', '你好呀'),
+      textMessageEnd('a1'),
+      runFinished(threadId, 'run-1'),
+    ]
+
+    let call = 0
+    const stub = installFetchStub({
+      '/models': MODELS,
+      '/agui': () => createSseResponse(call++ === 0 ? plainRound('t-t19-a') : pushTwoRound('t-t19-b')),
+    })
+    restoreFetch = stub.restore
+
+    seedIdentity()
+    // 刻意**不**设置 recoKey()
+
+    const container = await enterMain()
+    expect(globalThis.localStorage.getItem(recoKey())).toBeNull()
+
+    // —— 第 1 步：无推荐的轮次（store 仍 null）→ 不建键 ——
+    await userEvent.type(screen.getByLabelText('消息'), '你好')
+    await userEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(container.querySelector('.row.a')).not.toBeNull())
+
+    expect(getRecoSnapshot()).toBeNull()
+    expect(globalThis.localStorage.getItem(recoKey())).toBeNull()
+
+    // —— 第 2 步：首次收到 CUSTOM → 键才被建 ——
+    await userEvent.type(screen.getByLabelText('消息'), '推荐一下跑鞋')
+    await userEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(cardNames(container)).toEqual(['恢复商品甲', '恢复商品乙']))
+
+    await waitFor(() => {
+      expect(globalThis.localStorage.getItem(recoKey())).toBe(JSON.stringify(RECO_TWO))
+    })
+  })
+
   it('刷新恢复：重新挂载后 .rcard 恰 2 条且内容与顺序一致（非占位）', async () => {
     const stub = installFetchStub({
       '/models': MODELS,

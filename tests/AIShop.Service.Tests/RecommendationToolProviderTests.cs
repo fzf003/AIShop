@@ -174,6 +174,25 @@ public sealed class RecommendationToolProviderTests
         Assert.Single(properties.EnumerateObject());
     }
 
+    /// <summary>
+    /// T14：工具描述里的**面向用户的输出规约**必须有断言兜住。
+    ///
+    /// 盘点 T14 原文：「面板文案约束（『不得表述为登录校验/认证』『不要输出 JSON』）无断言」——
+    /// 全 `tests/` grep 无「不要输出 JSON」「不要输出商品编号」（那两句话**只存在于**
+    /// `RecommendationToolProvider` 的工具描述里），改动时若被顺手删掉**没有任何测试会红**。
+    /// 这两句是用户明确要求的输出规约（不要 Markdown、不要暴露内部编号），属于对外契约。
+    /// </summary>
+    [Fact]
+    public void ToolDescription_CarriesUserFacingOutputConstraints()
+    {
+        using var harness = new Harness();
+
+        var tool = Assert.Single(harness.Provider.CreateTools());
+
+        Assert.Contains("不要输出 JSON", tool.Description);
+        Assert.Contains("不要输出商品编号", tool.Description);
+    }
+
     // ---------- 偏好进入推荐（spec R11 场景 1）----------
 
     [Fact]

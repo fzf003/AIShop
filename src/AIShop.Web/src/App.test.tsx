@@ -530,7 +530,7 @@ describe('主界面入口与退出登录（R12 / R2 第 3 段 / R5）', () => {
  */
 describe('模型清单为空（T21）', () => {
   it('GET /models 返回 [] → 显示「服务端未配置任何模型」，且不进主界面', async () => {
-    stubFetch({ '/models': [], '/agui': () => completeRound('好的') })
+    stubFetch({ '/models': [], '/agui': completeRound('好的') })
 
     render(<App />)
 

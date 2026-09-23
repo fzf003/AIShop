@@ -17,6 +17,7 @@
 import { act, renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { readReco, writeReco } from '../state/session'
 import {
   getRecoSnapshot,
   resetRecoContent,
@@ -177,5 +178,33 @@ describe('订阅语义', () => {
       resetRecoContent()
     })
     expect(result.current).toBeNull()
+  })
+})
+
+/**
+ * T18：store 与持久化对**任意文本**的边界。
+ *
+ * 盘点 T18 原文：「`reco.ts` store 允许任意文本（`'null'`/`'42'`），而 `readReco` 要求合法 JSON
+ * → 一次无害告警 + 刷新回占位」—— 这条**跨两个模块**（store 写入 ↔ session 读出）的边界无用例。
+ *
+ * 行为本身是**对的**（容错、不崩），但此前没人钉住它：store 侧「字符串型 value 原样保留」是
+ * 既有口径（`CUSTOM` 的 value 可能是合法 JSON 文本，解析再序列化会破坏逐字节可逆），
+ * 而 session 侧 `readReco` 要求**合法 JSON** —— 两侧规则不同，交界处必须明确降级而非崩溃。
+ */
+describe('T18：任意文本进出 store 与持久化的边界', () => {
+  it('非 JSON 文本写入 store → 原样保留；持久化后读出降级为 null（不崩）', () => {
+    // 一个用户名只属于本用例，避免与其它用例的 localStorage 串味
+    const username = 't18-user'
+
+    // store 侧：字符串型 value 原样保留（不解析、不序列化）
+    setRecoFromCustomEvent('这不是 JSON')
+    expect(getRecoSnapshot()).toBe('这不是 JSON')
+
+    // 持久化边界：原样写进去
+    writeReco(username, getRecoSnapshot() ?? '')
+    expect(globalThis.localStorage.getItem(`agui.reco.${username}`)).toBe('这不是 JSON')
+
+    // 读出侧：readReco 要求合法 JSON → 解析失败 → 降级为 null（面板回占位），**不抛**
+    expect(readReco(username)).toBeNull()
   })
 })
