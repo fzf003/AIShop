@@ -775,6 +775,86 @@ describe('agent.ts：C2 挂起兜底（服务端连首字节都不发时 isRunni
 })
 
 /**
+ * T2（AG-UI 收敛盘点 §二·B 的盘点编号，**与 tasks.md 里的同名工单无关**）：
+ * **流在 `RUN_FINISHED` 之前被截断**时客户端「运行中」状态如何收场。
+ *
+ * **与上一块 C2 的「静默」形态不是一回事，务必分清**：
+ *
+ * | 形态 | 事实 |
+ * |---|---|
+ * | 发出若干帧后**静默、连接仍在**（C2 用例锁定） | **有意不中止** —— 那与「正常长轮次」无法区分（一轮约 28s，其中 19.5s 是记忆提取、一个事件都不发），`isRunning` 保持 `true` |
+ * | 流被 **close**（readable 流正常结束）但**无** `RUN_FINISHED`（本块回答的缺口） | 本块题目 |
+ *
+ * **实测结论（2026-09-26 用替身跑真实 `@ag-ui/client` 0.0.59，本块首条用例即该证据）**：
+ * 后者**不是缺口、无需改产品代码** —— `AbstractAgent.runAgent` 有 `finally { this.isRunning = false }`，
+ * 且「流正常结束 → 完成回调」也会复位运行态。替身在 `RUN_STARTED + 若干文本帧` 后 close、**不发**
+ * `RUN_FINISHED` 时，`runRound` **正常 resolve（不 reject）**、`isRunning() === false`，本轮已送达的
+ * 部分文本仍落在 `agent.messages`（含未收到 `TEXT_MESSAGE_END` 的助手消息）。
+ *
+ * 故本块是**锁定既有行为**（产品代码零改动）：把这条 SDK 语义写进断言，既防止将来「为治挂起而加的
+ * 兜底」误判这种形态，也防止 SDK 升级悄悄改变该语义而无人察觉。它同时**收窄了真机 Mimo 卡死的根因**
+ * —— 「isRunning 卡死」只可能来自**连接悬空**（C2 形态），不可能来自「close 无终止帧」。
+ *
+ * 反证 = 本块第二条用例：同一批帧改成**不 close**（悬空）→ `isRunning` 落到**另一支**（仍为 `true`）。
+ * 二者并列即证明首条用例对「是否 close」这一变量有区分力，不是恒真空断言。
+ */
+describe('agent.ts：T2 流在 RUN_FINISHED 之前被截断（close 但无终止帧）', () => {
+  it('流正常 close 但无 RUN_FINISHED → 本轮照常收尾、isRunning 复位为 false（SDK 自愈）', async () => {
+    const stub = installFetchStub({
+      // createSseResponse：发完即 close（readable 流正常结束），**不发** RUN_FINISHED —— 正是本工单要考的形态。
+      [AGUI_ENDPOINT]: () =>
+        createSseResponse([
+          runStarted('t-trunc', 'r-trunc'),
+          textMessageStart('a-trunc'),
+          textMessageContent('a-trunc', '部分回复'),
+        ]),
+    })
+    restoreFetch = stub.restore
+
+    const session = createAgent({ username: 'marla', model: MODEL_ITEM.id, threadId: 't-trunc' })
+
+    // 关键断言 1：本轮以**正常 resolve** 收尾（既不 reject、也不挂在 pending 上）——
+    // 「连接关了就自愈」这一支的核心，若 SDK 将来改成把缺终止帧当错误，这里会变红。
+    const result = await session.runRound('你好')
+
+    // 关键断言 2：运行态已复位 —— 这正是「发送按钮恢复可用」（`disabled={isRunning}`）的数据面。
+    expect(session.isRunning()).toBe(false)
+
+    // 关键断言 3：无 TEXT_MESSAGE_END / RUN_FINISHED 也不影响 SDK 把已送达的文本落成本轮新消息。
+    expect(result.newMessages).toHaveLength(1)
+    expect(session.getMessages().map((message) => message.role)).toEqual(['user', 'assistant'])
+  })
+
+  it('反证：同一批帧「不 close」（悬空）→ isRunning 仍为 true，与上面的 close 形态分道', async () => {
+    vi.useFakeTimers()
+    try {
+      const stub = installFetchStub({
+        // createHangingSseResponse：发完**不 close** —— 与首条用例**只差这一个变量**（是否结束 readable 流）。
+        [AGUI_ENDPOINT]: () =>
+          createHangingSseResponse([
+            runStarted('t-hang', 'r-hang'),
+            textMessageStart('a-hang'),
+            textMessageContent('a-hang', '部分回复'),
+          ]),
+      })
+      restoreFetch = stub.restore
+
+      const session = createAgent({ username: 'marla', model: MODEL_ITEM.id, threadId: 't-hang' })
+      // 刻意不等本轮收尾（悬空流本就不收尾），只挂一个 catch 防 unhandled rejection。
+      void session.runRound('你好').catch(() => undefined)
+
+      // 首字节已到 → C2 兜底撤表；推进远超阈值的时长也不中止（静默与正常长轮次不可区分）。
+      await vi.advanceTimersByTimeAsync(FIRST_BYTE_TIMEOUT_MS * 3)
+
+      // 落到**另一支**：流未结束 → 运行态保持 —— 与首条用例的 `false` 相反，证明首条有区分力。
+      expect(session.isRunning()).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+/**
  * L5：会话销毁 —— 在途轮的副作用必须随会话一起消失。
  *
  * **要解的形态**：一轮在途（真机实测单轮 6–11 秒）时退出登录 / 切账户。`createAgent` 里
