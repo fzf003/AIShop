@@ -17,7 +17,19 @@ internal sealed class MockToolChatClient : Meai.IChatClient
     internal sealed record ToolScript(
         string ToolName,
         IReadOnlyDictionary<string, object?> Arguments,
-        string FinalText);
+        string FinalText)
+    {
+        /// <summary>
+        /// 为 <c>true</c> 时，本段产出的 <see cref="Meai.FunctionCallContent"/> 的
+        /// <see cref="Meai.FunctionCallContent.Arguments"/> 置为 <c>null</c>——即真机 Mimo 的失败形态
+        /// （wire 上 tool_call 的 <c>arguments</c> 为字符串 <c>"null"</c>，解析到 MEAI 后即表现为
+        /// <c>Arguments == null</c>；见 <c>ReplySanitizingChatClient</c> 的 C3 规范化）。
+        /// <para>缺省 <c>false</c> = 沿用原有行为（以 <see cref="Arguments"/> 强类型字典构造），
+        /// 既有用例因此逐字节不变；置 <c>true</c> 时 <see cref="Arguments"/> 的取值被忽略
+        /// （传空字典占位即可），仅作为「工具名 + FinalText」的载体。</para>
+        /// </summary>
+        internal bool NullArguments { get; init; }
+    }
 
     private readonly IReadOnlyList<ToolScript> _scripts;
     private int _currentSegment;
@@ -115,7 +127,10 @@ internal sealed class MockToolChatClient : Meai.IChatClient
         var callId = $"e2e-call-{++_callSeq}";
         // FICC FunctionCallContent 参数经 Arguments 字典以强类型值提供（tasks 实施期确认项 ⑪）；
         // MEAI 构造收 IDictionary<string, object?>，脚本存 IReadOnlyDictionary，此处拷贝适配。
-        var arguments = new Dictionary<string, object?>(script.Arguments);
+        // NullArguments=true 时传 null（Mimo 形态），不拷贝字典——否则无法表达该失败形态。
+        Dictionary<string, object?>? arguments = script.NullArguments
+            ? null
+            : new Dictionary<string, object?>(script.Arguments);
         var functionCall = new Meai.FunctionCallContent(callId, script.ToolName, arguments);
         return new Meai.ChatMessage
         {
