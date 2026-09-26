@@ -3,6 +3,7 @@ using System.Text.Json;
 using AIShop.AgentTelemetry;
 using AIShop.AguiHost.Recommendation;
 using AIShop.Core.Interfaces;
+using AIShop.Core.Models;
 using AIShop.Core.Services;
 using AIShop.Core.StaticData;
 using AIShop.Infrastructure.Services;
@@ -238,6 +239,96 @@ public sealed class RecommendationPushAgentTests
         Assert.IsType<InvalidOperationException>(warning.Exception);
     }
 
+    // ---------- ⑧ 取消语义（OCE 不吞，与 ④ 的非取消异常分道）----------
+
+    /// <summary>
+    /// 取消语义（<c>:120</c> 的 <c>when (ex is not OperationCanceledException)</c> 分支）：内层流的枚举抛
+    /// <see cref="OperationCanceledException"/>（= 客户端断连）时**不吞** —— 异常原样从 <c>RunStreamingAsync</c>
+    /// 传出，迭代器不再补发终止帧（连接已断，补发无意义）。
+    ///
+    /// <para><b>对照锚点</b>：非取消异常走另一条路（吞 + 补发终止帧），由
+    /// <c>AguiStreamCloseoutTests.MidStreamFailure_StillReachesDeterministicCloseout_AndPushesCustom</c>
+    /// 在真实 AG-UI wire 上覆盖 —— 本用例不重复写，只钉「取消特有的传出」。</para>
+    /// </summary>
+    [Fact]
+    public async Task ShouldPropagateOperationCanceled_WhenInnerStreamCancelled()
+    {
+        using var harness = new RecoHarness();
+        var innerUpdates = new[]
+        {
+            new AgentResponseUpdate(ChatRole.Assistant, "正在为您查询…"),
+            new AgentResponseUpdate(ChatRole.Assistant, "为您找到几件跑鞋。"),
+        };
+        var agent = new RecommendationPushAgent(
+            new ScriptedAgent("Inner", innerUpdates, streamingFault: new OperationCanceledException("测试：内层流被取消")),
+            harness.Provider);
+
+        var collected = new List<AgentResponseUpdate>();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await foreach (var update in agent.RunStreamingAsync([new ChatMessage(ChatRole.User, UserMessageWithKeyword)]))
+            {
+                collected.Add(update);
+            }
+        });
+
+        // 取消前已产出的内层更新照常原样送达（证明确实是枚举中途抛，而非一帧未发）
+        Assert.Equal(innerUpdates.Length, collected.Count);
+        for (var i = 0; i < innerUpdates.Length; i++)
+        {
+            Assert.Same(innerUpdates[i], collected[i]);
+        }
+
+        // 取消分支：既无终止帧、也无推荐帧（OCE 未被 :120 的 when 子句吞掉，迭代器在补发之前即中断）
+        Assert.DoesNotContain(collected, update => update.Contents.Any(content => content is AguiStreamFailureContent));
+        Assert.DoesNotContain(collected, update => update.Contents.Any(content => content is RecommendationPushContent));
+    }
+
+    /// <summary>
+    /// 取消语义（<c>:158</c> 的 <c>when (ex is not OperationCanceledException)</c> 分支）：内层流正常走完，
+    /// 但推荐计算 <c>TryBuildPushPayloadAsync</c> 抛 <see cref="OperationCanceledException"/> 时**不吞** ——
+    /// 异常原样从 <c>RunStreamingAsync</c> 传出，既无终止帧、也无推荐帧。
+    ///
+    /// <para>受控抛点 = provider 内部语义检索 <see cref="IProductSemanticSearch.SearchAsync"/> 抛 OCE
+    /// （provider 的 <c>SearchRelatedAsync</c> 只对**非** OCE 降级吞掉，OCE 按其 XML 语义正常传播，
+    /// 直达 <c>:158</c> 的过滤）。正锚点：先直调 provider 确认该替身确实让推荐计算抛 OCE。</para>
+    ///
+    /// <para><b>对照锚点</b>：非取消异常走另一条路（吞 + 恰好一条 Warning + 不推），由
+    /// <see cref="ShouldDeliverInnerUpdatesAndWarnOnce_WhenRecommendationThrows"/> 覆盖 —— 本用例不重复写。</para>
+    /// </summary>
+    [Fact]
+    public async Task ShouldPropagateOperationCanceled_WhenRecommendationComputationCancelled()
+    {
+        var semantic = Substitute.For<IProductSemanticSearch>();
+        semantic
+            .SearchAsync(Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<int>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(_ => Task.FromException<IReadOnlyList<ProductSearchHit>>(
+                new OperationCanceledException("测试：推荐计算被取消")));
+
+        using var harness = new RecoHarness(semanticSearch: semantic);
+
+        // 正锚点：该替身确实让推荐计算路径抛 OCE（未被 SearchRelatedAsync 的非-OCE 降级吞掉）
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => harness.Provider.TryBuildPushPayloadAsync(UserMessageWithKeyword));
+
+        var innerUpdates = new[] { new AgentResponseUpdate(ChatRole.Assistant, "为您推荐如下。") };
+        var agent = new RecommendationPushAgent(new ScriptedAgent("Inner", innerUpdates), harness.Provider);
+
+        var collected = new List<AgentResponseUpdate>();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await foreach (var update in agent.RunStreamingAsync([new ChatMessage(ChatRole.User, UserMessageWithKeyword)]))
+            {
+                collected.Add(update);
+            }
+        });
+
+        // 内层更新已完整送达（流本身正常），随后 OCE 从推荐计算处传出；无终止帧、无推荐帧
+        Assert.Same(Assert.Single(innerUpdates), Assert.Single(collected));
+        Assert.DoesNotContain(collected, update => update.Contents.Any(content => content is AguiStreamFailureContent));
+        Assert.DoesNotContain(collected, update => update.Contents.Any(content => content is RecommendationPushContent));
+    }
+
     // ---------- ⑤ 身份缺失 ----------
 
     /// <summary>
@@ -369,10 +460,15 @@ public sealed class RecommendationPushAgentTests
     /// 非流式入口（<c>RunCoreAsync</c>）的返回值。<b>默认 <c>null</c> 时保持抛异常</b>：
     /// 这是「流式用例不会误走非流式入口」的守卫，只有专测非流式的用例才显式开启（design §9 第 5 条）。
     /// </param>
+    /// <param name="streamingFault">
+    /// 受控故障注入（T10 取消语义）：产出全部 <paramref name="updates"/> 后抛出该异常，模拟内层模型流在
+    /// 枚举过程中中断。<b>默认 <c>null</c> 时行为与改动前逐字节一致</b>（枚举正常结束）。
+    /// </param>
     private sealed class ScriptedAgent(
         string name,
         IReadOnlyList<AgentResponseUpdate> updates,
-        AgentResponse? nonStreamingResponse = null) : AIAgent
+        AgentResponse? nonStreamingResponse = null,
+        Exception? streamingFault = null) : AIAgent
     {
         public override string? Name => name;
 
@@ -387,6 +483,11 @@ public sealed class RecommendationPushAgentTests
                 await Task.Yield();
                 yield return update;
             }
+
+            // 受控故障（默认 null → 不抛）：在枚举中途抛，异常的**类型**决定装饰器走哪条分支 ——
+            // OCE 不吞（传出迭代器），其余异常被 :120 的 when 子句拦下转补发终止帧。
+            if (streamingFault is not null)
+                throw streamingFault;
         }
 
         protected override Task<AgentResponse> RunCoreAsync(
@@ -452,7 +553,16 @@ public sealed class RecommendationPushAgentTests
     {
         private readonly ServiceProvider _services;
 
-        public RecoHarness(string? user = TestUser, IReadOnlyList<Memory>? memories = null, IMemoryCache? cache = null)
+        /// <param name="semanticSearch">
+        /// 可选语义检索替身（T10）：非 <c>null</c> 时注册进 DI，被 <c>RecommendationToolProvider</c> 的可选参
+        /// <c>IProductSemanticSearch?</c> 吸收 —— 供「推荐计算路径受控抛异常」的用例注入（如抛 OCE）。
+        /// 默认 <c>null</c> 时不注册，provider 解析为 <c>null</c>、行为与改动前逐字节一致（纯关键词门控）。
+        /// </param>
+        public RecoHarness(
+            string? user = TestUser,
+            IReadOnlyList<Memory>? memories = null,
+            IMemoryCache? cache = null,
+            IProductSemanticSearch? semanticSearch = null)
         {
             var repository = Substitute.For<IProductRepository>();
             repository.GetAll().Returns(ProductSeedData.Products);
@@ -471,6 +581,8 @@ public sealed class RecommendationPushAgentTests
             services.AddSingleton<ICurrentUserAccessor>(Accessor);
             services.AddSingleton(Store);
             services.AddSingleton(cache ?? new MemoryCache(new MemoryCacheOptions()));
+            if (semanticSearch is not null)
+                services.AddSingleton(semanticSearch);
             services.AddSingleton<RecommendationToolProvider>();
 
             _services = services.BuildServiceProvider();
