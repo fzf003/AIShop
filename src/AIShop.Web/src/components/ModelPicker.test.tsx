@@ -220,7 +220,7 @@ describe('账户选择与切屏（R5）', () => {
 })
 
 describe('顶栏切换模型（R6-5）', () => {
-  it('对话中切换：徽标与 ✓ 立即更新，在途本轮不变、下一轮取新值', async () => {
+  it('对话中切换：徽标与 ✓ 立即更新，setModel 落盘、下一轮取新值', async () => {
     const stub = installFetchStub({ '/models': THREE })
     try {
       writeUsername('marla')
@@ -229,9 +229,8 @@ describe('顶栏切换模型（R6-5）', () => {
 
       await waitFor(() => expect(container.querySelector('.mbadge')?.textContent).toContain('MiMo'))
 
-      // 模拟一轮对话的请求体构造（C4 的 runRound 在 run 开始时一次性取这两个值）
-      const inFlightRound = { username: currentUsername(), model: currentModelId() }
-      expect(inFlightRound).toEqual({ username: 'marla', model: 'gpt-4.1' })
+      // 切换前：直接断言真实持久化读取（不再用测试自造的对象冒充「在途本轮」，那种断言不经过产品代码、恒真）
+      expect(currentModelId()).toBe('gpt-4.1')
 
       await userEvent.click(container.querySelector('.mbadge')!)
       const dropdown = container.querySelector('.mdd') as HTMLElement
@@ -240,8 +239,8 @@ describe('顶栏切换模型（R6-5）', () => {
       // 徽标立即更新为当前选中项
       expect(container.querySelector('.mbadge')?.textContent).toContain('Qwen 3.7')
 
-      // 在途本轮的值不受影响；下一轮构造时读到新值
-      expect(inFlightRound.model).toBe('gpt-4.1')
+      // setModel 确实写盘：下一轮构造请求体时读到新值（读的是真实持久化）。
+      // 「在途本轮不受影响」由 agent.test.ts 的并发用例覆盖，本文件不再以自造对象冒充证据。
       expect({ username: currentUsername(), model: currentModelId() }).toEqual({
         username: 'marla',
         model: 'qwen',

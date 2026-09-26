@@ -21,7 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { withUsername } from '../api/http'
 import { readMessages, writeUsername } from '../state/session'
-import { installFetchStub, type FetchCall, type RouteSpec } from '../test/fetch-stub'
+import { installFetchStub, type FetchCall, type RouteHandler, type RouteSpec } from '../test/fetch-stub'
 import {
   createHangingSseResponse,
   createSseResponse,
@@ -269,6 +269,55 @@ describe('agent.ts：每轮全量重发 + 身份/模型注入（R1-1、R3-1、R3
 
     const bodies = stub.callsTo('/agui').map(bodyOf)
     expect(bodies[0]!.forwardedProps.model).toBe('gpt-4.1')
+    expect(bodies[1]!.forwardedProps.model).toBe('deepseek')
+  })
+
+  it('切模型（真并发）：在途本轮用发起时的旧 model，下一轮才取新值（R6 追加条款「对话中切换于下一轮生效」）', async () => {
+    // 第一轮请求到达后**挂住不返回**，制造「本轮仍在途」的窗口 —— 用测试可控的 deferred gate，
+    // 不用 `createHangingSseResponse`（它永不 close，会挂死后面的 `await first`）。
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+
+    const rounds = scriptRounds([
+      textRound('t', 'r1', 'a1', '一'),
+      textRound('t', 'r2', 'a2', '二'),
+    ]) as RouteHandler
+
+    let served = 0
+    const stub = installFetchStub({
+      '/agui': async (ctx) => {
+        // 只让第一轮挂起（served++ 后为 1）；第二轮直接放行。
+        if (served++ === 0) await firstGate
+        return rounds(ctx)
+      },
+    })
+    restoreFetch = stub.restore
+
+    writeUsername('marla')
+    startSession({ model: 'gpt-4.1' })
+
+    // 关键：**不 await** 地发起第一轮 —— 本轮进入在途状态。
+    const first = runRound('第一轮')
+
+    // 等第一轮请求确实发出（此时其 forwardedProps 已按发起时的 model 构造并送出）。
+    await vi.waitFor(() => expect(stub.callsTo('/agui')).toHaveLength(1))
+
+    // 在途轮尚未返回时切换模型：不得回溯改写已送出的第一轮请求体。
+    setModel('deepseek')
+
+    // 放行第一轮，让它正常收尾。
+    releaseFirst()
+    await first
+
+    await runRound('第二轮')
+
+    const bodies = stub.callsTo('/agui').map(bodyOf)
+    expect(bodies).toHaveLength(2)
+    // 在途本轮（第一轮）用的是**发起时**的旧 model（本用例的核心）。
+    expect(bodies[0]!.forwardedProps.model).toBe('gpt-4.1')
+    // 下一轮才取新值。
     expect(bodies[1]!.forwardedProps.model).toBe('deepseek')
   })
 
