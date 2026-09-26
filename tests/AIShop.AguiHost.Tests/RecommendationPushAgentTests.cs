@@ -26,7 +26,8 @@ namespace AIShop.AguiHost.Tests;
 /// <para>覆盖五件事：① 命中推送（内层更新逐条原样 + 流末恰 1 条推荐更新）；② 闲聊轮不推（门控落地）；
 /// ③ 依据解析（工具 <c>query</c> 优先于本轮用户消息、多次调用取最后一次有效值）；④ 异常降级
 /// （内层更新完整送达 + 恰一条 Warning + 无推送）；⑤ 身份缺失不推。另断言基类转发未被破坏
-/// （<c>Name</c> / <c>GetService(ChatOptions)</c> / 会话读写）。</para>
+/// （<c>Name</c> / <c>GetService(ChatOptions)</c> / 会话读写），以及**非流式入口不注入 CUSTOM**
+/// 的契约（design §9 第 5 条）。</para>
 ///
 /// <para>内层用本文件内的 <see cref="ScriptedAgent"/> 替身（完全控制流内容，不经 FICC，故可精确注入
 /// <see cref="FunctionCallContent"/>）；「转发不变」用例则用**真实装配产物**
@@ -296,6 +297,49 @@ public sealed class RecommendationPushAgentTests
         Assert.NotNull(await decorator.DeserializeSessionAsync(serialized));
     }
 
+    // ---------- ⑦ 非流式入口不注入（契约锁定） ----------
+
+    /// <summary>
+    /// 契约锁定（design §9 第 5 条 / <c>RecommendationPushAgent</c> 类注释）：非流式入口
+    /// （公开 <c>RunAsync</c> → <c>RunCoreAsync</c>）**不注入** CUSTOM 推荐 —— 装饰器只 override 流式路径，
+    /// 非流式由 <c>DelegatingAIAgent</c> 基类原样转发给内层。三条断言各锁一件事：
+    /// <list type="number">
+    /// <item><b>不抛异常</b>：内层替身默认的「非流式不应被调用」守卫不会触发（走到了正常返回分支）；</item>
+    /// <item><b>原样一致</b>：返回结果与内层给出的**同一实例**（<c>Assert.Same</c>），证明装饰器既不重建也不替换响应；</item>
+    /// <item><b>无 CUSTOM</b>：结果里没有任何 <see cref="RecommendationPushContent"/> —— 即便装饰器改成**原地追加**到转发来的响应上（此时上一条 <c>Assert.Same</c> 仍会通过），本断言也会抓住。</item>
+    /// </list>
+    /// 对照（正锚点）：同一装配下流式路径确实推了 CUSTOM —— 证明「非流式没有」是**路径语义**，不是环境坏掉。
+    /// </summary>
+    [Fact]
+    public async Task ShouldForwardInnerResponseWithoutCustom_WhenNonStreamingEntryUsed()
+    {
+        using var harness = new RecoHarness();
+
+        // 内层：流式产出一条 recommend_products 调用 + 一段文本（命中白名单 → 流式路径必推）；
+        //       非流式原样返回一条 assistant 文本响应（不含任何合成内容）。
+        var innerUpdates = new[]
+        {
+            new AgentResponseUpdate(ChatRole.Assistant, [FunctionCall(ToolQueryEarphones)]),
+            new AgentResponseUpdate(ChatRole.Assistant, "根据您的对话，为您推荐几件商品。"),
+        };
+        var innerResponse = new AgentResponse(new ChatMessage(ChatRole.Assistant, "根据您的对话，为您推荐几件商品。"));
+        var agent = new RecommendationPushAgent(
+            new ScriptedAgent("Inner", innerUpdates, innerResponse),
+            harness.Provider);
+
+        // 对照：同一 agent 的流式路径确实推了 CUSTOM（名字与事件名一致）。
+        var streamed = await CollectAsync(agent.RunStreamingAsync([new ChatMessage(ChatRole.User, UserMessageWithKeyword)]));
+        Assert.Contains(streamed, update => update.Contents.Any(content => content is RecommendationPushContent));
+
+        // 非流式：不抛异常（不是守卫分支）→ 返回内层同一实例 → 无任何 CUSTOM 合成内容。
+        var result = await agent.RunAsync([new ChatMessage(ChatRole.User, UserMessageWithKeyword)]);
+
+        Assert.Same(innerResponse, result);
+        Assert.DoesNotContain(
+            result.Messages,
+            message => message.Contents.Any(content => content is RecommendationPushContent));
+    }
+
     // ---------- 夹具 ----------
 
     /// <summary>构造一条 <c>recommend_products</c> 的 <see cref="FunctionCallContent"/>（参数 key = query）。</summary>
@@ -319,7 +363,16 @@ public sealed class RecommendationPushAgentTests
     /// 使用例可以精确注入 <see cref="FunctionCallContent"/> 与文本增量。会话相关成员在本工单用不到，
     /// 一律抛出（若装饰器漏转发、走到这里，用例会立刻变红）。
     /// </summary>
-    private sealed class ScriptedAgent(string name, IReadOnlyList<AgentResponseUpdate> updates) : AIAgent
+    /// <param name="name">内层 agent 名（透传断言用）。</param>
+    /// <param name="updates">流式路径逐条产出的更新序列。</param>
+    /// <param name="nonStreamingResponse">
+    /// 非流式入口（<c>RunCoreAsync</c>）的返回值。<b>默认 <c>null</c> 时保持抛异常</b>：
+    /// 这是「流式用例不会误走非流式入口」的守卫，只有专测非流式的用例才显式开启（design §9 第 5 条）。
+    /// </param>
+    private sealed class ScriptedAgent(
+        string name,
+        IReadOnlyList<AgentResponseUpdate> updates,
+        AgentResponse? nonStreamingResponse = null) : AIAgent
     {
         public override string? Name => name;
 
@@ -341,7 +394,11 @@ public sealed class RecommendationPushAgentTests
             AgentSession? session = null,
             AgentRunOptions? options = null,
             CancellationToken cancellationToken = default)
-            => throw new NotSupportedException("S4 只覆盖流式路径，非流式入口由基类转发（本替身不应被调用）。");
+            // 默认（未开启开关）= 守卫：证明流式用例不会误走非流式入口。
+            // 仅非流式契约用例显式给出响应，此时才作为正常的内层返回值。
+            => nonStreamingResponse is null
+                ? throw new NotSupportedException("S4 只覆盖流式路径，非流式入口由基类转发（本替身不应被调用）。")
+                : Task.FromResult(nonStreamingResponse);
 
         protected override ValueTask<AgentSession> CreateSessionCoreAsync(CancellationToken cancellationToken = default)
             => throw new NotSupportedException("会话读写应由 DelegatingAIAgent 基类转发到内层，本替身不应被调用。");
