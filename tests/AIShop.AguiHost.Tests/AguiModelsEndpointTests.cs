@@ -80,6 +80,72 @@ public sealed class AguiModelsEndpointTests
         Assert.DoesNotContain("Key", body);
     }
 
+    /// <summary>
+    /// T13（盘点编号，见 <c>docs/agui-convergence-inventory.md</c> §二·C）：期望值<b>不写死</b>，而是读真实
+    /// <c>src/AIShop.AguiHost/appsettings.json</c> 的 <c>Models</c> 节与 <c>ActiveModel</c>，断言 <c>GET /models</c>
+    /// 响应与配置<b>逐项一致</b>。
+    ///
+    /// <para>
+    /// <b>补的是什么缺口</b>：既有 <c>GetModels_ReturnsConfiguredModelList_MatchingAguiHostAppSettings</c> 把
+    /// 期望值硬编码为字面量（deepseek / gpt-4.1 / qwen…），改 <c>appsettings.json</c> 只需同步那几行即绿——
+    /// 「<b>配置文件 ↔ 端点响应</b>两者一致」这件事本身没有任何自动化校验。本用例正是把它钉死：
+    /// 配置改了而端点没跟上 → 红；端点被改成硬编码供数、与配置脱钩 → 红（两向漂移都拦）。
+    /// </para>
+    /// <para>
+    /// <b>不断言</b>「Endpoint/Model 配对」或「真能跑」：真实配置不含 <c>Key</c>，离线无法构造底层客户端验证连通性，
+    /// 强行做会引入假绿；那部分属真机走查（N7），本用例只覆盖「配置值 → 端点响应」的映射一致性。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task GetModels_MatchesRealAppSettingsModelsAndActiveModel()
+    {
+        using var settings = JsonDocument.Parse(ReadRepoFile("src/AIShop.AguiHost/appsettings.json"));
+        var root = settings.RootElement;
+
+        var models = root.GetProperty("Models");
+        var activeModel = root.GetProperty("ActiveModel").GetString();
+        Assert.False(string.IsNullOrEmpty(activeModel),
+            "AguiHost/appsettings.json 的 ActiveModel 为空，无法确定默认模型（形状校验见 AppSettingsModelShapeTests）");
+
+        // 配置书写序（qwen, deepseek, gpt-4.1）≠ 端点返回序：子键按序数升序（deepseek < gpt-4.1 < qwen，见本类首条用例注释），
+        // 故期望序取 OrderBy(Ordinal)，与工厂 AvailableModels 的顺序同源。
+        var expected = models.EnumerateObject()
+            .Select(p => (
+                Key: p.Name,
+                Name: p.Value.GetProperty("Name").GetString(),
+                Model: p.Value.GetProperty("Model").GetString()))
+            .OrderBy(e => e.Key, StringComparer.Ordinal)
+            .ToArray();
+
+        using var factory = new WebApplicationFactory<Program>();
+        using var client = factory.CreateClient();
+
+        using var response = await client.GetAsync("/models");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var items = json.RootElement.EnumerateArray().ToList();
+
+        // 项数 == Models 节键数（多/少一项都说明端点清单与配置脱钩）
+        Assert.Equal(expected.Length, items.Count);
+
+        var defaults = new List<string>();
+        for (var i = 0; i < expected.Length; i++)
+        {
+            var e = expected[i];
+            // isDefault 口径与工厂一致 = OrdinalIgnoreCase 相等（见 AguiModelClientFactory.IsDefault）
+            AssertModel(items[i], e.Key, e.Name!, e.Model!,
+                expectedDefault: string.Equals(e.Key, activeModel, StringComparison.OrdinalIgnoreCase));
+
+            if (items[i].GetProperty("isDefault").GetBoolean())
+                defaults.Add(e.Key);
+        }
+
+        // 恰好一项 isDefault，且该项 id == ActiveModel（ActiveModel 指向不存在的键会得到零默认项 → 此处红）
+        Assert.Single(defaults);
+        Assert.Equal(activeModel, defaults[0]);
+    }
+
     [Fact]
     public async Task GetModels_TwoConsecutiveCallsWithDifferentUnrelatedHeaders_ReturnSameOrderAsFactoryList()
     {
