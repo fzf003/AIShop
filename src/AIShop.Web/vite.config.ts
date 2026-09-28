@@ -8,9 +8,13 @@ import { defineConfig } from 'vitest/config'
  * - `src/AIShop.AguiHost/Properties/launchSettings.json` 会覆盖端口（历史实测 64321/64322）；
  * - Aspire 运行时会另分配端口（以面板显示为准）。
  * 因此这里给一个可预期的缺省值，起 AguiHost 时用
- * `dotnet run --project src/AIShop.AguiHost -- --urls http://localhost:5299` 对齐即可。
+ * `dotnet run --project src/AIShop.AguiHost -- --urls http://localhost:64322` 对齐即可。
+ *
+ * ⚠️ 本值（`:13`）与上面的示例命令**必须一致**：两者曾长期不一致（示例写 5299、值写 64322），
+ * 属于盘点条目 L16 记录的「端口契约不一致」。改端口时请一并改这两处，
+ * 并同步 `launchSettings.json`。
  */
-const AGUI_HOST = 'http://localhost:5299'
+const AGUI_HOST = 'http://localhost:64322'
 
 export default defineConfig({
   plugins: [react()],
