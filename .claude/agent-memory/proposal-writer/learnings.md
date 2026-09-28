@@ -10,6 +10,10 @@
 - **is_final**：`chat_messages` 表的轮次终点标记（`ChatMessageRecord.IsFinal: bool`，列 `is_final` INTEGER 0/1）。`AnyAsync(m => m.RunId==runId && m.IsFinal)` 即该轮完成。写入双路径：Store 内判定为主（末条纯文本 assistant 即迭代结束）+ Run 后兜底补标（`MarkRoundFinalAsync(runId)`）。语义以「终点标记」为准——通常为最终回复行，仅调工具场景可为 tool/FCC 行
 - **未完成轮**：组内无 `is_final=true` 行的轮（FICC 迭代耗尽 / 异常中断 / 仅调工具未输出文本）。压缩时整组保留，受独立上限 5 个约束（超限强制压最旧并记 Warning）；计数口径只统计 `run_id` 非空且 ≥2 行的组，`run_id=NULL` 历史行不计入
 - **整轮整切压缩**：压缩由「按条数硬切保留最新 50 条 + ±1 相邻推断保护」改为「按 run_id 整轮整切」——最近 K=12 个完整轮次（纯文本轮 2 行/轮、含工具轮约 4 行/轮，容量约等于旧 50 条）+ 条数硬上限 4K + 未完成轮上限 5。整轮同压使 FCC↔tool 配对结构性不分离，删除 ±1 推断逻辑
+- **混合检索（Hybrid Search / RRF）**：`search_product` 由纯关键词匹配升级为「关键词命中 ∪ 向量召回」的混合检索，.NET 层 **Reciprocal Rank Fusion** 融合排序；官方 `SqliteCollection` 尚未实现 `IKeywordHybridSearchable`（源码注释明确），需自实现（rag-feature）
+- **ProductDocument**：首期 RAG 语料模型，由 18 条商品种子结构化字段（Name/Category/Tags/描述）拼接为描述文本，独立 record + collection，供 `search_knowledge` 检索（rag-feature）
+- **通用 RAG 底座（每领域 record + collection）**：基于 `Microsoft.Extensions.VectorData`，每领域一个 record + collection，`options.Filter` 按领域过滤；新增异构知识源（订单/售后 FAQ）只需新增 record 类型 + collection 注册，零表结构改动（rag-feature）
+- **bge-small-zh-v1.5（ONNX 384 维）**：本地 embedding 模型，经 `IEmbeddingGenerator` 生成向量，离线可运行，不依赖外部 Embedding API（rag-feature）
 
 ## 架构约束
 
@@ -20,6 +24,8 @@
 - IUnitOfWork 在仅有一个仓储的项目规模下属于过度抽象，SaveChangesAsync 直接在仓储接口上定义
 - 全局异常处理中间件 UseExceptionHandler 必须在所有 MapXxxEndpoints 之前注册
 - McpServer 作为独立可执行程序允许例外引用 Infrastructure
+- **Infrastructure 依赖边界待裁决（RAG）**：`IEmbeddingGenerator` 来自 `Microsoft.Extensions.AI` 栈、`VectorStore` 抽象来自 `Microsoft.Extensions.VectorData`，与「Infrastructure 不得依赖 Microsoft.Extensions.AI.*」约束冲突；推荐解释为约束本意是防 Agent 编排包（`Microsoft.Agents.*`），Embedding/向量检索属数据基础设施能力归 Infrastructure 合理，需 design 阶段裁决（rag-feature）
+- **Core 零依赖 + VectorData 标注**：`[VectorStoreVector]` 等属性标签若标注在 Core 模型上需确认对 Core 的包依赖影响；或由 Infrastructure 侧 DTO 映射规避（rag-feature）
 
 ## 设计模式
 
@@ -29,6 +35,8 @@
 - **Agent Singleton 优化模式**：对于无状态 AI Agent，将所有依赖验证为 Singleton 后改为 AddSingleton 注册，可避免每次请求重建 Agent 的昂贵开销（200-500ms），降幅达 100x
 - **合并变更模式**：两个互不干扰的优化方向（纯前端 + 纯后端）可合并为一个变更管理，降低管理开销，仍允许独立实施和独立验证
 - **轮次边界数据模型模式**：需要「识别数据分组 + 判断分组完成」时，用「分组标识（只分组不排序）+ 完成标记（显式终点）」两列正交互补——`run_id` 回答「属于哪一轮」，`is_final` 回答「是否正常收尾」，查询退化为 `AnyAsync` 简单谓词，不再依赖运行时推断或相邻 id 推断。配套：分组值由上层（Agent）生成写会话状态（StateBag）经多次写入共享；写入口收敛到单一 Provider（`MarkRoundFinalAsync`）；压缩按分组整切以保配对结构性完整
+- **RRF 混合融合模式**：官方 provider 未实现 HybridSearch 时，用 .NET 层「关键词路 + 向量路分别召回 → Reciprocal Rank Fusion 融合」补齐，改动可控、provider 无关（rag-feature）
+- **每领域 record + collection 可扩展模式**：异构知识源扩展 = 新增 record 类型 + collection 注册 + `options.Filter` 过滤，不改既有表结构；以「新增 FAQ 只需加一个 collection」作为可扩展性验收口径（rag-feature）
 
 ## 常用备选方案
 
@@ -43,3 +51,6 @@
 - **轮次计数器（round 数字自增）替代 Guid**：被否定理由为 Store 每次新开 DbContext，会话级计数器需读上一轮再自增、多次 FICC 迭代易错；Guid 只分组不排序更简单
 - **仅扩展 ±1 相邻推断多保护几个边界**：被否定理由为无法吸收历史碎片（双重 FICC 重复消息、孤儿 tool 让相邻 id 不是配对另一半），推断规则越堆越难维护；按 run_id 组内配对是结构性解法
 - **schema 迁移用强制清库替代幂等 ALTER**：被否定理由为与「代码兼容」承诺冲突；幂等 ALTER（`PRAGMA table_info` + `ADD COLUMN`，SQLite 无 ADD COLUMN IF NOT EXISTS）成本低，可与「部署清库」叠加（代码兼容为防御，清库得干净数据）
+- **自研表 + 内存余弦**：被否定理由为官方已有成熟抽象，且单表 `rag_documents` 无法承载异构知识源（违背通用底座可扩展诉求）（rag-feature）
+- **sqlite-vec 裸用**：官方 provider（`CommunityToolkit.VectorData.SqliteVec`）已封装 vec0 虚拟表，无需手写 SQL（rag-feature）
+- **pgvector**：生产可扩展但首期引入运维成本，与「SQLite 本地开发」路径不符（rag-feature）
