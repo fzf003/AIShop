@@ -14,8 +14,8 @@ PreToolUse hook: 强制流程顺序，同时支持三种 flow-mode：
 
   quick (轻量改动快速通道，见 matt-workflow SKILL.md "快速路径判定")
       不要求任何规划产出物，但实现代码仍必须来自 @implementer，
-      且仍然拦截 git commit / openspec archive（见 check_commit_gate.py /
-      check_archive_gate.py），避免"跳过规划"被滥用成"跳过质量门槛"。
+      且仍然拦截 git commit / openspec archive（见 check_commitgate.py /
+      check_archiregate.py），避免"跳过规划"被滥用成"跳过质量门槛"。
 
 flow-mode 通过 openspec/changes/{id}/.flow-mode 文件声明，内容为
 "openspec" / "matt-pocock" / "quick" 三选一（去除首尾空白）。
