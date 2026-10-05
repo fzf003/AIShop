@@ -39,6 +39,8 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>cec96733-9c44-43c8-9fb5-f0d4b7058233</UserSecretsId>
+    <!-- R7：冻结标记。本工程为冻结归档的老链宿主，新功能一律落 AIShop.AguiHost -->
+    <Description>【已冻结归档】AIShop 老链宿主（手写 SSE + 静态前端）。无真实使用方，AppHost 不再启动它，新增功能一律落 AIShop.AguiHost。工程保留仅为可编译与历史追溯。</Description>
   </PropertyGroup>
 
   <ItemGroup>

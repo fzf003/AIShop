@@ -9,15 +9,21 @@
 
 ```
 Vertical Slice Architecture
-依赖方向: Core ← Infrastructure ← Api
+依赖方向: Core ← Infrastructure ← Service ← Api         # 老链，已冻结归档
+          Core ← Infrastructure ← Service ← AguiHost     # 现行主链
 
 src/
-  AIShop.Api/              # Minimal API 端点 + Agent 定义
+  AIShop.Api/              # 【已冻结归档】老链宿主（手写 SSE + 静态前端），无真实使用方，不再启动
+  AIShop.AguiHost/         # 【现行主链】AG-UI 宿主，新功能一律落此处
+  AIShop.Service/          # Agent 编排 / 模型适配（老链部分随 Api 冻结；Agui/ 属新链）
   AIShop.Core/             # 实体、接口、领域逻辑 (零依赖)
   AIShop.Infrastructure/   # EF Core、仓储、外部服务实现
 tests/
   AIShop.Api.Tests/        # xUnit 集成/单元测试
 ```
+
+> **Api 已冻结归档，新功能一律落 AguiHost。**
+> **冻结约束（R3）**：`src/AIShop.Api/**` 与 `src/AIShop.Service` 老链部分（`ShoppingAssistantAgent`、`ModelRouter`、`Clients/`、`Providers/`）此后不得修改——Api 要求「保留且可编译」，其编译依赖老链，改任一处都可能让 Api 编译失败。`src/AIShop.Service/Agui/**` 属新链，不受约束，仍可调整。
 
 ## 技术栈
 

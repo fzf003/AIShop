@@ -5,17 +5,22 @@
 ## 架构
 
 - **架构模式**：Vertical Slice Architecture（垂直切片架构）
-- **基本分层**：Core（核心） → Infrastructure（基础设施） → Api（API 层）
+- **基本分层**：Core（核心） → Infrastructure（基础设施） → Service（服务） → Api（API 层，**已冻结归档**）；现行主链经 Service 到 `AIShop.AguiHost`
 - **依赖方向**：始终指向 Core（Core 不依赖任何项目）
 
 ```
 src/
-  AIShop.Api/              # Minimal API 端点、Agent 定义
+  AIShop.Api/              # 【已冻结归档】老链宿主（手写 SSE + 静态前端），无真实使用方，不再启动
+  AIShop.AguiHost/         # 【现行主链】AG-UI 宿主，新功能一律落此处
+  AIShop.Service/          # Agent 编排 / 模型适配（老链部分随 Api 冻结；Agui/ 属新链）
   AIShop.Core/             # 实体、接口、领域逻辑
   AIShop.Infrastructure/   # EF Core、仓储实现、外部服务
 tests/
   AIShop.Api.Tests/        # xUnit 集成/单元测试
 ```
+
+> **Api 已冻结归档，新功能一律落 AguiHost。**
+> **冻结约束（R3）**：`src/AIShop.Api/**` 与 `src/AIShop.Service` 老链部分（`ShoppingAssistantAgent`、`ModelRouter`、`Clients/`、`Providers/`）此后不得修改——Api 要求「保留且可编译」，其编译依赖老链，改任一处都可能让 Api 编译失败。`src/AIShop.Service/Agui/**` 属新链，不受约束，仍可调整。
 
 ## 技术栈
 
@@ -70,6 +75,7 @@ tests/
 6. **MAF 代码必须参考 skill**：涉及 `ChatClientAgent`/`AIContextProvider`/`Workflow` 等 MAF API 时，先读取对应 `.codex/skills/maf-reference/references/*.md` 获取正确签名，再生成代码
 7. **遵循 Agent 开发历程最佳实践**：参考 `docs/agent-journey-best-practices.md`，遵循渐进式复杂度原则（从简单模式开始，仅在需要时增加复杂度）
 8. **温度设置**：Agent 应用使用 `Temperature = 0.2f`（范围 0–0.3），创意任务用 0.7–1.0
+9. **文件编辑容错**：apply_patch 在含 BOM（UTF-8 with BOM）或特殊 Unicode 字符的文件上可能反复匹配失败。**重试不超过 1 次**，失败后立即切换到 Python（readlines + writelines，显式 encoding=utf-8-sig）直接编辑，不要在 patch 工具上消耗轮次。用行号定位插入点，用 in / repr() 验证匹配，而不是靠肉眼比对中文上下文。
 
 ## 自定义 Agent
 
