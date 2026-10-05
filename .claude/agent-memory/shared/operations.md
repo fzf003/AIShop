@@ -117,3 +117,11 @@
 | 经验 | 说明 |
 |------|------|
 | **反证前把待改文件 `cp` 到仓库内 `obj/<job>bak/`，还原用逐字节 `cp` + `md5sum` 双证** | 产品代码反证（临时加 override 造红）后必须还原：`obj/` 备份不受并行会话清理影响（`%TEMP%` 会），`core.autocrlf` 下 `git status` 的 ` M` 可能是伪影，权威判据 = `md5sum` 与备份一致 + `git diff -- src/<file>` 为空。反证**删/改代码即可**，**勿注释**（本项目 SonarAnalyzer S125 会把注释掉的代码判为编译错误） |
+
+## 测试报告「绿的性质」判据（2026-10-05，api-freeze-2026-10-05）
+
+| 经验 | 说明 |
+|------|------|
+| **「工作区绿」vs「提交态绿」必须显式声明，判据 = 工作区有无「编译影响面」的未提交改动** | 本变更 3 commit 已在 HEAD，但工作区另有非本变更的未提交改动，其中 **`Directory.Packages.props` 属编译影响面**（包版本漂移）→ `dotnet build`/`dotnet test` 跑的是工作区版本 → 严格为**工作区绿**。判据：`git status --short` 里若只有 `.md`/`.gitignore` 等非代码文件，可视作「提交态等价」；一旦出现 `.props`/`.cs`/`.csproj`/`.csx` 等**影响编译**的文件，就必须声明为「工作区绿」，且不做「clean checkout ↔ 工作区」差异对照（那需要另起 worktree）。归档方若要求提交态证据，另案处理 |
+| **「覆盖来源现存量」会随后续变更漂移，引用 handoff 的计数前先实测** | 本变更 T2 handoff 记 `AguiCartEndpointTests` 为「5 用例」，tester 实测 **16**（后续 agui-client-support T13–T15 新增购物车 REST 用例）。handoff 是当时快照，报告写「现存量」须以本次 `--filter` 实测为准，并注明与 handoff 的差异来源 |
+| **验证型报告可复现「行为级」证据（进程 spawned 列表），比源码静态断言有力** | 「AppHost 不再启动 api 资源」除源码 grep（无 `AddProject<AIShop_Api>`）外，可启动 AppHost 后 `tasklist \| grep AIShop.` 看**实际 spawned 的 exe**（本次仅 `AIShop.AguiHost.exe`+`AIShop.McpServer.exe`，无 `AIShop.Api.exe`）——静态证明「无编排调用」，进程证明「真没起」，两者互补 |

@@ -3,6 +3,7 @@ src/**/bin/
 src/**/obj/
 tests/**/bin/
 tests/**/obj/
+/obj/
 
 .vs/
 *.user
@@ -43,7 +44,6 @@ src/AIShop.Infrastructure/Rag/Models/
 /tools/
 .vs/
 .teach/
-docs/design
 docs/implementation
 openspec/
 

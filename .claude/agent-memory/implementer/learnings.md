@@ -1757,3 +1757,37 @@
 | **追加整块新小节时，块的「首行空行」会与文件已有的尾部空行合并 → 净增行数比块本身少 1** | 本次 §十二 块字面 21 行（含首空行），文件原已以 `。\n\n` 结尾（末尾已有 1 空行）。用 `old_string=末行文本`（不含尾换行）+ `new_string=末行文本 + "\n" + 块` 落地后，实测 `wc -l` 仅 **+20**。**这不是丢内容**——核对方式是 `sed -n 'N,Mp'` 逐行打印追加区、数实际行数与块一致，别只信 wc 差值对不上「预期 +21」就以为错了 |
 | **翻转 checkbox 的账要「两头发对」** | 校验口径：`[x]` 增量 = 翻转条数 + **新块里自带的 `[x]` 条数**（本次 7 + 2 = 9），`[ ]` 减量 = 恰好翻转条数（本次 7→0）。只看 `[x]` 增量会误判「多翻了 2 条」；两个数一起看才自洽。另用 `diff 备份 新 \| grep -c "^[<>]"` 与「改动行数 × 2 + 纯新增行」对账（本次 7×2+20=34）可证无误伤 |
 | **`tasks.md` 在 `openspec/` 内（`.gitignore`）→ 改动不入 git** | `git status` 看不到 `openspec/changes/**/tasks.md` 的改动，属正常；**没有 git 恢复点**，改前必须 `cp` 到仓库内 `obj/<job>bak/`（`%TEMP%` 会被并行会话清）。本次改前 `md5sum` 双证备份逐字节一致 |
+
+## api-freeze-2026-10-05 T1（2026-10-05，AppHost 移除 api 资源）
+
+| 经验 | 说明 |
+|------|------|
+| **Aspire AppHost 删 `AddProject<T>("x")` 后其 `ProjectReference` 不构成悬空告警** | Aspire 从 ProjectReference 生成的 `{Project}_` 类型（如 `AIShop_Api`）即使删掉唯一调用点、无人引用，**也不触发 CS 未使用告警**（生成代码在 obj/，非用户源码）→ `TreatWarningsAsErrors` 下 build 仍 0/0。故「移除资源」与「移除 csproj 引用」应**解耦**：以 build 结果判定，能过则按最小改动**保留**引用，避免过度改动 csproj（本工单实测：保留引用，仅删 Program.cs 1 行，build 0/0） |
+| **多 agent 共享 index 时用 `git commit -m "..." -- <pathspec>` 规避误收他人工件，且比 `git restore --staged` 更不侵入** | 提交前 `git diff --cached --name-only` 发现索引区已有**他人工单**暂存的文件（本次：两个 `docs/design/Api宿主冻结归档-*.md`）。`git add` 自己的文件后若直接 `git commit`（读索引快照）会把他人文件一并提交。**正解 = pathspec 提交**（`git commit -m "..." -- <本工单文件>`），不读索引快照、精确提交本工单文件，**且完全不扰动他人的暂存状态**（`git restore --staged` 会撤掉对方的暂存、可能打断对方流程）。commit 后 `git diff --cached --name-only` 复核他人文件仍在暂存区 |
+
+## api-freeze-2026-10-05 T2（2026-10-05，删除 7 个 Api 集成测试）
+
+| 经验 | 说明 |
+|------|------|
+| **删测试文件的「自包含」预检：xUnit `[CollectionDefinition]` 与被删类同文件才安全** | 删除 xUnit 测试类前，若该类有 `[Collection("X")]`，必须确认集合名 `X` 的 `[CollectionDefinition]` **没有定义在别的（保留的）文件里**（或反之被删文件定义了别人引用的集合名）。跨文件共享的集合名会让删除产生语义断裂。**做法**：`grep -rn "CollectionDefinition\|\[Collection" <测试目录>` 全目录核对。本次 7 个待删文件中 5 个自带 `[CollectionDefinition]`（同文件），保留的 `PreferenceWriteHostedServiceTests` 亦自带，无跨文件共享 → 删除安全 |
+| **删除 `.cs` 的提交无法借 `check_commitgate.py` 的「纯文档跳过」通路** | `check_commitgate.py` 的 `staged_has_code_files()` 读 `git diff --cached --name-only` 里有无所列代码后缀（`.cs` 等）→ **删除 `.cs` 也算代码文件** → 仍会触发全量 `dotnet build` + `dotnet test`。想靠「只改文档」绕开 300s 门禁对本类「删测试」工单**无效**（`D` 态 `.cs` 一样命中） |
+| **含 `.cs` 的提交在并行负载下会周期性触发 commitgate 300s 超时（非用例失败）** | 本工单 commit 前**两次**被拦，回执均为「命令超时（>300s）」（**不是** `dotnet test 未通过` 的用例失败）。根因 = 并行 agent 负载（本机同见 2 个 `claude.exe` + 十余个 `dotnet.exe`）：同款 `dotnet test --nologo --verbosity quiet` 本机实测一次 **408s**，其中 `AguiHost.Tests.dll` 单个 dll 由空闲时 2m2s 膨胀到 **5m59s**。**处置**（对齐 operations.md）：原样重试（第 3 次即通过），勿改 hook、勿 `--no-verify`（对 PreToolUse hook 无效）；把实测耗时写进 handoff 报备 |
+| **翻转 tasks.md checkbox 时，Edit 的 `old_string` 必须包含 `- [ ]` 前缀本身** | 本次两次 Edit「想追加行尾备注」但 `old_string` 只从备注锚点（checkbox 前缀**之后**的文本）开始 → 备注追加成功、`[ ]` **却没被翻转**（行尾加了 `**T2 实施备注**` 但盒子仍是 `- [ ]`），形成「有备注无勾选」的隐性漏勾。**判据**：落盘后 `grep -n "\- \[ \]"` 逐行核对，别只看备注是否出现。**更稳做法**（见下方 B2 经验）：整行逐字作 `old_string`（含 `- [ ]`），`new_string` = 翻转后的整行 + 备注，一次 Edit 同时改两处 |
+
+## api-freeze-2026-10-05 T3（2026-10-05，冻结标记 csproj + 两文档）
+
+| 经验 | 说明 |
+|------|------|
+| **公共文档（CLAUDE.md / AGENTS.md）的「增量追加」可用 `git diff` 自证未覆盖既有未提交改动** | 约束要求「只增量追加、保留既有未提交改动」时，改完跑 `git diff -- <file>`：应**同时**看到「我的新增 hunk」与「既有的未提交 hunk」并存。AGENTS.md 本次既有改动（L73「文件编辑容错」条目）与我的架构段改动两端并存 → 覆盖未发生。若只见其一即为覆盖事故 |
+| **`<Description>` 的 `#` / `←` 等特殊字符在 csproj 中无需转义，但中文全角标点须原样** | `<Description>` 是惰性 MSBuild 属性（不被 SDK 消费、不参与编译）→ `TreatWarningsAsErrors` 下 build 仍 0/0。文案含「（）【】」全角标点直接写在 XML 文本节点内安全（非属性值、无需实体转义） |
+| **架构文档「依赖方向」补新层时，必须同步 `src/` 树，否则冻结清单成悬空指代** | R3 冻结面显式含 `src/AIShop.Service` 老链，但原文档依赖行「Core ← Infrastructure ← Api」与 `src/` 树都没有 Service → 直接引用会悬空。正确做法 = 依赖行拆「老链（已冻结）」+「现行主链（AguiHost）」两行，且 `src/` 树补 Service 条目。**教训**：文档里的枚举（冻结清单）引用到某层/某目录时，须核对该层是否已在同一文档的架构段登记 |
+
+## api-freeze-2026-10-05 T4（2026-10-05，全量终验·只读核对）
+
+| 经验 | 说明 |
+|------|------|
+| **验证型工单：「验收动作的副作用」≠「需求被破坏」——先读 spec 的 `Given` 前提再判 `Then`** | R1 手动启动核对（`dotnet run --project src/AIShop.Api`）会顺带写 `src/AIShop.Api/aishop.rag.db`（RAG 索引预热，进程内 `_indexed` 标志重置 → fresh 启动必跑一次幂等重建：**mtime 变、size 不变**），而 R6 字面写「两库停止写入、成为历史快照」。**未违规**——R6 场景 2 的 `Given` 是「**AppHost 运行期间**不对两库产生新写入路径」，手工启动 api 不在其适用前提内。**判据**：核对保留项时先把 `Given` 当适用范围读，避免把「验收动作本身的副作用」误报为「需求被破坏」。`aishop.db` 同理但本次 mtime 未变（迁移「已是最新」+ 播种判空，无新写） |
+| **R1 手动启动能走「全链非降级」就别走降级分支——`.env` 有 Key 即可** | 工单预留的「缺 Key → 按监听状态降级判定」是兜底，不是默认。`src/AIShop.Api/.env` 含三模型 Key 时全链可启动（日志 `Application started` + 迁移「No migrations were applied」+ 播种复用既有库），应以**完整成功**取证而非降级，否则留给归档方一个不必要的疑点 |
+| **长跑的验证态产物（日志/备份）重定向到仓库内 `obj/`，不用 `%TEMP%`** | `%TEMP%` 下的文件会被并行 Claude 进程启动清理删掉（本仓已知坑）；`obj/` 既在 `.gitignore` 内（不进 `git status`）又不受清理影响。本次 `dotnet run ... > obj/t4-verify/api-run.log 2>&1` 全程留存可用 |
+| **手动启动的进程清理：PID 级 `taskkill //F //PID`，清理后双验端口 + 进程名** | 取 PID = `netstat -ano | grep ':5206 .*LISTENING'`；kill 后必须再验 `netstat ... grep ':5206'`（应无监听）+ `tasklist //FI "IMAGENAME eq AIShop.Api.exe"`（应「没有运行的任务」）。**勿用 `taskkill //IM dotnet.exe`**（会误杀 MSBuild nodeReuse）。强制 kill 会让后台 `dotnet run` 包装进程以 exit 1 结束，属预期 |
+| **tasks.md 翻转 checkbox 的正确 Edit 形态：整行（含 `- [ ]`）作 `old_string`** | 参照本文件 T2 行的教训（`old_string` 只从 checkbox 之后的备注锚点起 → 备注加了、`[ ]` 没翻）。本次 T4 7 条全部用**整行** `old_string`（`  - [ ] (预计 …) …`）→ `new_string` = 翻转后整行 + `　**T4 实施备注**：…`，一次 Edit 同时改盒子与追加备注，零漏勾。**落盘自检**：`grep -c -- '- \[ \]' <tasks.md>`（注意**缩进**的不能只匹配行首，去掉 `^`）应为 0（实际本次剩 1 = 文档头部 L5 的规则说明文字，非任务） |
