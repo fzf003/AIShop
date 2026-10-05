@@ -1791,3 +1791,12 @@
 | **长跑的验证态产物（日志/备份）重定向到仓库内 `obj/`，不用 `%TEMP%`** | `%TEMP%` 下的文件会被并行 Claude 进程启动清理删掉（本仓已知坑）；`obj/` 既在 `.gitignore` 内（不进 `git status`）又不受清理影响。本次 `dotnet run ... > obj/t4-verify/api-run.log 2>&1` 全程留存可用 |
 | **手动启动的进程清理：PID 级 `taskkill //F //PID`，清理后双验端口 + 进程名** | 取 PID = `netstat -ano | grep ':5206 .*LISTENING'`；kill 后必须再验 `netstat ... grep ':5206'`（应无监听）+ `tasklist //FI "IMAGENAME eq AIShop.Api.exe"`（应「没有运行的任务」）。**勿用 `taskkill //IM dotnet.exe`**（会误杀 MSBuild nodeReuse）。强制 kill 会让后台 `dotnet run` 包装进程以 exit 1 结束，属预期 |
 | **tasks.md 翻转 checkbox 的正确 Edit 形态：整行（含 `- [ ]`）作 `old_string`** | 参照本文件 T2 行的教训（`old_string` 只从 checkbox 之后的备注锚点起 → 备注加了、`[ ]` 没翻）。本次 T4 7 条全部用**整行** `old_string`（`  - [ ] (预计 …) …`）→ `new_string` = 翻转后整行 + `　**T4 实施备注**：…`，一次 Edit 同时改盒子与追加备注，零漏勾。**落盘自检**：`grep -c -- '- \[ \]' <tasks.md>`（注意**缩进**的不能只匹配行首，去掉 `^`）应为 0（实际本次剩 1 = 文档头部 L5 的规则说明文字，非任务） |
+
+## api-freeze-2026-10-05 / Step 7.5 修复工单 T5（2026-10-05）
+
+| 经验 | 说明 |
+|------|------|
+| **`git commit -m "..." -- <pathspec>` 对「未跟踪的新文件」不生效** | pathspec 形式只提交「git 已知的路径」的当前内容；新文件未 `git add` 会报 `did not match any file(s) known to git` 或静默不包含。正确序列 = 先 `git add <path>`（新文件必须），再 `git commit -m "..." -- <path>`（pathspec 仍保证「只提交该文件」，即使 index 里有他人工件）。本项目多 agent 共享 index，这条同时满足「新文件入库」与「不误收他人在途改动」 |
+| **「等值替换」反证：改动前先 `cp` 到 `obj/<job>bak/`，每轮改后 `--filter` 跑相关类、记录具体红项，再从备份 `cp` 还原 + `md5sum` 双证** | 本次两轮覆盖两类独立边界：① 字面量替换（`MaxProductId 18→19`）→ 红「越界 id 」断言（2 红）；② 正则字符类缩减（`[\s:：为是]→[\s:：]`）→ 红「格式变体」断言（1 红）。两轮分别证伪不同边界类别，比单轮更可信。`obj/` 备份不受 `%TEMP%` 清理影响；`core.autocrlf=true` 下 `git status` 的 ` M` 可能是换行伪影，**权威判据 = `md5sum` 与备份一致 + `git diff --stat` 空** |
+| **文件级 pathspec 提交后 `git show --stat HEAD` 复核** | 确认 commit 只含预期文件（本次 `1 file changed, 160 insertions`）。`git status --short <dir>` 提交后应为空（新文件已入库、产品文件零残留改动） |
+| **tasks.md 追加修复工单：@implementer 用 `Edit` 定点插入（未被 hook 拦）** | 本次以 3 次 `Edit` 追加 T5 小节 + §四 DAG 节点 + §五 工时行，全部成功；未用 `Write` 整写（避免 500KB 级文件静默丢内容）。改后自检：`grep -n "^### T"`（T1–T5 齐全）+ `grep -c "\[x\]"`（所有真 checkbox 均 [x]；唯一 `[ ]` 是规则文案里的说明字面量，非 checkbox）。**注意**：checkbox 行有 2 空格缩进，`grep -c "^- \[x\]"` 会得 0，须用 `grep -c "\[x\]"` |
