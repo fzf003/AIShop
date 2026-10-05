@@ -5,13 +5,13 @@
 
 | # | 需求（原话） | 认领变更 | 形态 | 状态 | 备注 |
 |---|---|---|---|---|---|
-| R1 | AppHost 不再启动 `api` 资源，只保留 `mcp` 与 `agui` | `api-freeze-2026-10-05` | 单变更 | 未交付 | |
-| R2 | `src/AIShop.Api` 全量保留：不移除工程、不移出 sln、继续参与编译 | `api-freeze-2026-10-05` | 单变更 | 未交付 | 保持现状 |
-| R3 | Api 及其编译依赖的老链代码，此后不得修改 | `api-freeze-2026-10-05` | 单变更 | 未交付 | 约束型；Service 老链连带锁定 |
-| R4 | 删除 7 个 Api 集成测试（含 1 个重复文件） | `api-freeze-2026-10-05` | 单变更 | 未交付 | |
-| R5 | 保留其余约 22 个非 Api 测试 | `api-freeze-2026-10-05` | 单变更 | 未交付 | 保持现状 |
-| R6 | `aishop.db` / `aishop.rag.db` / `wwwroot/index.html` 保留 | `api-freeze-2026-10-05` | 单变更 | 未交付 | 保持现状 |
-| R7 | 加冻结标记 | `api-freeze-2026-10-05` | 单变更 | 未交付 | 形式：csproj `<Description>` + `CLAUDE.md` + `AGENTS.md` |
+| R1 | AppHost 不再启动 `api` 资源，只保留 `mcp` 与 `agui` | `api-freeze-2026-10-05` | 单变更 | 已交付 | |
+| R2 | `src/AIShop.Api` 全量保留：不移除工程、不移出 sln、继续参与编译 | `api-freeze-2026-10-05` | 单变更 | 已交付 | 保持现状 |
+| R3 | Api 及其编译依赖的老链代码，此后不得修改 | `api-freeze-2026-10-05` | 单变更 | 已交付 | 约束型；Service 老链连带锁定 |
+| R4 | 删除 7 个 Api 集成测试（含 1 个重复文件） | `api-freeze-2026-10-05` | 单变更 | 已交付 | |
+| R5 | 保留其余约 22 个非 Api 测试 | `api-freeze-2026-10-05` | 单变更 | 已交付 | 保持现状 |
+| R6 | `aishop.db` / `aishop.rag.db` / `wwwroot/index.html` 保留 | `api-freeze-2026-10-05` | 单变更 | 已交付 | 保持现状 |
+| R7 | 加冻结标记 | `api-freeze-2026-10-05` | 单变更 | 已交付 | 形式：csproj `<Description>` + `CLAUDE.md` + `AGENTS.md` |
 
 ---
 
