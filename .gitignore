@@ -44,8 +44,15 @@ src/AIShop.Infrastructure/Rag/Models/
 /tools/
 .vs/
 .teach/
+docs/design
 docs/implementation
 openspec/
+
+# Python 缓存（hooks 等脚本运行产生）
+__pycache__/
+
+# 测试目录下混入的 .claude（如 AguiHost.Tests/.claude）
+tests/**/.claude/
 
 # 前端（src/AIShop.Web，独立 npm 工程）：依赖与构建产物不入库
 node_modules/
